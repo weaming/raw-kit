@@ -46,3 +46,7 @@ func NewNeteaseCloudMusicMetadata(meta string) *NeteaseClousMusicMetadata {
 
 	return metaData
 }
+
+func GetAlbumPicUrl(meta string) string {
+	return gjson.Get(meta, "albumPic").String()
+}

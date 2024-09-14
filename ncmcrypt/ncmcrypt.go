@@ -8,7 +8,9 @@ import (
 	"github.com/bogem/id3v2/v2"
 	"github.com/go-flac/flacpicture"
 	"github.com/go-flac/go-flac"
+	"io"
 	"ncmdump/utils"
+	"net/http"
 	"os"
 )
 
@@ -34,6 +36,7 @@ type NeteaseCloudMusic struct {
 	mFileStream   *os.File
 	mKeyBox       [256]byte
 	mMetadata     *NeteaseClousMusicMetadata
+	mAlbumPicUrl  string
 }
 
 func (ncm *NeteaseCloudMusic) read(buffer *[]byte, size int) int {
@@ -289,6 +292,9 @@ func NewNeteaseCloudMusic(filePath string) (*NeteaseCloudMusic, error) {
 		// escape `music:`
 		mMetadataString := string(modifyDecryptData[6:])
 
+		// extract the album pic url
+		ncm.mAlbumPicUrl = GetAlbumPicUrl(mMetadataString)
+
 		ncm.mMetadata = NewNeteaseCloudMusicMetadata(mMetadataString)
 	}
 
@@ -314,7 +320,18 @@ func NewNeteaseCloudMusic(filePath string) (*NeteaseCloudMusic, error) {
 	if coverFrameDataLen > 0 {
 		ncm.read(&ncm.mImageData, coverFrameDataLen)
 	} else {
-		fmt.Printf("[Warning] Missing album: '%s'\n", filePath)
+		// get the album pic from url
+		resp, err := http.Get(ncm.mAlbumPicUrl)
+		if err != nil {
+		}
+		if resp != nil {
+			if resp.StatusCode == http.StatusOK {
+				bodyBytes, err := io.ReadAll(resp.Body)
+				if err != nil {
+				}
+				ncm.mImageData = bodyBytes
+			}
+		}
 	}
 
 	ncm.mFileStream.Seek(int64(coverFrameLenInt)-int64(coverFrameDataLen), 1)
