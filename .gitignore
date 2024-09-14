@@ -12,7 +12,11 @@
 *.so
 *.dylib
 
+# app sepecific
 ncmdump
+*.ncm
+*.mp3
+*.flac
 
 # config files
 config.yaml
