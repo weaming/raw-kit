@@ -16,7 +16,7 @@ func processFile(filePath string) error {
 		utils.ErrorPrintfln("Reading '%s' failed: '%s'", filePath, err.Error())
 		return err
 	}
-	dump, err := currentFile.Dump()
+	dump, err := currentFile.Dump(filepath.Dir(filePath))
 	if err != nil {
 		utils.ErrorPrintfln("Processing '%s' failed: '%s'", filePath, err.Error())
 		return err

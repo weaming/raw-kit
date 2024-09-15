@@ -12,6 +12,7 @@ import (
 	"ncmdump/utils"
 	"net/http"
 	"os"
+	"path/filepath"
 )
 
 type NcmFormat = string
@@ -110,7 +111,7 @@ func (ncm *NeteaseCloudMusic) mimeType() string {
 	return "image/jpeg"
 }
 
-func (ncm *NeteaseCloudMusic) Dump() (bool, error) {
+func (ncm *NeteaseCloudMusic) Dump(targetDir string) (bool, error) {
 	ncm.mDumpFilePath = ncm.mFilePath
 	var outputStream *os.File
 
@@ -136,6 +137,9 @@ func (ncm *NeteaseCloudMusic) Dump() (bool, error) {
 			} else {
 				ncm.mFormat = Flac
 				ncm.mDumpFilePath = utils.ReplaceExtension(ncm.mDumpFilePath, ".flac")
+			}
+			if targetDir != "" { // change save dir
+				ncm.mDumpFilePath = filepath.Join(targetDir, filepath.Base(ncm.mDumpFilePath))
 			}
 			findFormatFlag = true
 
