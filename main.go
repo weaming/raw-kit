@@ -22,7 +22,7 @@ func processFile(filePath string) error {
 		return err
 	}
 	if dump {
-		metadata, _ := currentFile.FixMetadata()
+		metadata, err := currentFile.FixMetadata()
 		if !metadata {
 			utils.WarningPrintfln("Fix metadata for '%s' failed: '%s'", filePath, err.Error())
 			return err
