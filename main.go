@@ -2,8 +2,8 @@ package main
 
 import (
 	"fmt"
-	"ncmdump/ncmcrypt"
-	"ncmdump/utils"
+	"github.com/taurusxin/ncmdump-go/ncmcrypt"
+	"github.com/taurusxin/ncmdump-go/utils"
 	"os"
 	"path/filepath"
 
@@ -22,7 +22,7 @@ func processFile(filePath string) error {
 		return err
 	}
 	if dump {
-		metadata, err := currentFile.FixMetadata()
+		metadata, err := currentFile.FixMetadata(true)
 		if !metadata {
 			utils.WarningPrintfln("Fix metadata for '%s' failed: '%s'", filePath, err.Error())
 			return err

@@ -8,8 +8,8 @@ import (
 	"github.com/bogem/id3v2/v2"
 	"github.com/go-flac/flacpicture"
 	"github.com/go-flac/go-flac"
+	"github.com/taurusxin/ncmdump-go/utils"
 	"io"
-	"ncmdump/utils"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -157,7 +157,23 @@ func (ncm *NeteaseCloudMusic) Dump(targetDir string) (bool, error) {
 	return true, nil
 }
 
-func (ncm *NeteaseCloudMusic) FixMetadata() (bool, error) {
+func (ncm *NeteaseCloudMusic) FixMetadata(fetchAlbumImageFromRemote bool) (bool, error) {
+	if fetchAlbumImageFromRemote {
+		// get the album pic from url
+		resp, err := http.Get(ncm.mAlbumPicUrl)
+		if err != nil {
+			return false, err
+		}
+		if resp != nil {
+			if resp.StatusCode == http.StatusOK {
+				bodyBytes, err := io.ReadAll(resp.Body)
+				if err != nil {
+					return false, err
+				}
+				ncm.mImageData = bodyBytes
+			}
+		}
+	}
 	if ncm.mFormat == Mp3 {
 		audioFile, err := id3v2.Open(ncm.mDumpFilePath, id3v2.Options{Parse: true})
 		if err != nil {
@@ -323,19 +339,6 @@ func NewNeteaseCloudMusic(filePath string) (*NeteaseCloudMusic, error) {
 
 	if coverFrameDataLen > 0 {
 		ncm.read(&ncm.mImageData, coverFrameDataLen)
-	} else {
-		// get the album pic from url
-		resp, err := http.Get(ncm.mAlbumPicUrl)
-		if err != nil {
-		}
-		if resp != nil {
-			if resp.StatusCode == http.StatusOK {
-				bodyBytes, err := io.ReadAll(resp.Body)
-				if err != nil {
-				}
-				ncm.mImageData = bodyBytes
-			}
-		}
 	}
 
 	ncm.mFileStream.Seek(int64(coverFrameLenInt)-int64(coverFrameDataLen), 1)
