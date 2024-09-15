@@ -2,30 +2,32 @@ package main
 
 import (
 	"fmt"
-	flag "github.com/spf13/pflag"
 	"ncmdump/ncmcrypt"
+	"ncmdump/utils"
 	"os"
 	"path/filepath"
+
+	flag "github.com/spf13/pflag"
 )
 
 func processFile(filePath string) error {
 	currentFile, err := ncmcrypt.NewNeteaseCloudMusic(filePath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[Error] Reading '%s' failed: '%s'\n", filePath, err.Error())
+		utils.ErrorPrintfln("Reading '%s' failed: '%s'", filePath, err.Error())
 		return err
 	}
 	dump, err := currentFile.Dump()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[Error] Processing '%s' failed: '%s'\n", filePath, err.Error())
+		utils.ErrorPrintfln("Processing '%s' failed: '%s'", filePath, err.Error())
 		return err
 	}
 	if dump {
 		metadata, _ := currentFile.FixMetadata()
 		if !metadata {
-			fmt.Fprintf(os.Stderr, "[Warning] Fix metadata for '%s' failed: '%s'\n", filePath, err.Error())
+			utils.WarningPrintfln("Fix metadata for '%s' failed: '%s'", filePath, err.Error())
 			return err
 		}
-		fmt.Printf("[Done] '%s' -> '%s'\n", filePath, currentFile.GetDumpFilePath())
+		utils.DonePrintfln("'%s' -> '%s'", filePath, currentFile.GetDumpFilePath())
 	}
 	return nil
 }
@@ -56,19 +58,19 @@ func main() {
 		// check if the folder exists
 		info, err := os.Stat(folderPath)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[Error] Unable to access directory '%s'", folderPath)
+			utils.ErrorPrintfln("Unable to access directory: '%s'", folderPath)
 			os.Exit(1)
 		}
 
 		if !info.IsDir() {
-			fmt.Fprintf(os.Stderr, "[Error] '%s' is not a directory", folderPath)
+			utils.ErrorPrintfln("Not a directory: '%s'", folderPath)
 			os.Exit(1)
 		}
 
 		// dump files in the folder
 		files, err := os.ReadDir(folderPath)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[Error] Unable to read directory '%s'", folderPath)
+			utils.ErrorPrintfln("Unable to read directory: '%s'", folderPath)
 			os.Exit(1)
 		}
 
