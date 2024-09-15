@@ -13,18 +13,18 @@ import (
 func processFile(filePath string) error {
 	currentFile, err := ncmcrypt.NewNeteaseCloudMusic(filePath)
 	if err != nil {
-		utils.ErrorPrintfln("Reading '%s' failed: '%s'", filePath, err.Error())
+		utils.ErrorPrintfln("Reading '%s' failed: %s", filePath, err.Error())
 		return err
 	}
 	dump, err := currentFile.Dump(filepath.Dir(filePath))
 	if err != nil {
-		utils.ErrorPrintfln("Processing '%s' failed: '%s'", filePath, err.Error())
+		utils.ErrorPrintfln("Processing '%s' failed: %s", filePath, err.Error())
 		return err
 	}
 	if dump {
 		metadata, err := currentFile.FixMetadata(true)
 		if !metadata {
-			utils.WarningPrintfln("Fix metadata for '%s' failed: '%s'", filePath, err.Error())
+			utils.WarningPrintfln("Fix metadata for '%s' failed: %s", filePath, err.Error())
 			return err
 		}
 		utils.DonePrintfln("'%s' -> '%s'", filePath, currentFile.GetDumpFilePath())
@@ -63,7 +63,7 @@ func main() {
 		}
 
 		if !info.IsDir() {
-			utils.ErrorPrintfln("Not a directory: '%s'", folderPath)
+			utils.ErrorPrintfln("Not a directory: %s", folderPath)
 			os.Exit(1)
 		}
 
