@@ -111,6 +111,7 @@ func (ncm *NeteaseCloudMusic) mimeType() string {
 	return "image/jpeg"
 }
 
+// Dump encrypted ncm file to normal music file. If `targetDir` is "", the converted file will be saved to the original directory.
 func (ncm *NeteaseCloudMusic) Dump(targetDir string) (bool, error) {
 	ncm.mDumpFilePath = ncm.mFilePath
 	var outputStream *os.File
@@ -157,6 +158,8 @@ func (ncm *NeteaseCloudMusic) Dump(targetDir string) (bool, error) {
 	return true, nil
 }
 
+// FixMetadata will fix the missing metadata for target music file, the source of the metadata comes from origin ncm file.
+// Since NeteaseCloudMusic version 3.0, the album cover image is no longer embedded in the ncm file. If the parameter is true, it means downloading the image from the NetEase server and embedding it into the target music file (network connection required)
 func (ncm *NeteaseCloudMusic) FixMetadata(fetchAlbumImageFromRemote bool) (bool, error) {
 	if fetchAlbumImageFromRemote {
 		// get the album pic from url
@@ -226,10 +229,16 @@ func (ncm *NeteaseCloudMusic) FixMetadata(fetchAlbumImageFromRemote bool) (bool,
 	return true, nil
 }
 
+// GetDumpFilePath returns the absolute path of dumped music file
 func (ncm *NeteaseCloudMusic) GetDumpFilePath() string {
-	return ncm.mDumpFilePath
+	path, err := filepath.Abs(ncm.mDumpFilePath)
+	if err != nil {
+		return ncm.mDumpFilePath
+	}
+	return path
 }
 
+// NewNeteaseCloudMusic returns a new NeteaseCloudMusic instance, if the format of the file is incorrect, the error will be returned.
 func NewNeteaseCloudMusic(filePath string) (*NeteaseCloudMusic, error) {
 	ncm := &NeteaseCloudMusic{
 		sCoreKey:   [17]byte{0x68, 0x7A, 0x48, 0x52, 0x41, 0x6D, 0x73, 0x6F, 0x35, 0x6B, 0x49, 0x6E, 0x62, 0x61, 0x78, 0x57, 0},
