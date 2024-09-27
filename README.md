@@ -2,19 +2,52 @@
 
 基于 https://github.com/taurusxin/ncmdump 的 Golang 移植版
 
-支持网易云音乐最新的 3.x 版本
+支持网易云音乐最新的 3.x 版本，但需要注意：从该版本开始网易云音乐不再在 ncm 文件中内置封面图片，本工具支持从网易服务器上自动下载对应歌曲的封面图并写入到最终的音乐文件中
 
 ## 使用方法
 
-```shell
-# 处理单个或多个文件
-ncmdump test1.ncm test2.ncm...
+使用 `-h` 或 `--help` 参数来打印帮助
 
-# 处理 Music 文件夹下的所有文件
-ncmdump -d Music
+```shell
+ncmdump -h
 ```
 
-注意：网易云音乐从 3.0 版本开始不再在 ncm 文件中嵌入封面图片，本工具支持从网易服务器上自动下载对应歌曲的封面图并写入到最终的音乐文件中
+使用 `-v` 或 `--version` 参数来打印版本信息
+
+```shell
+ncmdump -v
+```
+
+处理单个或多个文件
+
+```shell
+ncmdump 1.ncm 2.ncm...
+```
+
+使用 `-d` 参数来指定一个文件夹，对文件夹下的所有以 ncm 为扩展名的文件进行批量处理
+
+```shell
+ncmdump -d source_dir
+```
+
+使用 `-r` 配合 `-d` 参数来递归处理文件夹下的所有以 ncm 为扩展名的文件
+
+```shell
+ncmdump -d source_dir -r
+```
+
+使用 `-o` 参数来指定输出目录，将转换后的文件输出到指定目录，该参数支持与 `-r` 参数一起使用
+
+```shell
+# 处理单个或多个文件并输出到指定目录
+ncmdump 1.ncm 2.ncm -o output_dir
+
+# 处理文件夹下的所有以 ncm 为扩展名并输出到指定目录，不包含子文件夹
+ncmdump -d source_dir -o output_dir
+
+# 递归处理文件夹并输出到指定目录，并保留目录结构
+ncmdump -d source_dir -o output_dir -r
+```
 
 ## 开发
 
