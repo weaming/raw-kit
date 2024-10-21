@@ -161,7 +161,8 @@ func (ncm *NeteaseCloudMusic) Dump(targetDir string) (bool, error) {
 // FixMetadata will fix the missing metadata for target music file, the source of the metadata comes from origin ncm file.
 // Since NeteaseCloudMusic version 3.0, the album cover image is no longer embedded in the ncm file. If the parameter is true, it means downloading the image from the NetEase server and embedding it into the target music file (network connection required)
 func (ncm *NeteaseCloudMusic) FixMetadata(fetchAlbumImageFromRemote bool) (bool, error) {
-	if fetchAlbumImageFromRemote {
+	// only fetch album image from remote when it's not embedded in the ncm file
+	if len(ncm.mImageData) <= 0 && fetchAlbumImageFromRemote {
 		// get the album pic from url
 		resp, err := http.Get(ncm.mAlbumPicUrl)
 		if err != nil {
