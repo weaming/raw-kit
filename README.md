@@ -6,7 +6,7 @@
 
 ## 安装
 
-你可以使用去 [releases](https://git.taurusxin.com/taurusxin/ncmdump-go/releases/latest) 下载最新版预编译好的二进制文件，或者如果你也可以用包管理器来安装：
+你可以使用去 [releases](https://git.taurusxin.com/taurusxin/ncmdump-go/releases/latest) 下载最新版预编译好的二进制文件，或者你也可以用包管理器来安装
 
 ```shell
 # Windows Scoop
