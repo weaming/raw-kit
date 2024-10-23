@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-VERSION=1.6.0
+VERSION=1.7.0
 
 # Clean up the build directory
 rm -rf build
