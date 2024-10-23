@@ -4,6 +4,18 @@
 
 支持网易云音乐最新的 3.x 版本，但需要注意：从该版本开始网易云音乐不再在 ncm 文件中内置封面图片，本工具支持从网易服务器上自动下载对应歌曲的封面图并写入到最终的音乐文件中
 
+## 安装
+
+你可以使用去 [releases](https://git.taurusxin.com/taurusxin/ncmdump-go/releases/latest) 下载最新版预编译好的二进制文件，或者如果你也可以用包管理器来安装：
+
+```shell
+# Windows Scoop
+scoop bucket add taurusxin https://git.taurusxin.com/taurusxin/scoop-bucket.git  # 添加 scoop 源
+scoop install ncmdump-go # 安装 ncmdump-go
+
+# macOS & Linux 之后会支持
+```
+
 ## 使用方法
 
 使用 `-h` 或 `--help` 参数来打印帮助
