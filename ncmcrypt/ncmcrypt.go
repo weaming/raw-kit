@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/bogem/id3v2/v2"
 	"github.com/go-flac/flacpicture"
+	"github.com/go-flac/flacvorbis"
 	"github.com/go-flac/go-flac"
 	"github.com/taurusxin/ncmdump-go/utils"
 	"io"
@@ -217,12 +218,36 @@ func (ncm *NeteaseCloudMusic) FixMetadata(fetchAlbumImageFromRemote bool) (bool,
 			pictureMeta := pic.Marshal()
 			audioFile.Meta = append(audioFile.Meta, &pictureMeta)
 		}
-		generalMeta := &flac.MetaDataBlock{
-			Type: flac.VorbisComment,
-			Data: []byte(fmt.Sprintf("title=%s\nartist=%s\nalbum=%s", ncm.mMetadata.mName, ncm.mMetadata.mArtist, ncm.mMetadata.mAlbum)),
+
+		var cmts *flacvorbis.MetaDataBlockVorbisComment
+		var cmtIdx int
+		for idx, meta := range audioFile.Meta {
+			if meta.Type == flac.VorbisComment {
+				cmts, err = flacvorbis.ParseFromMetaDataBlock(*meta)
+				cmtIdx = idx
+				if err != nil {
+					return false, err
+				}
+			}
 		}
-		audioFile.Meta = append(audioFile.Meta, generalMeta)
+		if cmts == nil && cmtIdx > 0 {
+			cmts = flacvorbis.New()
+		}
+
+		_ = cmts.Add(flacvorbis.FIELD_TITLE, ncm.mMetadata.mName)
+		_ = cmts.Add(flacvorbis.FIELD_ARTIST, ncm.mMetadata.mArtist)
+		_ = cmts.Add(flacvorbis.FIELD_ALBUM, ncm.mMetadata.mAlbum)
+
+		cmtsmeta := cmts.Marshal()
+
+		if cmtIdx > 0 {
+			audioFile.Meta[cmtIdx] = &cmtsmeta
+		} else {
+			audioFile.Meta = append(audioFile.Meta, &cmtsmeta)
+		}
+
 		err = audioFile.Save(ncm.mDumpFilePath)
+
 		if err != nil {
 			return false, err
 		}
