@@ -185,6 +185,7 @@ func (ncm *NeteaseCloudMusic) FixMetadata(fetchAlbumImageFromRemote bool) (bool,
 			return false, err
 		}
 		defer audioFile.Close()
+		audioFile.SetDefaultEncoding(id3v2.EncodingUTF8)
 		audioFile.SetTitle(ncm.mMetadata.mName)
 		audioFile.SetArtist(ncm.mMetadata.mArtist)
 		audioFile.SetAlbum(ncm.mMetadata.mAlbum)
