@@ -66,7 +66,7 @@ ncmdump-go -d source_dir -o output_dir -r
 使用 go module 下载 ncmdump-go 包
 
 ```shell
-go get -u github.com/taurusxin/ncmdump-go
+go get -u git.taurusxin.com/taurusxin/ncmdump-go
 ```
 
 导入并使用
@@ -76,7 +76,7 @@ package main
 
 import (
 	"fmt"
-	"github.com/taurusxin/ncmdump-go/ncmcrypt"
+	"git.taurusxin.com/taurusxin/ncmdump-go/ncmcrypt"
 )
 
 func main() {

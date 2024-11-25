@@ -9,7 +9,7 @@ import (
 	"github.com/go-flac/flacpicture"
 	"github.com/go-flac/flacvorbis"
 	"github.com/go-flac/go-flac"
-	"github.com/taurusxin/ncmdump-go/utils"
+	"git.taurusxin.com/taurusxin/ncmdump-go/utils"
 	"io"
 	"net/http"
 	"os"

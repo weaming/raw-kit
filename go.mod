@@ -1,4 +1,4 @@
-module github.com/taurusxin/ncmdump-go
+module git.taurusxin.com/taurusxin/ncmdump-go
 
 go 1.23.0
 

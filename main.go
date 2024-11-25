@@ -2,8 +2,8 @@ package main
 
 import (
 	"fmt"
-	"github.com/taurusxin/ncmdump-go/ncmcrypt"
-	"github.com/taurusxin/ncmdump-go/utils"
+	"git.taurusxin.com/taurusxin/ncmdump-go/ncmcrypt"
+	"git.taurusxin.com/taurusxin/ncmdump-go/utils"
 	"os"
 	"path/filepath"
 
