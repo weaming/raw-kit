@@ -235,9 +235,15 @@ func (ncm *NeteaseCloudMusic) FixMetadata(fetchAlbumImageFromRemote bool) (bool,
 			cmts = flacvorbis.New()
 		}
 
-		_ = cmts.Add(flacvorbis.FIELD_TITLE, ncm.mMetadata.mName)
-		_ = cmts.Add(flacvorbis.FIELD_ARTIST, ncm.mMetadata.mArtist)
-		_ = cmts.Add(flacvorbis.FIELD_ALBUM, ncm.mMetadata.mAlbum)
+		if res, _ := cmts.Get(flacvorbis.FIELD_TITLE); res[0] != ncm.mMetadata.mName {
+			_ = cmts.Add(flacvorbis.FIELD_TITLE, ncm.mMetadata.mName)
+		}
+		if res, _ := cmts.Get(flacvorbis.FIELD_ARTIST); res[0] != ncm.mMetadata.mArtist {
+			_ = cmts.Add(flacvorbis.FIELD_ARTIST, ncm.mMetadata.mArtist)
+		}
+		if res, _ := cmts.Get(flacvorbis.FIELD_ALBUM); res[0] != ncm.mMetadata.mAlbum {
+			_ = cmts.Add(flacvorbis.FIELD_ALBUM, ncm.mMetadata.mAlbum)
+		}
 
 		cmtsmeta := cmts.Marshal()
 
