@@ -1,0 +1,20 @@
+# Xcode
+build/
+DerivedData/
+xcuserdata/
+*.xcuserstate
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# 依赖管理
+Pods/
+Carthage/Build/
+
+# macOS
+.DS_Store
+._*
+
+# 临时文档
+claude-docs/
