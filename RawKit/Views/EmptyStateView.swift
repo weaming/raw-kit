@@ -12,9 +12,10 @@ struct EmptyStateView: View {
                     .font(.title2)
                     .fontWeight(.medium)
 
-                Text("从左侧列表选择图像,或拖放文件到此处")
+                Text("从左侧列表选择图像、双击此处添加文件或拖放文件到此处")
                     .font(.body)
                     .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

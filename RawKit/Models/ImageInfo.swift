@@ -9,6 +9,8 @@ struct ImageInfo: Identifiable {
     let fileSize: Int64
     let dimensions: CGSize?
     let thumbnail: NSImage?
+    let colorSpace: String?
+    let colorProfile: String?
 
     init(url: URL) {
         self.url = url
@@ -17,6 +19,10 @@ struct ImageInfo: Identifiable {
         fileSize = Self.getFileSize(for: url)
         dimensions = Self.getImageDimensions(for: url)
         thumbnail = Self.generateThumbnail(for: url)
+
+        let colorInfo = Self.getColorSpaceInfo(for: url)
+        colorSpace = colorInfo.space
+        colorProfile = colorInfo.profile
     }
 
     private static func getFileSize(for url: URL) -> Int64 {
@@ -58,6 +64,67 @@ struct ImageInfo: Identifiable {
         }
 
         return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+    }
+
+    private static func getColorSpaceInfo(for url: URL) -> (space: String?, profile: String?) {
+        guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0,
+                                                                  nil) as? [CFString: Any]
+        else {
+            return (nil, nil)
+        }
+
+        var spaceName: String?
+        var profileName: String?
+
+        if let colorModel = properties[kCGImagePropertyColorModel] as? String {
+            spaceName = colorModel
+        }
+
+        if let profileNameValue = properties[kCGImagePropertyProfileName] as? String {
+            profileName = profileNameValue
+        }
+
+        if let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, nil),
+           let colorSpace = cgImage.colorSpace
+        {
+            if spaceName == nil {
+                spaceName = getColorSpaceName(colorSpace)
+            }
+
+            if profileName == nil {
+                profileName = colorSpace.name as String?
+            }
+        }
+
+        return (spaceName, profileName)
+    }
+
+    private static func getColorSpaceName(_ colorSpace: CGColorSpace) -> String {
+        if colorSpace.model == .rgb {
+            if let name = colorSpace.name as String? {
+                if name.contains("Display P3") || name.contains("P3") {
+                    return "Display P3"
+                } else if name.contains("Adobe RGB") || name.contains("AdobeRGB") {
+                    return "Adobe RGB"
+                } else if name.contains("ProPhoto") {
+                    return "ProPhoto RGB"
+                } else if name.contains("sRGB") {
+                    return "sRGB"
+                } else if name.contains("Generic RGB") {
+                    return "Generic RGB"
+                }
+            }
+            return "RGB"
+        } else if colorSpace.model == .cmyk {
+            return "CMYK"
+        } else if colorSpace.model == .monochrome {
+            return "灰度"
+        } else if colorSpace.model == .lab {
+            return "LAB"
+        }
+
+        return "未知"
     }
 }
 

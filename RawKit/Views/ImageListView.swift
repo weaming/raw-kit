@@ -73,7 +73,7 @@ struct KeyHandlingListView: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: NSScrollView, context: Context) {
-        guard let tableView = nsView.documentView as? NSTableView else { return }
+        guard nsView.documentView is NSTableView else { return }
         context.coordinator.updateData(images: images, selectedIndices: selectedIndices)
     }
 

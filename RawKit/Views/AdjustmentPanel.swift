@@ -2,7 +2,9 @@ import SwiftUI
 
 struct ResizableAdjustmentPanel: View {
     @Binding var adjustments: ImageAdjustments
+    let ciImage: CIImage?
     @Binding var width: CGFloat
+    @Binding var whiteBalancePickMode: CurveAdjustmentView.PickMode
     @State private var expandedSection: AdjustmentSection? = .basic
     @State private var isDragging = false
 
@@ -17,7 +19,7 @@ struct ResizableAdjustmentPanel: View {
                         .onChanged { value in
                             isDragging = true
                             let newWidth = width - value.translation.width
-                            width = max(200, min(500, newWidth))
+                            width = max(360, min(700, newWidth))
                         }
                         .onEnded { _ in
                             isDragging = false
@@ -31,15 +33,21 @@ struct ResizableAdjustmentPanel: View {
                     }
                 }
 
-            AdjustmentPanel(adjustments: $adjustments)
-                .frame(width: width)
+            AdjustmentPanel(
+                adjustments: $adjustments,
+                ciImage: ciImage,
+                whiteBalancePickMode: $whiteBalancePickMode
+            )
+            .frame(width: width)
         }
     }
 }
 
 struct AdjustmentPanel: View {
     @Binding var adjustments: ImageAdjustments
-    @State private var expandedSection: AdjustmentSection? = .basic
+    let ciImage: CIImage?
+    @Binding var whiteBalancePickMode: CurveAdjustmentView.PickMode
+    @State private var expandedSections: Set<AdjustmentSection> = [.basic, .color]
 
     var body: some View {
         VStack(spacing: 0) {
@@ -64,22 +72,32 @@ struct AdjustmentPanel: View {
             ScrollView {
                 VStack(spacing: 0) {
                     AdjustmentSection.basic.view(
-                        isExpanded: expandedSection == .basic,
-                        onToggle: { toggleSection(.basic) }
+                        isExpanded: expandedSections.contains(.basic),
+                        hasChanges: adjustments.hasBasicAdjustments,
+                        onToggle: { toggleSection(.basic) },
+                        onReset: { adjustments.resetBasic() }
                     ) {
                         BasicAdjustmentsView(adjustments: $adjustments)
                     }
 
                     AdjustmentSection.color.view(
-                        isExpanded: expandedSection == .color,
-                        onToggle: { toggleSection(.color) }
+                        isExpanded: expandedSections.contains(.color),
+                        hasChanges: adjustments.hasColorAdjustments,
+                        onToggle: { toggleSection(.color) },
+                        onReset: { adjustments.resetColor() }
                     ) {
-                        ColorAdjustmentsView(adjustments: $adjustments)
+                        ColorAdjustmentsView(
+                            adjustments: $adjustments,
+                            ciImage: ciImage,
+                            whiteBalancePickMode: $whiteBalancePickMode
+                        )
                     }
 
                     AdjustmentSection.detail.view(
-                        isExpanded: expandedSection == .detail,
-                        onToggle: { toggleSection(.detail) }
+                        isExpanded: expandedSections.contains(.detail),
+                        hasChanges: adjustments.hasDetailAdjustments,
+                        onToggle: { toggleSection(.detail) },
+                        onReset: { adjustments.resetDetail() }
                     ) {
                         DetailAdjustmentsView(adjustments: $adjustments)
                     }
@@ -89,11 +107,15 @@ struct AdjustmentPanel: View {
     }
 
     private func toggleSection(_ section: AdjustmentSection) {
-        expandedSection = expandedSection == section ? nil : section
+        if expandedSections.contains(section) {
+            expandedSections.remove(section)
+        } else {
+            expandedSections.insert(section)
+        }
     }
 }
 
-enum AdjustmentSection {
+enum AdjustmentSection: Hashable {
     case basic
     case color
     case detail
@@ -108,27 +130,40 @@ enum AdjustmentSection {
 
     func view(
         isExpanded: Bool,
+        hasChanges: Bool,
         onToggle: @escaping () -> Void,
+        onReset: @escaping () -> Void,
         @ViewBuilder content: () -> some View
     ) -> some View {
         VStack(spacing: 0) {
-            Button(action: onToggle) {
-                HStack {
-                    Text(title)
-                        .font(.subheadline)
-                        .fontWeight(.medium)
+            HStack(spacing: 8) {
+                Button(action: onToggle) {
+                    HStack(spacing: 8) {
+                        Text(title)
+                            .font(.subheadline)
+                            .fontWeight(.medium)
 
-                    Spacer()
+                        Spacer()
 
-                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                        if hasChanges {
+                            Button(action: onReset) {
+                                Image(systemName: "arrow.uturn.backward")
+                                    .font(.body)
+                            }
+                            .buttonStyle(.borderless)
+                            .help("重置此组")
+                        }
+
+                        Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .contentShape(Rectangle())
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 10)
-                .contentShape(Rectangle())
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
             .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
 
             if isExpanded {
@@ -154,6 +189,13 @@ struct BasicAdjustmentsView: View {
             )
 
             SliderControl(
+                title: "线性曝光",
+                value: $adjustments.linearExposure,
+                range: ImageAdjustments.linearExposureRange,
+                step: 0.1
+            )
+
+            SliderControl(
                 title: "亮度",
                 value: $adjustments.brightness,
                 range: ImageAdjustments.brightnessRange,
@@ -164,6 +206,13 @@ struct BasicAdjustmentsView: View {
                 title: "对比度",
                 value: $adjustments.contrast,
                 range: ImageAdjustments.contrastRange,
+                step: 0.01
+            )
+
+            SliderControl(
+                title: "白色",
+                value: $adjustments.whites,
+                range: ImageAdjustments.whitesRange,
                 step: 0.01
             )
 
@@ -180,6 +229,13 @@ struct BasicAdjustmentsView: View {
                 range: ImageAdjustments.shadowsRange,
                 step: 0.01
             )
+
+            SliderControl(
+                title: "黑色",
+                value: $adjustments.blacks,
+                range: ImageAdjustments.blacksRange,
+                step: 0.01
+            )
         }
         .padding(.horizontal, 16)
     }
@@ -187,22 +243,33 @@ struct BasicAdjustmentsView: View {
 
 struct ColorAdjustmentsView: View {
     @Binding var adjustments: ImageAdjustments
+    let ciImage: CIImage?
+    @Binding var whiteBalancePickMode: CurveAdjustmentView.PickMode
 
     var body: some View {
         VStack(spacing: 16) {
-            SliderControl(
-                title: "饱和度",
-                value: $adjustments.saturation,
-                range: ImageAdjustments.saturationRange,
-                step: 0.01
-            )
+            // 白平衡取色器
+            VStack(alignment: .leading, spacing: 8) {
+                Button(action: {
+                    whiteBalancePickMode = whiteBalancePickMode == .whiteBalance ? .none :
+                        .whiteBalance
+                }) {
+                    HStack {
+                        Image(systemName: "eyedropper")
+                        Text(whiteBalancePickMode == .whiteBalance ? "取消(w)" : "白平衡(w)")
+                    }
+                }
+                .buttonStyle(.bordered)
+                .keyboardShortcut("w", modifiers: [])
 
-            SliderControl(
-                title: "自然饱和度",
-                value: $adjustments.vibrance,
-                range: ImageAdjustments.vibranceRange,
-                step: 0.01
-            )
+                if whiteBalancePickMode == .whiteBalance {
+                    Text("点击图片中的白色或中性灰色区域")
+                        .font(.caption)
+                        .foregroundColor(.blue)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 16)
 
             SliderControl(
                 title: "色温",
@@ -217,8 +284,52 @@ struct ColorAdjustmentsView: View {
                 range: ImageAdjustments.tintRange,
                 step: 1
             )
+
+            Divider()
+                .padding(.vertical, 8)
+
+            SliderControl(
+                title: "饱和度",
+                value: $adjustments.saturation,
+                range: ImageAdjustments.saturationRange,
+                step: 0.01
+            )
+
+            SliderControl(
+                title: "自然饱和度",
+                value: $adjustments.vibrance,
+                range: ImageAdjustments.vibranceRange,
+                step: 0.01
+            )
+
+            Divider()
+                .padding(.vertical, 8)
+
+            // 曲线调整
+            WhiteBalanceAndCurveView(
+                adjustments: $adjustments,
+                ciImage: ciImage,
+                pickMode: $whiteBalancePickMode
+            )
         }
         .padding(.horizontal, 16)
+    }
+}
+
+// 白平衡和曲线调整包装视图
+// 将 CurveAdjustmentView 嵌入到面板中
+struct WhiteBalanceAndCurveView: View {
+    @Binding var adjustments: ImageAdjustments
+    let ciImage: CIImage?
+    @Binding var pickMode: CurveAdjustmentView.PickMode
+
+    var body: some View {
+        CurveAdjustmentView(
+            adjustments: $adjustments,
+            ciImage: ciImage,
+            pickMode: $pickMode
+        )
+        .padding(0)
     }
 }
 
@@ -227,6 +338,20 @@ struct DetailAdjustmentsView: View {
 
     var body: some View {
         VStack(spacing: 16) {
+            SliderControl(
+                title: "清晰度",
+                value: $adjustments.clarity,
+                range: ImageAdjustments.clarityRange,
+                step: 0.01
+            )
+
+            SliderControl(
+                title: "去雾",
+                value: $adjustments.dehaze,
+                range: ImageAdjustments.dehazeRange,
+                step: 0.01
+            )
+
             SliderControl(
                 title: "锐化",
                 value: $adjustments.sharpness,
@@ -254,20 +379,25 @@ struct SliderControl: View {
                 Spacer()
 
                 Text(formatValue(value))
-                    .font(.caption)
+                    .font(.subheadline)
                     .foregroundColor(.secondary)
                     .monospacedDigit()
+                    .frame(minWidth: 50, alignment: .trailing)
             }
 
             HStack(spacing: 8) {
                 Slider(value: $value, in: range, step: step)
+                    .onTapGesture(count: 2) {
+                        // 双击滑块重置为默认值
+                        resetToDefault()
+                    }
 
                 Button(action: { resetToDefault() }) {
                     Image(systemName: "arrow.uturn.backward")
-                        .font(.caption)
+                        .font(.body)
                 }
                 .buttonStyle(.borderless)
-                .frame(width: 20, height: 20)
+                .frame(width: 24, height: 24)
                 .opacity(isDefaultValue ? 0.3 : 1.0)
                 .disabled(isDefaultValue)
             }
@@ -289,11 +419,16 @@ struct SliderControl: View {
 
         switch title {
         case "曝光": return value == defaultAdjustments.exposure
+        case "线性曝光": return value == defaultAdjustments.linearExposure
         case "亮度": return value == defaultAdjustments.brightness
         case "对比度": return value == defaultAdjustments.contrast
         case "饱和度": return value == defaultAdjustments.saturation
         case "高光": return value == defaultAdjustments.highlights
         case "阴影": return value == defaultAdjustments.shadows
+        case "白色": return value == defaultAdjustments.whites
+        case "黑色": return value == defaultAdjustments.blacks
+        case "清晰度": return value == defaultAdjustments.clarity
+        case "去雾": return value == defaultAdjustments.dehaze
         case "色温": return value == defaultAdjustments.temperature
         case "色调": return value == defaultAdjustments.tint
         case "自然饱和度": return value == defaultAdjustments.vibrance
@@ -307,11 +442,16 @@ struct SliderControl: View {
 
         switch title {
         case "曝光": value = defaultAdjustments.exposure
+        case "线性曝光": value = defaultAdjustments.linearExposure
         case "亮度": value = defaultAdjustments.brightness
         case "对比度": value = defaultAdjustments.contrast
         case "饱和度": value = defaultAdjustments.saturation
         case "高光": value = defaultAdjustments.highlights
         case "阴影": value = defaultAdjustments.shadows
+        case "白色": value = defaultAdjustments.whites
+        case "黑色": value = defaultAdjustments.blacks
+        case "清晰度": value = defaultAdjustments.clarity
+        case "去雾": value = defaultAdjustments.dehaze
         case "色温": value = defaultAdjustments.temperature
         case "色调": value = defaultAdjustments.tint
         case "自然饱和度": value = defaultAdjustments.vibrance

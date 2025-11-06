@@ -190,8 +190,17 @@ class ImageManager: ObservableObject {
     private func allowedContentTypes() -> [UTType] {
         var types: [UTType] = [.jpeg, .png, .tiff]
 
-        let rawTypes = ["public.camera-raw-image", "com.sony.arw-raw-image"]
-        types.append(contentsOf: rawTypes.compactMap { UTType($0) })
+        // 添加通用 RAW 图片类型
+        if let rawType = UTType("public.camera-raw-image") {
+            types.append(rawType)
+        }
+
+        // 通过文件扩展名添加所有支持的 RAW 格式
+        for ext in rawExtensions {
+            if let utType = UTType(filenameExtension: ext) {
+                types.append(utType)
+            }
+        }
 
         return types
     }

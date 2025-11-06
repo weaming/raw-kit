@@ -5,7 +5,7 @@ struct ContentView: View {
     @State private var selectedIndices: Set<Int> = []
     @State private var displayedIndex: Int?
     @State private var adjustmentsCache: [UUID: ImageAdjustments] = [:]
-    @State private var sidebarWidth: CGFloat = 280
+    @State private var sidebarWidth: CGFloat = 400
 
     var body: some View {
         NavigationSplitView {
@@ -35,10 +35,20 @@ struct ContentView: View {
                 .id(imageInfo.id)
             } else {
                 EmptyStateView()
+                    .onTapGesture(count: 2) {
+                        imageManager.openFileDialog()
+                    }
                     .onDrop(of: [.fileURL], isTargeted: nil) { providers in
                         handleDrop(providers: providers)
                         return true
                     }
+            }
+        }
+        .onChange(of: imageManager.images.count) { oldCount, newCount in
+            // 当从空列表添加图片时，自动显示第一张
+            if oldCount == 0, newCount > 0, displayedIndex == nil {
+                displayedIndex = 0
+                selectedIndices = [0]
             }
         }
     }
