@@ -59,6 +59,15 @@ struct CurveAdjustment: Equatable {
         }
     }
 
+    mutating func updatePoint(id: UUID, input: Double, output: Double) {
+        if let index = points.firstIndex(where: { $0.id == id }) {
+            points[index].input = max(0, min(1, input))
+            points[index].output = max(0, min(1, output))
+            // 重新排序以保持输入值的顺序
+            points.sort { $0.input < $1.input }
+        }
+    }
+
     mutating func removePoint(id: UUID) {
         points.removeAll { $0.id == id }
     }
@@ -305,10 +314,11 @@ struct CurveAdjustment: Equatable {
         for i in 0 ..< (n - 1) {
             if x >= points[i].input, x <= points[i + 1].input {
                 let dx = x - points[i].input
-                return a[i] + b[i] * dx + c[i] * dx * dx + d[i] * dx * dx * dx
+                let result = a[i] + b[i] * dx + c[i] * dx * dx + d[i] * dx * dx * dx
+                return max(0, min(1, result))
             }
         }
 
-        return x
+        return max(0, min(1, x))
     }
 }

@@ -1,6 +1,18 @@
 import CoreImage
 import SwiftUI
 
+struct PixelInfo: Equatable {
+    var gammaRGB: (r: Double, g: Double, b: Double)
+    var linearRGB: (r: Double, g: Double, b: Double)
+    var hsl: (h: Double, s: Double, l: Double)
+
+    static func == (lhs: PixelInfo, rhs: PixelInfo) -> Bool {
+        lhs.gammaRGB == rhs.gammaRGB &&
+            lhs.linearRGB == rhs.linearRGB &&
+            lhs.hsl == rhs.hsl
+    }
+}
+
 struct ImageDetailView: View {
     let imageInfo: ImageInfo
     let savedAdjustments: ImageAdjustments?
@@ -8,6 +20,7 @@ struct ImageDetailView: View {
     let onAdjustmentsChanged: (ImageAdjustments) -> Void
 
     @State private var originalCIImage: CIImage?
+    @State private var adjustedCIImage: CIImage?
     @State private var displayImage: NSImage?
     @State private var isLoading = true
     @State private var loadingStage: LoadingStage = .thumbnail
@@ -15,6 +28,9 @@ struct ImageDetailView: View {
     @State private var adjustments = ImageAdjustments.default
     @State private var showAdjustmentPanel = true
     @State private var whiteBalancePickMode: CurveAdjustmentView.PickMode = .none
+    @StateObject private var history = AdjustmentHistory()
+    @State private var isUpdatingFromHistory = false
+    @State private var currentPixelInfo: PixelInfo?
 
     enum LoadingStage {
         case thumbnail
@@ -25,29 +41,8 @@ struct ImageDetailView: View {
     var body: some View {
         HStack(spacing: 0) {
             VStack(spacing: 0) {
-                if isLoading {
-                    ProgressView("加载中...")
-                        .progressViewStyle(.circular)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if let image = displayImage {
-                    ClickableImageView(
-                        image: image,
-                        scale: $scale,
-                        onColorPick: whiteBalancePickMode != .none ? handleColorPick : nil
-                    )
-                    .clipped()
-                } else {
-                    Text("无法加载图像")
-                        .foregroundColor(.secondary)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
-
-                ImageInfoBar(
-                    imageInfo: imageInfo,
-                    scale: scale,
-                    adjustments: $adjustments,
-                    showAdjustmentPanel: $showAdjustmentPanel
-                )
+                buildImageView()
+                buildImageInfoBar()
             }
             .clipped()
 
@@ -55,7 +50,7 @@ struct ImageDetailView: View {
                 Divider()
                 ResizableAdjustmentPanel(
                     adjustments: $adjustments,
-                    ciImage: originalCIImage,
+                    ciImage: adjustedCIImage ?? originalCIImage,
                     width: $sidebarWidth,
                     whiteBalancePickMode: $whiteBalancePickMode
                 )
@@ -65,14 +60,20 @@ struct ImageDetailView: View {
             if let saved = savedAdjustments {
                 adjustments = saved
             }
+            history.record(adjustments)
             await loadImageProgressively()
         }
         .onChange(of: adjustments) { _, newValue in
+            if !isUpdatingFromHistory {
+                history.record(newValue)
+            }
             onAdjustmentsChanged(newValue)
             Task {
                 await applyAdjustments(newValue)
             }
         }
+        .focusedSceneValue(\.undoAction, history.canUndo ? undo : nil)
+        .focusedSceneValue(\.redoAction, history.canRedo ? redo : nil)
     }
 
     private func loadImageProgressively() async {
@@ -106,28 +107,39 @@ struct ImageDetailView: View {
         guard let original = originalCIImage else { return }
 
         let adjusted = ImageProcessor.applyAdjustments(to: original, adjustments: adj)
+        adjustedCIImage = adjusted
         displayImage = ImageProcessor.convertToNSImage(adjusted)
     }
 
-    private func handleColorPick(point: CGPoint, imageSize: CGSize) {
-        guard whiteBalancePickMode != .none, let ciImage = originalCIImage else { return }
+    private func handleColorPick(point: CGPoint, imageSize _: CGSize) {
+        print("🔵 handleColorPick 被调用: point=\(point), mode=\(whiteBalancePickMode)")
 
-        // 白平衡取色：为了实现幂等操作，始终从原始图片采样
-        // 曲线采样：也使用原始图片
-        let color = getColor(at: point, from: ciImage, displaySize: imageSize)
+        // 直接使用状态栏已经计算好的颜色信息
+        guard whiteBalancePickMode != .none else {
+            print("⚠️ whiteBalancePickMode 是 .none，取消操作")
+            return
+        }
+
+        guard let pixelInfo = currentPixelInfo else {
+            print("⚠️ currentPixelInfo 是 nil，取消操作")
+            return
+        }
+
+        print(
+            "✅ 使用 pixelInfo: gamma RGB=(\(pixelInfo.gammaRGB.r), \(pixelInfo.gammaRGB.g), \(pixelInfo.gammaRGB.b))"
+        )
 
         // 白平衡取色
         if whiteBalancePickMode == .whiteBalance {
-            adjustWhiteBalance(with: color)
+            adjustWhiteBalance(with: pixelInfo)
             // 保持激活状态，允许连续取色
             return
         }
 
-        // 将颜色转换为 RGB 值
-        let r = Double(color.redComponent)
-        let g = Double(color.greenComponent)
-        let b = Double(color.blueComponent)
-        let avg = (r + g + b) / 3.0
+        // 三点校色使用原始线性 RGB（从原始图片采样）
+        let r = pixelInfo.linearRGB.r
+        let g = pixelInfo.linearRGB.g
+        let b = pixelInfo.linearRGB.b
 
         // 根据采样模式设置输出值
         let outputValue: Double
@@ -142,38 +154,29 @@ struct ImageDetailView: View {
             return
         }
 
-        // 添加曲线点（这里暂时只添加到 RGB 曲线，实际应该根据当前选择的通道）
-        _ = adjustments.rgbCurve.addPoint(input: avg, output: outputValue)
+        // 黑白灰采样只调整 R、G、B 三个独立通道
         _ = adjustments.redCurve.addPoint(input: r, output: outputValue)
         _ = adjustments.greenCurve.addPoint(input: g, output: outputValue)
         _ = adjustments.blueCurve.addPoint(input: b, output: outputValue)
-        _ = adjustments.luminanceCurve.addPoint(input: avg, output: outputValue)
 
         print(
-            "采样\(whiteBalancePickMode == .black ? "黑点" : whiteBalancePickMode == .white ? "白点" : "中灰"): RGB(\(String(format: "%.2f", r)), \(String(format: "%.2f", g)), \(String(format: "%.2f", b)))"
+            "✅ 采样\(whiteBalancePickMode == .black ? "黑点" : whiteBalancePickMode == .white ? "白点" : "中灰"): 线性RGB(\(String(format: "%.2f", r)), \(String(format: "%.2f", g)), \(String(format: "%.2f", b)))"
         )
     }
 
     // 白平衡算法（幂等实现）
-    // CITemperatureAndTint 正确理解：
-    // neutral: "在这个色温/色调下，图片看起来是中性的"
-    // targetNeutral: "希望在这个色温/色调下，图片看起来是中性的"
-    //
-    // 白平衡逻辑（反向思维）：
-    // 1. 点击偏黄的区域（应该是中性灰）
-    // 2. 说："在更高的色温下，图片才看起来中性"
-    // 3. 滤镜会降低色温来补偿
-    // 4. 结果：偏黄的区域变成中性灰
-    private func adjustWhiteBalance(with color: NSColor) {
-        let r = Double(color.redComponent)
-        let g = Double(color.greenComponent)
-        let b = Double(color.blueComponent)
+    // 使用 gamma RGB 进行白平衡计算
+    private func adjustWhiteBalance(with pixelInfo: PixelInfo) {
+        let r = pixelInfo.gammaRGB.r
+        let g = pixelInfo.gammaRGB.g
+        let b = pixelInfo.gammaRGB.b
 
         // 计算亮度（使用感知亮度公式）
         let luminance = 0.299 * r + 0.587 * g + 0.114 * b
 
         // 如果采样点太暗或太亮，不适合做白平衡
         if luminance < 0.05 || luminance > 0.95 {
+            print("⚠️ 采样点太暗或太亮，亮度: \(String(format: "%.3f", luminance))")
             return
         }
 
@@ -187,7 +190,6 @@ struct ImageDetailView: View {
         let tempSensitivity = 2000.0
 
         let logRatio = log(rbRatio)
-        // 反向：采样点偏红时，设置更高的 neutral
         let neutralTemp = baseTemp + (logRatio * tempSensitivity)
 
         // 计算采样点的色调特征（基于绿色偏差）
@@ -195,10 +197,7 @@ struct ImageDetailView: View {
         let greenDiff = g - expectedGreen
 
         // 将绿色偏差映射到 neutral 色调（反向逻辑）
-        // greenDiff > 0（偏绿）-> 需要设置更高的 neutral 色调 -> 滤镜会加品红
-        // greenDiff < 0（偏品红）-> 需要设置更低的 neutral 色调 -> 滤镜会加绿
         let tintSensitivity = 150.0
-        // 反向：采样点偏绿时，设置更高的 neutral
         let neutralTint = (greenDiff / max(luminance, 0.001)) * tintSensitivity
 
         // 设置绝对值（幂等操作）
@@ -206,7 +205,7 @@ struct ImageDetailView: View {
         adjustments.tint = max(-100, min(100, neutralTint))
 
         print(
-            "白平衡取色: RGB(\(String(format: "%.3f", r)), \(String(format: "%.3f", g)), \(String(format: "%.3f", b))) 亮度: \(String(format: "%.3f", luminance))"
+            "✅ 白平衡取色: GammaRGB(\(String(format: "%.3f", r)), \(String(format: "%.3f", g)), \(String(format: "%.3f", b))) 亮度: \(String(format: "%.3f", luminance))"
         )
         print(
             "  R/B比例: \(String(format: "%.3f", rbRatio)), 对数比例: \(String(format: "%.3f", logRatio))"
@@ -219,59 +218,53 @@ struct ImageDetailView: View {
         )
     }
 
-    private func getColor(at point: CGPoint, from ciImage: CIImage,
-                          displaySize: CGSize) -> NSColor
-    {
-        // 将显示坐标转换为图片坐标
-        let extent = ciImage.extent
-        let x = extent.origin.x + (point.x / displaySize.width) * extent.width
-        let y = extent.origin.y + (extent.height - (point.y / displaySize.height) * extent.height)
+    private func undo() {
+        guard let previousAdjustments = history.undo() else { return }
+        isUpdatingFromHistory = true
+        adjustments = previousAdjustments
+        isUpdatingFromHistory = false
+    }
 
-        // 采样 5x5 区域求平均（更大的区域更稳定）
-        let sampleSize: CGFloat = 5
-        let sampleRect = CGRect(
-            x: x - sampleSize / 2,
-            y: y - sampleSize / 2,
-            width: sampleSize,
-            height: sampleSize
-        )
+    private func redo() {
+        guard let nextAdjustments = history.redo() else { return }
+        isUpdatingFromHistory = true
+        adjustments = nextAdjustments
+        isUpdatingFromHistory = false
+    }
 
-        // 确保采样区域在图片范围内
-        let clampedRect = sampleRect.intersection(extent)
-        guard !clampedRect.isEmpty else {
-            return NSColor.gray
+    @ViewBuilder
+    private func buildImageView() -> some View {
+        if isLoading {
+            ProgressView("加载中...")
+                .progressViewStyle(.circular)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if let image = displayImage {
+            ClickableImageView(
+                image: image,
+                scale: $scale,
+                currentPixelInfo: $currentPixelInfo,
+                originalCIImage: originalCIImage,
+                adjustedCIImage: adjustedCIImage,
+                onColorPick: whiteBalancePickMode != .none ? handleColorPick : nil
+            )
+            .equatable() // 使用 Equatable 控制重绘
+            .clipped()
+            .id(imageInfo.url)
+        } else {
+            Text("无法加载图像")
+                .foregroundColor(.secondary)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+    }
 
-        var bitmap = [UInt8](repeating: 0, count: 4)
-
-        // 创建 1x1 的采样图像
-        if let averaged = ciImage.cropped(to: clampedRect)
-            .applyingFilter(
-                "CIAreaAverage",
-                parameters: [kCIInputExtentKey: CIVector(cgRect: clampedRect)]
-            ) as CIImage?
-        {
-            // 使用共享的 CIContext 进行渲染，避免 Metal 锁冲突
-            let cgImage = ImageProcessor.convertToCGImage(averaged)
-            if let cgImage {
-                let bitmapContext = CGContext(
-                    data: &bitmap,
-                    width: 1,
-                    height: 1,
-                    bitsPerComponent: 8,
-                    bytesPerRow: 4,
-                    space: CGColorSpaceCreateDeviceRGB(),
-                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-                )
-                bitmapContext?.draw(cgImage, in: CGRect(x: 0, y: 0, width: 1, height: 1))
-            }
-        }
-
-        return NSColor(
-            red: CGFloat(bitmap[0]) / 255.0,
-            green: CGFloat(bitmap[1]) / 255.0,
-            blue: CGFloat(bitmap[2]) / 255.0,
-            alpha: 1.0
+    @ViewBuilder
+    private func buildImageInfoBar() -> some View {
+        ImageInfoBar(
+            imageInfo: imageInfo,
+            scale: scale,
+            adjustments: $adjustments,
+            showAdjustmentPanel: $showAdjustmentPanel,
+            pixelInfo: currentPixelInfo
         )
     }
 }
@@ -281,12 +274,63 @@ struct ImageInfoBar: View {
     let scale: CGFloat
     @Binding var adjustments: ImageAdjustments
     @Binding var showAdjustmentPanel: Bool
+    let pixelInfo: PixelInfo?
 
     var body: some View {
         HStack(spacing: 12) {
             Text(imageInfo.filename)
                 .font(.caption)
                 .foregroundColor(.secondary)
+
+            // 固定占位,避免高度变化
+            Divider()
+                .frame(height: 16)
+
+            HStack(spacing: 6) {
+                // 颜色预览方格 - 始终占位
+                Rectangle()
+                    .fill(pixelInfo.map { info in
+                        Color(
+                            red: info.gammaRGB.r,
+                            green: info.gammaRGB.g,
+                            blue: info.gammaRGB.b
+                        )
+                    } ?? Color.clear)
+                    .frame(width: 32, height: 32)
+                    .cornerRadius(4)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 4)
+                            .stroke(Color.gray.opacity(0.3), lineWidth: 1)
+                    )
+                    .opacity(pixelInfo == nil ? 0.3 : 1.0)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(pixelInfo.map { "RGB: \(formatRGB($0.gammaRGB))" } ?? "RGB: ---")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .opacity(pixelInfo == nil ? 0.5 : 1.0)
+                    Text(pixelInfo.map { "原始: \(formatRGB($0.linearRGB))" } ?? "原始: ---")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .opacity(pixelInfo == nil ? 0.5 : 1.0)
+                }
+                .frame(minWidth: 120, alignment: .leading)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(pixelInfo.map { "H:\(formatValue($0.hsl.h, decimals: 0))°" } ?? "H:---°")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .opacity(pixelInfo == nil ? 0.5 : 1.0)
+                    Text(pixelInfo
+                        .map {
+                            "S:\(formatValue($0.hsl.s, decimals: 0))% L:\(formatValue($0.hsl.l, decimals: 0))%"
+                        } ?? "S:---% L:---%")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .opacity(pixelInfo == nil ? 0.5 : 1.0)
+                }
+                .frame(minWidth: 100, alignment: .leading)
+            }
 
             Spacer()
 
@@ -385,5 +429,16 @@ struct ImageInfoBar: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
         .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private func formatRGB(_ rgb: (r: Double, g: Double, b: Double)) -> String {
+        let r = Int(rgb.r * 255)
+        let g = Int(rgb.g * 255)
+        let b = Int(rgb.b * 255)
+        return "\(r), \(g), \(b)"
+    }
+
+    private func formatValue(_ value: Double, decimals: Int) -> String {
+        String(format: "%.\(decimals)f", value)
     }
 }

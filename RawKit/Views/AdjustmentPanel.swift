@@ -48,9 +48,27 @@ struct AdjustmentPanel: View {
     let ciImage: CIImage?
     @Binding var whiteBalancePickMode: CurveAdjustmentView.PickMode
     @State private var expandedSections: Set<AdjustmentSection> = [.basic, .color]
+    @State private var histogram: (red: [Int], green: [Int], blue: [Int])?
 
     var body: some View {
         VStack(spacing: 0) {
+            // 直方图（放在最顶部）
+            if let histogram {
+                HistogramView(histogram: histogram)
+                    .frame(height: 120)
+                    .background(Color(nsColor: .windowBackgroundColor))
+                    .overlay(
+                        Rectangle()
+                            .stroke(Color.gray.opacity(0.2), lineWidth: 1)
+                    )
+                    .padding(.horizontal, 12)
+                    .padding(.top, 8)
+                    .padding(.bottom, 8)
+                    .onAppear {
+                        print("AdjustmentPanel: 直方图已显示, R max=\(histogram.red.max() ?? 0)")
+                    }
+            }
+
             HStack {
                 Text("调整")
                     .font(.headline)
@@ -104,6 +122,16 @@ struct AdjustmentPanel: View {
                 }
             }
         }
+        .onChange(of: ciImage) { _, newValue in
+            if newValue != nil {
+                loadHistogram()
+            }
+        }
+        .onAppear {
+            if ciImage != nil {
+                loadHistogram()
+            }
+        }
     }
 
     private func toggleSection(_ section: AdjustmentSection) {
@@ -112,6 +140,85 @@ struct AdjustmentPanel: View {
         } else {
             expandedSections.insert(section)
         }
+    }
+
+    private func loadHistogram() {
+        guard let ciImage else {
+            print("AdjustmentPanel.loadHistogram: ciImage 为空")
+            return
+        }
+        print("AdjustmentPanel.loadHistogram: 开始计算直方图")
+        histogram = calculateHistogram(from: ciImage)
+        if histogram != nil {
+            print("AdjustmentPanel.loadHistogram: 直方图加载成功")
+        } else {
+            print("AdjustmentPanel.loadHistogram: 直方图加载失败")
+        }
+    }
+
+    private func calculateHistogram(from ciImage: CIImage) -> (
+        red: [Int], green: [Int], blue: [Int]
+    )? {
+        let extent = ciImage.extent
+        let bins = 256
+
+        // 为了避免内存问题，将大图像缩小到合理尺寸再计算直方图
+        let maxDimension: CGFloat = 2048
+        let scale = min(1.0, maxDimension / max(extent.width, extent.height))
+
+        let scaledImage: CIImage
+        if scale < 1.0 {
+            scaledImage = ciImage.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+            print("直方图计算：图像缩小到 \(scale * 100)%")
+        } else {
+            scaledImage = ciImage
+        }
+
+        let scaledExtent = scaledImage.extent
+
+        // 创建直方图计算滤镜
+        guard
+            let filter = CIFilter(
+                name: "CIAreaHistogram",
+                parameters: [
+                    kCIInputImageKey: scaledImage,
+                    kCIInputExtentKey: CIVector(cgRect: scaledExtent),
+                    "inputCount": bins,
+                    "inputScale": 1.0,
+                ]
+            ),
+            let outputImage = filter.outputImage
+        else {
+            print("直方图滤镜创建失败")
+            return nil
+        }
+
+        // 渲染直方图数据 - CIAreaHistogram 输出的是 256x1 的图像，每个像素是 RGBA 格式
+        var bitmap = [Float](repeating: 0, count: bins * 4)
+        let context = CIContext(options: [.workingColorSpace: NSNull()])
+        context.render(
+            outputImage,
+            toBitmap: &bitmap,
+            rowBytes: bins * 4 * MemoryLayout<Float>.size,
+            bounds: CGRect(x: 0, y: 0, width: bins, height: 1),
+            format: .RGBAf,
+            colorSpace: nil
+        )
+
+        // 提取各通道数据并转换为整数
+        var red = [Int](repeating: 0, count: bins)
+        var green = [Int](repeating: 0, count: bins)
+        var blue = [Int](repeating: 0, count: bins)
+
+        for i in 0 ..< bins {
+            red[i] = Int(bitmap[i * 4] * 10_000_000)
+            green[i] = Int(bitmap[i * 4 + 1] * 10_000_000)
+            blue[i] = Int(bitmap[i * 4 + 2] * 10_000_000)
+        }
+
+        print("直方图计算完成: R前5个值=\(Array(red.prefix(5))), max=\(red.max() ?? 0)")
+
+        return (red: red, green: green, blue: blue)
     }
 }
 
@@ -373,13 +480,13 @@ struct SliderControl: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Text(title)
-                    .font(.caption)
+                    .font(.subheadline)
                     .foregroundColor(.secondary)
 
                 Spacer()
 
                 Text(formatValue(value))
-                    .font(.subheadline)
+                    .font(.body)
                     .foregroundColor(.secondary)
                     .monospacedDigit()
                     .frame(minWidth: 50, alignment: .trailing)
@@ -458,5 +565,99 @@ struct SliderControl: View {
         case "锐化": value = defaultAdjustments.sharpness
         default: break
         }
+    }
+}
+
+// 直方图视图组件
+struct HistogramView: View {
+    let histogram: (red: [Int], green: [Int], blue: [Int])
+
+    var body: some View {
+        GeometryReader { geometry in
+            let size = geometry.size
+
+            // 计算综合亮度直方图（使用感知亮度公式）
+            let luminanceHistogram = calculateLuminanceHistogram()
+
+            // 找到最大值用于归一化
+            let maxValue = max(
+                luminanceHistogram.max() ?? 1,
+                histogram.red.max() ?? 1,
+                histogram.green.max() ?? 1,
+                histogram.blue.max() ?? 1
+            )
+
+            ZStack {
+                // 绘制综合亮度直方图（灰色）
+                drawHistogramBars(
+                    histogram: luminanceHistogram,
+                    maxValue: maxValue,
+                    color: Color.white.opacity(0.5),
+                    size: size
+                )
+
+                // 绘制 RGB 三个通道（叠加显示）
+                drawHistogramBars(
+                    histogram: histogram.red,
+                    maxValue: maxValue,
+                    color: Color.red.opacity(0.6),
+                    size: size
+                )
+                drawHistogramBars(
+                    histogram: histogram.green,
+                    maxValue: maxValue,
+                    color: Color.green.opacity(0.6),
+                    size: size
+                )
+                drawHistogramBars(
+                    histogram: histogram.blue,
+                    maxValue: maxValue,
+                    color: Color.blue.opacity(0.6),
+                    size: size
+                )
+            }
+        }
+    }
+
+    // 计算亮度直方图
+    private func calculateLuminanceHistogram() -> [Int] {
+        var luminanceHistogram = [Int](repeating: 0, count: 256)
+        for i in 0 ..< 256 {
+            let r = histogram.red[i]
+            let g = histogram.green[i]
+            let b = histogram.blue[i]
+            // 使用感知亮度公式的权重
+            luminanceHistogram[i] = Int(
+                Double(r) * 0.299 + Double(g) * 0.587 + Double(b) * 0.114
+            )
+        }
+        return luminanceHistogram
+    }
+
+    // 绘制单个通道的直方图柱状图
+    private func drawHistogramBars(
+        histogram: [Int],
+        maxValue: Int,
+        color: Color,
+        size: CGSize
+    ) -> some View {
+        Path { path in
+            guard maxValue > 0, histogram.count == 256 else { return }
+
+            // 每个 bin 对应一个 x 位置（0-255）
+            let barWidth = size.width / 256.0
+
+            for (index, value) in histogram.enumerated() {
+                guard value > 0 else { continue }
+
+                let normalizedHeight = CGFloat(value) / CGFloat(maxValue) * size.height
+                let x = CGFloat(index) * barWidth
+                let y = size.height - normalizedHeight
+
+                path.move(to: CGPoint(x: x, y: size.height))
+                path.addLine(to: CGPoint(x: x, y: y))
+            }
+        }
+        .stroke(color, lineWidth: max(0.5, min(2.0, size.width / 256.0)))
     }
 }

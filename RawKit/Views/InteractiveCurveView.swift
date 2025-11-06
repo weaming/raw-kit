@@ -20,6 +20,7 @@ struct InteractiveCurveView: View {
 
                 drawCurve(in: geometry.size)
                 drawPoints(in: geometry.size)
+                drawAxisLabels(in: geometry.size)
             }
             .background(Color(nsColor: .controlBackgroundColor))
             .border(Color.gray.opacity(0.3), width: 1)
@@ -40,8 +41,8 @@ struct InteractiveCurveView: View {
     private func handleDrag(value: DragGesture.Value, in size: CGSize) {
         let location = value.location
 
-        let input = location.x / size.width
-        let output = 1.0 - (location.y / size.height)
+        let input = max(0, min(1, location.x / size.width))
+        let output = max(0, min(1, 1.0 - (location.y / size.height)))
 
         if draggedPointId == nil {
             if let existingPoint = curve.points.first(where: { point in
@@ -61,7 +62,8 @@ struct InteractiveCurveView: View {
         }
 
         if let pointId = draggedPointId {
-            curve.updatePoint(id: pointId, output: output)
+            // 支持同时调整输入值和输出值（像 Photoshop 一样）
+            curve.updatePoint(id: pointId, input: input, output: output)
         }
     }
 
@@ -169,6 +171,9 @@ struct InteractiveCurveView: View {
                     x: size.width * point.input,
                     y: size.height * (1 - point.output)
                 )
+                .onTapGesture(count: 2) {
+                    curve.removePoint(id: point.id)
+                }
                 .contextMenu {
                     Button("删除点") {
                         curve.removePoint(id: point.id)
@@ -290,10 +295,28 @@ struct InteractiveCurveView: View {
         for i in 0 ..< (n - 1) {
             if x >= points[i].input, x <= points[i + 1].input {
                 let dx = x - points[i].input
-                return a[i] + b[i] * dx + c[i] * dx * dx + d[i] * dx * dx * dx
+                let result = a[i] + b[i] * dx + c[i] * dx * dx + d[i] * dx * dx * dx
+                return max(0, min(1, result))
             }
         }
 
-        return x
+        return max(0, min(1, x))
+    }
+
+    // 绘制坐标轴标签（起点和终点值）
+    private func drawAxisLabels(in size: CGSize) -> some View {
+        ZStack {
+            // 右下角：输入终点 (255)
+            Text("255")
+                .font(.system(size: 10))
+                .foregroundColor(.secondary)
+                .position(x: size.width - 15, y: size.height - 8)
+
+            // 左上角：输出终点 (255)
+            Text("255")
+                .font(.system(size: 10))
+                .foregroundColor(.secondary)
+                .position(x: 15, y: 8)
+        }
     }
 }
