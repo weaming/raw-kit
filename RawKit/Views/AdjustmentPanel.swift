@@ -52,7 +52,7 @@ struct AdjustmentPanel: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // 直方图（放在最顶部）
+            // 直方图（放在最顶部，无任何空白）
             if let histogram {
                 HistogramView(histogram: histogram)
                     .frame(height: 120)
@@ -62,11 +62,7 @@ struct AdjustmentPanel: View {
                             .stroke(Color.gray.opacity(0.2), lineWidth: 1)
                     )
                     .padding(.horizontal, 12)
-                    .padding(.top, 8)
                     .padding(.bottom, 8)
-                    .onAppear {
-                        print("AdjustmentPanel: 直方图已显示, R max=\(histogram.red.max() ?? 0)")
-                    }
             }
 
             HStack {
@@ -122,6 +118,7 @@ struct AdjustmentPanel: View {
                 }
             }
         }
+        .ignoresSafeArea(edges: .top) // 忽略顶部安全区域，让直方图顶到窗口边缘
         .onChange(of: ciImage) { _, newValue in
             if newValue != nil {
                 loadHistogram()
