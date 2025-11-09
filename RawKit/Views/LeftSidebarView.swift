@@ -36,7 +36,8 @@ struct LeftSidebarView: View {
                         LUTPanel(
                             onLoadLUT: onLoadLUT,
                             lutAlpha: $adjustments.lutAlpha,
-                            currentLUTURL: $adjustments.lutURL
+                            currentLUTURL: $adjustments.lutURL,
+                            adjustments: $adjustments
                         )
                     }
                 }

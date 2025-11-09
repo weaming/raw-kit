@@ -9,6 +9,7 @@ struct RawKitApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .ignoresSafeArea(.all, edges: .top)
         }
         .windowStyle(.hiddenTitleBar)
         .commands {

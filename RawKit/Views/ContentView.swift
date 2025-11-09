@@ -191,7 +191,12 @@ struct ContentView: View {
         }
 
         let newHistory = AdjustmentHistory()
-        historyCache[imageInfo.id] = newHistory
+        // 延迟修改状态，避免在视图更新期间修改
+        DispatchQueue.main.async {
+            if historyCache[imageInfo.id] == nil {
+                historyCache[imageInfo.id] = newHistory
+            }
+        }
         return newHistory
     }
 
@@ -286,6 +291,10 @@ struct ToolbarView: View {
 
     var body: some View {
         HStack(spacing: 12) {
+            // 为窗口控制按钮留出空间
+            Spacer()
+                .frame(width: 45)
+
             Button(action: {
                 imageManager.openFileDialog()
             }) {

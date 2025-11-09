@@ -6,11 +6,18 @@ struct LUTPanel: View {
     let onLoadLUT: (URL?) -> Void
     @Binding var lutAlpha: Double
     @Binding var currentLUTURL: URL?
+    @Binding var adjustments: ImageAdjustments
 
     @State private var lutFiles: [LUTFile] = []
     @State private var selectedLUT: UUID?
     @State private var tempAlpha: Double = 1.0
     @State private var isEditingAlpha = false
+    @State private var showingSaveLUTDialog = false
+    @State private var newLUTName = ""
+    @State private var isSavingLUT = false
+    @State private var lutColorSpaces: [String: LUTColorSpace] = [:]
+
+    private let colorSpaceStorageKey = "LUTColorSpaces"
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -25,6 +32,21 @@ struct LUTPanel: View {
             }
             .buttonStyle(.bordered)
             .padding(.horizontal, 12)
+
+            // 保存为 LUT 按钮
+            Button(action: {
+                showingSaveLUTDialog = true
+            }) {
+                HStack {
+                    Image(systemName: "square.and.arrow.up")
+                    Text("保存为 LUT")
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 6)
+            }
+            .buttonStyle(.bordered)
+            .padding(.horizontal, 12)
+            .disabled(!adjustments.hasAdjustments)
 
             // LUT 强度滑块
             if selectedLUT != nil {
@@ -89,6 +111,7 @@ struct LUTPanel: View {
                         LUTItemView(
                             name: "无 LUT",
                             isSelected: selectedLUT == nil,
+                            colorSpace: .constant(.sRGB),
                             onSelect: {
                                 selectedLUT = nil
                                 onLoadLUT(nil)
@@ -100,10 +123,35 @@ struct LUTPanel: View {
                             LUTItemView(
                                 name: lutFile.name,
                                 isSelected: selectedLUT == lutFile.id,
+                                colorSpace: Binding(
+                                    get: {
+                                        // 如果当前选中该LUT，从adjustments读取
+                                        if selectedLUT == lutFile.id {
+                                            return LUTColorSpace(rawValue: adjustments
+                                                .lutColorSpace) ?? .sRGB
+                                        }
+                                        // 否则从保存的配置读取
+                                        return lutColorSpaces[lutFile.url.path] ?? .sRGB
+                                    },
+                                    set: { newColorSpace in
+                                        // 保存配置
+                                        lutColorSpaces[lutFile.url.path] = newColorSpace
+                                        saveLUTColorSpaces()
+
+                                        // 如果当前选中该LUT，直接修改adjustments
+                                        if selectedLUT == lutFile.id {
+                                            adjustments.lutColorSpace = newColorSpace.rawValue
+                                        }
+                                    }
+                                ),
                                 onSelect: {
                                     selectedLUT = lutFile.id
-                                    lutAlpha = 1.0 // 切换 LUT 时重置 alpha
+                                    lutAlpha = 1.0
                                     tempAlpha = 1.0
+                                    // 设置LUT的色彩空间
+                                    adjustments
+                                        .lutColorSpace = (lutColorSpaces[lutFile.url.path] ?? .sRGB)
+                                        .rawValue
                                     onLoadLUT(lutFile.url)
                                 },
                                 onDelete: {
@@ -117,6 +165,7 @@ struct LUTPanel: View {
             }
         }
         .onAppear {
+            loadLUTColorSpaces()
             loadLUTFiles()
             syncSelectedLUT()
             tempAlpha = lutAlpha
@@ -128,6 +177,21 @@ struct LUTPanel: View {
             if !isEditingAlpha {
                 tempAlpha = newValue
             }
+        }
+        .sheet(isPresented: $showingSaveLUTDialog) {
+            SaveLUTDialog(
+                lutName: $newLUTName,
+                isSaving: $isSavingLUT,
+                onSave: {
+                    Task {
+                        await saveLUTFromAdjustments()
+                    }
+                },
+                onCancel: {
+                    showingSaveLUTDialog = false
+                    newLUTName = ""
+                }
+            )
         }
     }
 
@@ -219,6 +283,47 @@ struct LUTPanel: View {
         }
     }
 
+    private func saveLUTFromAdjustments() async {
+        guard !newLUTName.isEmpty else { return }
+
+        isSavingLUT = true
+
+        // 生成LUT（包含所有调整，包括当前应用的LUT）
+        guard let lutImage = await LUTGenerator.generateLUT(
+            from: adjustments,
+            sourceImage: nil
+        ) else {
+            print("生成LUT失败")
+            isSavingLUT = false
+            return
+        }
+
+        // 保存LUT文件
+        let lutFolder = getLUTFolderURL()
+        let fileName = "\(newLUTName).cube"
+        let fileURL = lutFolder.appendingPathComponent(fileName)
+
+        do {
+            try LUTGenerator.saveLUTToCube(
+                lutImage: lutImage,
+                to: fileURL
+            )
+
+            // 重新加载LUT列表
+            loadLUTFiles()
+
+            // 关闭对话框
+            showingSaveLUTDialog = false
+            newLUTName = ""
+
+            print("LUT保存成功: \(fileURL.path)")
+        } catch {
+            print("保存LUT失败: \(error)")
+        }
+
+        isSavingLUT = false
+    }
+
     private func getLUTFolderURL() -> URL {
         let appSupport = FileManager.default.urls(
             for: .applicationSupportDirectory,
@@ -236,41 +341,77 @@ struct LUTPanel: View {
 
         return lutFolder
     }
+
+    private func loadLUTColorSpaces() {
+        if let data = UserDefaults.standard.data(forKey: colorSpaceStorageKey),
+           let decoded = try? JSONDecoder().decode([String: LUTColorSpace].self, from: data)
+        {
+            lutColorSpaces = decoded
+        }
+    }
+
+    private func saveLUTColorSpaces() {
+        if let encoded = try? JSONEncoder().encode(lutColorSpaces) {
+            UserDefaults.standard.set(encoded, forKey: colorSpaceStorageKey)
+        }
+    }
 }
 
 // LUT 项视图
 struct LUTItemView: View {
     let name: String
     let isSelected: Bool
+    @Binding var colorSpace: LUTColorSpace
     let onSelect: () -> Void
     let onDelete: (() -> Void)?
 
     var body: some View {
-        HStack {
-            HStack(spacing: 8) {
-                Circle()
-                    .fill(isSelected ? Color.blue : Color.clear)
-                    .frame(width: 8, height: 8)
-                    .overlay(
-                        Circle()
-                            .stroke(Color.gray.opacity(0.3), lineWidth: 1)
-                    )
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(isSelected ? Color.blue : Color.clear)
+                        .frame(width: 8, height: 8)
+                        .overlay(
+                            Circle()
+                                .stroke(Color.gray.opacity(0.3), lineWidth: 1)
+                        )
 
-                Text(name)
-                    .font(.caption)
-                    .foregroundColor(isSelected ? .primary : .secondary)
+                    Text(name)
+                        .font(.caption)
+                        .foregroundColor(isSelected ? .primary : .secondary)
+                }
+
+                Spacer()
+
+                if let onDelete {
+                    Button(action: onDelete) {
+                        Image(systemName: "trash")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("删除 LUT")
+                }
             }
 
-            Spacer()
-
-            if let onDelete {
-                Button(action: onDelete) {
-                    Image(systemName: "trash")
-                        .font(.caption)
+            if onDelete != nil {
+                HStack(spacing: 4) {
+                    Text("色彩空间:")
+                        .font(.caption2)
                         .foregroundColor(.secondary)
+
+                    Picker("", selection: $colorSpace) {
+                        ForEach(LUTColorSpace.allCases, id: \.self) { space in
+                            Text(space.displayName).tag(space)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .font(.caption2)
+                    .frame(width: 100)
                 }
-                .buttonStyle(.borderless)
-                .help("删除 LUT")
+                .padding(.leading, 16)
             }
         }
         .padding(.vertical, 6)
@@ -286,15 +427,42 @@ struct LUTItemView: View {
     }
 }
 
-// LUT 文件数据模型
-struct LUTFile: Identifiable {
-    let id: UUID
-    let name: String
-    let url: URL
+// 保存LUT对话框
+struct SaveLUTDialog: View {
+    @Binding var lutName: String
+    @Binding var isSaving: Bool
+    let onSave: () -> Void
+    let onCancel: () -> Void
 
-    init(name: String, url: URL) {
-        id = UUID()
-        self.name = name
-        self.url = url
+    var body: some View {
+        VStack(spacing: 16) {
+            Text("保存为 LUT")
+                .font(.headline)
+
+            TextField("LUT 名称", text: $lutName)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 300)
+                .onSubmit {
+                    if !lutName.isEmpty {
+                        onSave()
+                    }
+                }
+
+            if isSaving {
+                ProgressView()
+                    .controlSize(.small)
+            }
+
+            HStack(spacing: 12) {
+                Button("取消", action: onCancel)
+                    .keyboardShortcut(.escape)
+                    .disabled(isSaving)
+
+                Button("保存", action: onSave)
+                    .disabled(lutName.isEmpty || isSaving)
+                    .keyboardShortcut(.return)
+            }
+        }
+        .padding(24)
     }
 }

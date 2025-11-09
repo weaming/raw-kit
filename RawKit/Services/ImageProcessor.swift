@@ -349,7 +349,12 @@ class ImageProcessor {
         }
 
         if let lutURL = adjustments.lutURL {
-            result = applyLUT(to: result, lutURL: lutURL, alpha: adjustments.lutAlpha)
+            result = applyLUT(
+                to: result,
+                lutURL: lutURL,
+                alpha: adjustments.lutAlpha,
+                lutColorSpace: adjustments.lutColorSpace
+            )
         }
 
         return result
@@ -597,7 +602,12 @@ class ImageProcessor {
         return filter.outputImage
     }
 
-    private static func applyLUT(to image: CIImage, lutURL: URL, alpha: Double) -> CIImage {
+    private static func applyLUT(
+        to image: CIImage,
+        lutURL: URL,
+        alpha: Double,
+        lutColorSpace: String
+    ) -> CIImage {
         let fileExtension = lutURL.pathExtension.lowercased()
 
         let cubeData: (data: Data, size: Int)? = switch fileExtension {
@@ -615,19 +625,65 @@ class ImageProcessor {
             return image
         }
 
+        // 如果是 sRGB 色彩空间，直接应用 LUT，无需转换
+        if lutColorSpace == "sRGB" {
+            guard let filter = CIFilter(name: "CIColorCube") else {
+                return image
+            }
+            filter.setValue(image, forKey: kCIInputImageKey)
+            filter.setValue(size, forKey: "inputCubeDimension")
+            filter.setValue(data, forKey: "inputCubeData")
+            guard let lutApplied = filter.outputImage else {
+                return image
+            }
+            return applyLUTAlpha(original: image, lutApplied: lutApplied, alpha: alpha)
+        }
+
+        // 对于非 sRGB 色彩空间，需要进行转换
+        guard let targetColorSpace = getLUTColorSpace(from: lutColorSpace) else {
+            guard let filter = CIFilter(name: "CIColorCube") else {
+                return image
+            }
+            filter.setValue(image, forKey: kCIInputImageKey)
+            filter.setValue(size, forKey: "inputCubeDimension")
+            filter.setValue(data, forKey: "inputCubeData")
+            guard let lutApplied = filter.outputImage else {
+                return image
+            }
+            return applyLUTAlpha(original: image, lutApplied: lutApplied, alpha: alpha)
+        }
+
+        // 转换到 LUT 色彩空间
+        let imageInLUTSpace = convertColorSpace(image, to: targetColorSpace)
+
         guard let filter = CIFilter(name: "CIColorCube") else {
             return image
         }
 
-        filter.setValue(image, forKey: kCIInputImageKey)
+        filter.setValue(imageInLUTSpace, forKey: kCIInputImageKey)
         filter.setValue(size, forKey: "inputCubeDimension")
         filter.setValue(data, forKey: "inputCubeData")
 
-        guard let lutApplied = filter.outputImage else {
+        guard let lutAppliedInLUTSpace = filter.outputImage else {
             return image
         }
 
-        // 应用 alpha 混合
+        // 转换回 sRGB 工作空间
+        guard let sRGBColorSpace = CGColorSpace(name: CGColorSpace.sRGB) else {
+            return lutAppliedInLUTSpace
+        }
+        let lutApplied = convertColorSpace(lutAppliedInLUTSpace, to: sRGBColorSpace)
+
+        return applyLUTAlpha(original: image, lutApplied: lutApplied, alpha: alpha)
+    }
+
+    // 应用LUT的alpha混合
+    private static func applyLUTAlpha(
+        original: CIImage,
+        lutApplied: CIImage,
+        alpha: Double
+    ) -> CIImage {
+        // 如果alpha接近1，直接返回LUT结果
         if abs(alpha - 1.0) < 0.001 {
             return lutApplied
         }
@@ -650,9 +706,9 @@ class ImageProcessor {
         }
 
         blendFilter.setValue(alphaAdjusted, forKey: kCIInputImageKey)
-        blendFilter.setValue(image, forKey: kCIInputBackgroundImageKey)
+        blendFilter.setValue(original, forKey: kCIInputBackgroundImageKey)
 
-        return blendFilter.outputImage ?? image
+        return blendFilter.outputImage ?? original
     }
 
     // 解析 .cube 格式 LUT（Adobe 标准格式）
@@ -853,5 +909,36 @@ class ImageProcessor {
         }
 
         return result
+    }
+
+    // 获取LUT对应的CGColorSpace
+    private static func getLUTColorSpace(from name: String) -> CGColorSpace? {
+        switch name {
+        case "sRGB":
+            CGColorSpace(name: CGColorSpace.sRGB)
+        case "Linear":
+            CGColorSpace(name: CGColorSpace.linearSRGB)
+        case "Rec.709":
+            CGColorSpace(name: CGColorSpace.itur_709)
+        case "Rec.2020":
+            CGColorSpace(name: CGColorSpace.itur_2020)
+        default:
+            CGColorSpace(name: CGColorSpace.sRGB)
+        }
+    }
+
+    // 将图像转换到目标色彩空间
+    private static func convertColorSpace(
+        _ image: CIImage,
+        to targetColorSpace: CGColorSpace
+    ) -> CIImage {
+        // 使用 matchedToWorkingSpace 进行色彩空间匹配
+        // 这个方法会保持原始精度，不会强制渲染到8位
+        let convertedImage = image
+            .matchedToWorkingSpace(from: image
+                .colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB)!)!
+            .matchedFromWorkingSpace(to: targetColorSpace)!
+
+        return convertedImage
     }
 }

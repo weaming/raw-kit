@@ -2,7 +2,7 @@ import AppKit
 import CoreImage
 import SwiftUI
 
-struct ClickableImageView: View, Equatable {
+struct ClickableImageView: View {
     let image: NSImage
     @Binding var scale: CGFloat
     @Binding var currentPixelInfo: PixelInfo?
@@ -13,20 +13,6 @@ struct ClickableImageView: View, Equatable {
     @State private var offset: CGSize = .zero
     @State private var lastOffset: CGSize = .zero
     @FocusState private var isFocused: Bool
-
-    // Equatable 实现:只比较影响渲染的属性
-    static func == (lhs: ClickableImageView, rhs: ClickableImageView) -> Bool {
-        // 只比较 image 和 scale,忽略 currentPixelInfo 的变化
-        // 但要比较 onColorPick 是否变化（从 nil 到非 nil，或反之）
-        let sameImage = lhs.image === rhs.image &&
-            abs(lhs.scale - rhs.scale) < 0.0001 &&
-            lhs.originalCIImage === rhs.originalCIImage &&
-            lhs.adjustedCIImage === rhs.adjustedCIImage
-
-        let sameCallback = (lhs.onColorPick == nil) == (rhs.onColorPick == nil)
-
-        return sameImage && sameCallback
-    }
 
     var body: some View {
         GeometryReader { geometry in
@@ -276,10 +262,8 @@ struct ClickableImageRepresentable: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: ClickableNSImageView, context _: Context) {
-        // 只在图片实例变化时更新
-        if nsView.imageView.image !== image {
-            nsView.imageView.image = image
-        }
+        // 更新图像
+        nsView.imageView.image = image
 
         // 回调函数总是更新
         nsView.onScrollWheel = onScrollWheel

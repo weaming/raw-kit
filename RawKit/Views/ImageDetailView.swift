@@ -23,6 +23,7 @@ struct ImageDetailView: View {
     @State private var originalCIImage: CIImage?
     @State private var adjustedCIImage: CIImage?
     @State private var displayImage: NSImage?
+    @State private var displayImageID = UUID() // 用于强制刷新视图
     @State private var isLoading = true
     @State private var loadingStage: LoadingStage = .thumbnail
     @State private var scale: CGFloat = 1.0
@@ -89,6 +90,7 @@ struct ImageDetailView: View {
 
         if let thumbnail = ImageProcessor.loadThumbnail(from: imageInfo.url) {
             displayImage = ImageProcessor.convertToNSImage(thumbnail)
+            displayImageID = UUID()
             isLoading = false
         }
 
@@ -98,6 +100,7 @@ struct ImageDetailView: View {
         if let mediumImage = ImageProcessor.loadMediumResolution(from: imageInfo.url) {
             originalCIImage = mediumImage
             displayImage = ImageProcessor.convertToNSImage(mediumImage)
+            displayImageID = UUID()
         }
 
         loadingStage = .fullResolution
@@ -106,6 +109,7 @@ struct ImageDetailView: View {
         if let fullImage = await ImageProcessor.loadCIImage(from: imageInfo.url) {
             originalCIImage = fullImage
             displayImage = ImageProcessor.convertToNSImage(fullImage)
+            displayImageID = UUID()
         }
 
         isLoading = false
@@ -116,7 +120,10 @@ struct ImageDetailView: View {
 
         let adjusted = ImageProcessor.applyAdjustments(to: original, adjustments: adj)
         adjustedCIImage = adjusted
-        displayImage = ImageProcessor.convertToNSImage(adjusted)
+
+        let newDisplayImage = ImageProcessor.convertToNSImage(adjusted)
+        displayImage = newDisplayImage
+        displayImageID = UUID()
     }
 
     private func handleColorPick(point: CGPoint, imageSize _: CGSize) {
@@ -255,9 +262,8 @@ struct ImageDetailView: View {
                 adjustedCIImage: adjustedCIImage,
                 onColorPick: whiteBalancePickMode != .none ? handleColorPick : nil
             )
-            .equatable() // 使用 Equatable 控制重绘
             .clipped()
-            .id(imageInfo.url)
+            .id(displayImageID) // 使用 displayImageID 强制刷新
         } else {
             Text("无法加载图像")
                 .foregroundColor(.secondary)

@@ -76,74 +76,133 @@ struct PresetsPanel: View {
     private func savePreset(name: String) {
         guard !name.isEmpty else { return }
 
-        // 检查重名
-        if presets.contains(where: { $0.name == name }) {
-            // 已存在同名预设，更新而不是添加
-            if let index = presets.firstIndex(where: { $0.name == name }) {
-                presets[index] = AdjustmentPreset(
-                    name: name,
-                    adjustments: currentAdjustments,
-                    createdAt: Date()
-                )
-            }
-        } else {
-            // 新预设
-            let preset = AdjustmentPreset(
-                name: name,
-                adjustments: currentAdjustments,
-                createdAt: Date()
-            )
-            presets.append(preset)
-        }
+        let preset = AdjustmentPreset(
+            name: name,
+            adjustments: currentAdjustments,
+            createdAt: Date()
+        )
 
-        savePresetsToFile()
-    }
-
-    private func deletePreset(_ preset: AdjustmentPreset) {
-        presets.removeAll { $0.id == preset.id }
-        savePresetsToFile()
-    }
-
-    private func loadPresets() {
-        let fileManager = FileManager.default
-        let presetsURL = getPresetsFileURL()
-
-        guard fileManager.fileExists(atPath: presetsURL.path) else { return }
-
+        // 保存为单独的文件
+        let fileURL = getPresetFileURL(for: name)
         do {
-            let data = try Data(contentsOf: presetsURL)
-            presets = try JSONDecoder().decode([AdjustmentPreset].self, from: data)
-        } catch {
-            print("加载预设失败: \(error)")
-        }
-    }
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = .prettyPrinted
+            let data = try encoder.encode(preset)
+            try data.write(to: fileURL)
+            print("预设已保存: \(fileURL.path)")
 
-    private func savePresetsToFile() {
-        let presetsURL = getPresetsFileURL()
-
-        do {
-            let data = try JSONEncoder().encode(presets)
-            try data.write(to: presetsURL)
+            // 重新加载预设列表
+            loadPresets()
         } catch {
             print("保存预设失败: \(error)")
         }
     }
 
-    private func getPresetsFileURL() -> URL {
+    private func deletePreset(_ preset: AdjustmentPreset) {
+        let fileURL = getPresetFileURL(for: preset.name)
+        do {
+            try FileManager.default.removeItem(at: fileURL)
+            print("预设已删除: \(fileURL.path)")
+
+            // 重新加载预设列表
+            loadPresets()
+        } catch {
+            print("删除预设失败: \(error)")
+        }
+    }
+
+    private func loadPresets() {
+        let presetsFolder = getPresetsFolderURL()
+        let fileManager = FileManager.default
+
+        // 迁移旧的 presets.json 文件（如果存在）
+        migrateOldPresetsFile()
+
+        guard fileManager.fileExists(atPath: presetsFolder.path) else {
+            presets = []
+            return
+        }
+
+        do {
+            let urls = try fileManager.contentsOfDirectory(
+                at: presetsFolder,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            )
+
+            var loadedPresets: [AdjustmentPreset] = []
+            for url in urls where url.pathExtension == "json" {
+                do {
+                    let data = try Data(contentsOf: url)
+                    let preset = try JSONDecoder().decode(AdjustmentPreset.self, from: data)
+                    loadedPresets.append(preset)
+                } catch {
+                    print("加载预设文件失败 \(url.lastPathComponent): \(error)")
+                }
+            }
+
+            presets = loadedPresets.sorted { $0.createdAt > $1.createdAt }
+        } catch {
+            print("加载预设列表失败: \(error)")
+            presets = []
+        }
+    }
+
+    private func migrateOldPresetsFile() {
         let appSupport = FileManager.default.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
         )[0]
         let appFolder = appSupport.appendingPathComponent("RawKit", isDirectory: true)
+        let oldFileURL = appFolder.appendingPathComponent("presets.json")
 
-        if !FileManager.default.fileExists(atPath: appFolder.path) {
+        guard FileManager.default.fileExists(atPath: oldFileURL.path) else { return }
+
+        do {
+            let data = try Data(contentsOf: oldFileURL)
+            let oldPresets = try JSONDecoder().decode([AdjustmentPreset].self, from: data)
+
+            // 将每个预设保存为单独的文件
+            for preset in oldPresets {
+                let fileURL = getPresetFileURL(for: preset.name)
+                let encoder = JSONEncoder()
+                encoder.outputFormatting = .prettyPrinted
+                let presetData = try encoder.encode(preset)
+                try presetData.write(to: fileURL)
+            }
+
+            // 删除旧文件
+            try FileManager.default.removeItem(at: oldFileURL)
+            print("已迁移 \(oldPresets.count) 个预设到新格式")
+        } catch {
+            print("迁移旧预设失败: \(error)")
+        }
+    }
+
+    private func getPresetsFolderURL() -> URL {
+        let appSupport = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        )[0]
+        let appFolder = appSupport.appendingPathComponent("RawKit", isDirectory: true)
+        let presetsFolder = appFolder.appendingPathComponent("Presets", isDirectory: true)
+
+        if !FileManager.default.fileExists(atPath: presetsFolder.path) {
             try? FileManager.default.createDirectory(
-                at: appFolder,
+                at: presetsFolder,
                 withIntermediateDirectories: true
             )
         }
 
-        return appFolder.appendingPathComponent("presets.json")
+        return presetsFolder
+    }
+
+    private func getPresetFileURL(for name: String) -> URL {
+        let presetsFolder = getPresetsFolderURL()
+        // 清理文件名中的非法字符
+        let safeName = name.replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: ":", with: "-")
+        return presetsFolder.appendingPathComponent("\(safeName).json")
     }
 }
 
@@ -221,20 +280,5 @@ struct SavePresetDialog: View {
             }
         }
         .padding(24)
-    }
-}
-
-// 调整预设数据模型
-struct AdjustmentPreset: Identifiable, Codable {
-    let id: UUID
-    let name: String
-    let adjustments: ImageAdjustments
-    let createdAt: Date
-
-    init(name: String, adjustments: ImageAdjustments, createdAt: Date) {
-        id = UUID()
-        self.name = name
-        self.adjustments = adjustments
-        self.createdAt = createdAt
     }
 }

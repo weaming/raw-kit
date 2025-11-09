@@ -29,6 +29,7 @@ struct ImageAdjustments: Equatable, Codable {
 
     var lutURL: URL?
     var lutAlpha: Double = 1.0
+    var lutColorSpace: String = "sRGB" // LUT输入色彩空间
 
     static let `default` = ImageAdjustments()
 
