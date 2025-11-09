@@ -36,8 +36,11 @@ struct ImageInfo: Identifiable {
 
     private static func getImageDimensions(for url: URL) -> CGSize? {
         guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let properties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0,
-                                                                  nil) as? [CFString: Any],
+              let properties = CGImageSourceCopyPropertiesAtIndex(
+                  imageSource,
+                  0,
+                  nil
+              ) as? [CFString: Any],
               let width = properties[kCGImagePropertyPixelWidth] as? CGFloat,
               let height = properties[kCGImagePropertyPixelHeight] as? CGFloat
         else {
@@ -68,8 +71,11 @@ struct ImageInfo: Identifiable {
 
     private static func getColorSpaceInfo(for url: URL) -> (space: String?, profile: String?) {
         guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let properties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0,
-                                                                  nil) as? [CFString: Any]
+              let properties = CGImageSourceCopyPropertiesAtIndex(
+                  imageSource,
+                  0,
+                  nil
+              ) as? [CFString: Any]
         else {
             return (nil, nil)
         }
@@ -86,8 +92,7 @@ struct ImageInfo: Identifiable {
         }
 
         if let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, nil),
-           let colorSpace = cgImage.colorSpace
-        {
+           let colorSpace = cgImage.colorSpace {
             if spaceName == nil {
                 spaceName = getColorSpaceName(colorSpace)
             }

@@ -344,8 +344,7 @@ struct LUTPanel: View {
 
     private func loadLUTColorSpaces() {
         if let data = UserDefaults.standard.data(forKey: colorSpaceStorageKey),
-           let decoded = try? JSONDecoder().decode([String: LUTColorSpace].self, from: data)
-        {
+           let decoded = try? JSONDecoder().decode([String: LUTColorSpace].self, from: data) {
             lutColorSpaces = decoded
         }
     }

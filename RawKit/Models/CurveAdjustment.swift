@@ -162,9 +162,11 @@ struct CurveAdjustment: Equatable, Codable {
 
     // Photoshop 的单通道曲线实现
     // 只调整指定通道的值，保持其他通道不变
-    private func applyColorMatrixCurve(to image: CIImage, values: [CGFloat],
-                                       channel: Int) -> CIImage
-    {
+    private func applyColorMatrixCurve(
+        to image: CIImage,
+        values: [CGFloat],
+        channel: Int
+    ) -> CIImage {
         // 使用 CIColorCube 来只调整指定通道
         let cubeSize = 64
         var cubeData = [Float](repeating: 0, count: cubeSize * cubeSize * cubeSize * 4)

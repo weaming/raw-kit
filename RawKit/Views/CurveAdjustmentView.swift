@@ -259,8 +259,7 @@ struct CurveAdjustmentView: View {
             .applyingFilter(
                 "CIAreaAverage",
                 parameters: [kCIInputExtentKey: CIVector(cgRect: clampedRect)]
-            ) as CIImage?
-        {
+            ) as CIImage? {
             let context = CIContext(options: [.workingColorSpace: NSNull()])
             context.render(
                 averaged,
@@ -396,9 +395,11 @@ struct CurveAdjustmentView: View {
         let clipBlack = 0.0
         let clipWhite = 1.0
 
-        let result: (red: CurveAdjustment, green: CurveAdjustment,
-                     blue: CurveAdjustment) = if let gray = grayRGB
-        {
+        let result: (
+            red: CurveAdjustment,
+            green: CurveAdjustment,
+            blue: CurveAdjustment
+        ) = if let gray = grayRGB {
             applyThreePointWithGray(
                 redCurve: redCurve,
                 greenCurve: greenCurve,

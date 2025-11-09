@@ -105,8 +105,7 @@ class ImageProcessor {
 
         // 尝试使用 x3f-extract 加载，然后转换为 CIImage
         if let x3fImage = await loadWithX3fExtract(from: url),
-           let cgImage = x3fImage.cgImage(forProposedRect: nil, context: nil, hints: nil)
-        {
+           let cgImage = x3fImage.cgImage(forProposedRect: nil, context: nil, hints: nil) {
             return CIImage(cgImage: cgImage)
         }
 
@@ -234,8 +233,7 @@ class ImageProcessor {
 
             // 加载生成的 DNG 文件
             if FileManager.default.fileExists(atPath: expectedOutputPath.path),
-               let image = NSImage(contentsOf: expectedOutputPath)
-            {
+               let image = NSImage(contentsOf: expectedOutputPath) {
                 print("ImageProcessor: ✓ x3f-extract 加载成功，图片尺寸: \(image.size)")
                 return image
             } else {
@@ -291,8 +289,7 @@ class ImageProcessor {
         }
 
         if adjustments.highlights != 1.0 || adjustments.shadows != 0.0 || adjustments
-            .whites != 0.0 || adjustments.blacks != 0.0
-        {
+            .whites != 0.0 || adjustments.blacks != 0.0 {
             result = applyHighlightsShadows(
                 to: result,
                 highlights: adjustments.highlights,
@@ -586,9 +583,11 @@ class ImageProcessor {
         }
     }
 
-    static func applyFilter(_ filterName: String, to image: CIImage,
-                            parameters: [String: Any] = [:]) -> CIImage?
-    {
+    static func applyFilter(
+        _ filterName: String,
+        to image: CIImage,
+        parameters: [String: Any] = [:]
+    ) -> CIImage? {
         guard let filter = CIFilter(name: filterName) else {
             return nil
         }
@@ -741,8 +740,7 @@ class ImageProcessor {
         for line in lines {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if trimmed.isEmpty || trimmed.hasPrefix("#") || trimmed.hasPrefix("TITLE") ||
-                trimmed.hasPrefix("LUT_") || trimmed.hasPrefix("DOMAIN_")
-            {
+                trimmed.hasPrefix("LUT_") || trimmed.hasPrefix("DOMAIN_") {
                 continue
             }
 

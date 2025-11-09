@@ -290,8 +290,7 @@ struct ExportDialog: View {
         .onAppear {
             // 根据上次选择的预设加载配置
             if let selectedID = configManager.selectedPresetID,
-               let preset = configManager.configs.first(where: { $0.id == selectedID })
-            {
+               let preset = configManager.configs.first(where: { $0.id == selectedID }) {
                 print("ExportDialog: onAppear - 加载预设: \(preset.name)")
                 isLoadingPreset = true
                 currentConfig = preset

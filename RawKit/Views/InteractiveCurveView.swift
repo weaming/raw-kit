@@ -114,9 +114,11 @@ struct InteractiveCurveView: View {
         }
     }
 
-    private func drawReferenceCurve(curve: CurveAdjustment, color: Color,
-                                    in size: CGSize) -> some View
-    {
+    private func drawReferenceCurve(
+        curve: CurveAdjustment,
+        color: Color,
+        in size: CGSize
+    ) -> some View {
         let curveValues = generateCurveValues(for: curve)
 
         return Path { path in

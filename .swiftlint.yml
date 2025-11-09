@@ -1,0 +1,10 @@
+disabled_rules:
+  - identifier_name
+  - trailing_comma
+  - file_length
+  - large_tuple
+  - type_body_length
+  - cyclomatic_complexity
+  - function_parameter_count
+excluded:
+  - .build

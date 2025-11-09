@@ -1,5 +1,5 @@
-import Foundation
 import CoreGraphics
+import Foundation
 
 // LUT 文件数据模型
 struct LUTFile: Identifiable, Codable {

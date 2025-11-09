@@ -109,8 +109,7 @@ class ExportConfigManager: ObservableObject {
 
     private func loadConfigs() {
         if let data = UserDefaults.standard.data(forKey: configsKey),
-           let decoded = try? JSONDecoder().decode([ExportConfig].self, from: data)
-        {
+           let decoded = try? JSONDecoder().decode([ExportConfig].self, from: data) {
             configs = decoded
         }
     }
@@ -123,8 +122,7 @@ class ExportConfigManager: ObservableObject {
 
     private func loadLastUsed() {
         if let data = UserDefaults.standard.data(forKey: lastUsedKey),
-           let decoded = try? JSONDecoder().decode(ExportConfig.self, from: data)
-        {
+           let decoded = try? JSONDecoder().decode(ExportConfig.self, from: data) {
             lastUsedConfig = decoded
         }
     }
@@ -137,8 +135,7 @@ class ExportConfigManager: ObservableObject {
 
     private func loadSelectedPreset() {
         if let uuidString = UserDefaults.standard.string(forKey: selectedPresetKey),
-           let uuid = UUID(uuidString: uuidString)
-        {
+           let uuid = UUID(uuidString: uuidString) {
             selectedPresetID = uuid
             print("ExportConfigManager: loadSelectedPreset - 加载: \(uuidString)")
         } else {

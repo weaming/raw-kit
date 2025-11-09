@@ -48,8 +48,7 @@ struct ContentView: View {
 
                 // 中间图片详情区域
                 if let index = displayedIndex,
-                   index < imageManager.images.count
-                {
+                   index < imageManager.images.count {
                     let imageInfo = imageManager.images[index]
                     ImageDetailView(
                         imageInfo: imageInfo,
@@ -226,8 +225,7 @@ struct ContentView: View {
                 defer { group.leave() }
 
                 if let data = item as? Data,
-                   let url = URL(dataRepresentation: data, relativeTo: nil)
-                {
+                   let url = URL(dataRepresentation: data, relativeTo: nil) {
                     urls.append(url)
                 }
             }
