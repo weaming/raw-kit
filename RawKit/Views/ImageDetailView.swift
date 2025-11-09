@@ -18,6 +18,7 @@ struct ImageDetailView: View {
     let savedAdjustments: ImageAdjustments?
     @Binding var sidebarWidth: CGFloat
     let onAdjustmentsChanged: (ImageAdjustments) -> Void
+    @ObservedObject var history: AdjustmentHistory
 
     @State private var originalCIImage: CIImage?
     @State private var adjustedCIImage: CIImage?
@@ -28,7 +29,6 @@ struct ImageDetailView: View {
     @State private var adjustments = ImageAdjustments.default
     @State private var showAdjustmentPanel = true
     @State private var whiteBalancePickMode: CurveAdjustmentView.PickMode = .none
-    @StateObject private var history = AdjustmentHistory()
     @State private var isUpdatingFromHistory = false
     @State private var currentPixelInfo: PixelInfo?
 
@@ -60,16 +60,24 @@ struct ImageDetailView: View {
             if let saved = savedAdjustments {
                 adjustments = saved
             }
-            history.record(adjustments)
             await loadImageProgressively()
         }
         .onChange(of: adjustments) { _, newValue in
             if !isUpdatingFromHistory {
-                history.record(newValue)
+                history.recordImmediate(newValue)
             }
             onAdjustmentsChanged(newValue)
             Task {
                 await applyAdjustments(newValue)
+            }
+        }
+        .onChange(of: savedAdjustments) { _, newValue in
+            if let newValue, newValue != adjustments {
+                Task { @MainActor in
+                    isUpdatingFromHistory = true
+                    adjustments = newValue
+                    isUpdatingFromHistory = false
+                }
             }
         }
         .focusedSceneValue(\.undoAction, history.canUndo ? undo : nil)
@@ -333,6 +341,29 @@ struct ImageInfoBar: View {
             }
 
             Spacer()
+
+            // 重置按钮
+            Button(action: {
+                var newAdj = ImageAdjustments.default
+                // 保留变换设置
+                newAdj.rotation = adjustments.rotation
+                newAdj.flipHorizontal = adjustments.flipHorizontal
+                newAdj.flipVertical = adjustments.flipVertical
+                adjustments = newAdj
+            }) {
+                HStack(spacing: 4) {
+                    Image(systemName: "arrow.counterclockwise")
+                        .font(.caption)
+                    Text("重置")
+                        .font(.caption)
+                }
+            }
+            .buttonStyle(.bordered)
+            .help("重置所有调整")
+            .disabled(!adjustments.hasAdjustments)
+
+            Spacer()
+                .frame(width: 16)
 
             // 变换按钮组
             HStack(spacing: 4) {

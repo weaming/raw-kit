@@ -348,6 +348,10 @@ class ImageProcessor {
             result = applySharpness(to: result, value: adjustments.sharpness)
         }
 
+        if let lutURL = adjustments.lutURL {
+            result = applyLUT(to: result, lutURL: lutURL, alpha: adjustments.lutAlpha)
+        }
+
         return result
     }
 
@@ -591,6 +595,213 @@ class ImageProcessor {
         }
 
         return filter.outputImage
+    }
+
+    private static func applyLUT(to image: CIImage, lutURL: URL, alpha: Double) -> CIImage {
+        let fileExtension = lutURL.pathExtension.lowercased()
+
+        let cubeData: (data: Data, size: Int)? = switch fileExtension {
+        case "cube":
+            parseCubeLUT(from: lutURL)
+        case "3dl":
+            parse3DLLUT(from: lutURL)
+        case "lut":
+            parseBinaryLUT(from: lutURL)
+        default:
+            parseCubeLUT(from: lutURL)
+        }
+
+        guard let (data, size) = cubeData else {
+            return image
+        }
+
+        guard let filter = CIFilter(name: "CIColorCube") else {
+            return image
+        }
+
+        filter.setValue(image, forKey: kCIInputImageKey)
+        filter.setValue(size, forKey: "inputCubeDimension")
+        filter.setValue(data, forKey: "inputCubeData")
+
+        guard let lutApplied = filter.outputImage else {
+            return image
+        }
+
+        // 应用 alpha 混合
+        if abs(alpha - 1.0) < 0.001 {
+            return lutApplied
+        }
+
+        // 使用 CIBlendWithMask 或直接插值
+        guard let blendFilter = CIFilter(name: "CISourceOverCompositing") else {
+            return lutApplied
+        }
+
+        // 调整 LUT 结果的不透明度
+        let alphaFilter = CIFilter(name: "CIColorMatrix")
+        alphaFilter?.setValue(lutApplied, forKey: kCIInputImageKey)
+        alphaFilter?.setValue(CIVector(x: 1, y: 0, z: 0, w: 0), forKey: "inputRVector")
+        alphaFilter?.setValue(CIVector(x: 0, y: 1, z: 0, w: 0), forKey: "inputGVector")
+        alphaFilter?.setValue(CIVector(x: 0, y: 0, z: 1, w: 0), forKey: "inputBVector")
+        alphaFilter?.setValue(CIVector(x: 0, y: 0, z: 0, w: CGFloat(alpha)), forKey: "inputAVector")
+
+        guard let alphaAdjusted = alphaFilter?.outputImage else {
+            return lutApplied
+        }
+
+        blendFilter.setValue(alphaAdjusted, forKey: kCIInputImageKey)
+        blendFilter.setValue(image, forKey: kCIInputBackgroundImageKey)
+
+        return blendFilter.outputImage ?? image
+    }
+
+    // 解析 .cube 格式 LUT（Adobe 标准格式）
+    private static func parseCubeLUT(from url: URL) -> (data: Data, size: Int)? {
+        guard let lutString = try? String(contentsOf: url, encoding: .utf8) else {
+            return nil
+        }
+
+        let lines = lutString.components(separatedBy: .newlines)
+        var cubeSize: Int?
+        var floatData: [Float] = []
+
+        // 解析 LUT_3D_SIZE
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("LUT_3D_SIZE") {
+                let parts = trimmed.components(separatedBy: .whitespaces)
+                if parts.count >= 2, let size = Int(parts[1]) {
+                    cubeSize = size
+                    break
+                }
+            }
+        }
+
+        guard let size = cubeSize else {
+            return nil
+        }
+
+        // 解析数据
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty || trimmed.hasPrefix("#") || trimmed.hasPrefix("TITLE") ||
+                trimmed.hasPrefix("LUT_") || trimmed.hasPrefix("DOMAIN_")
+            {
+                continue
+            }
+
+            let values = trimmed.components(separatedBy: .whitespaces).compactMap { Float($0) }
+            if values.count == 3 {
+                floatData.append(values[0])
+                floatData.append(values[1])
+                floatData.append(values[2])
+                floatData.append(1.0)
+            }
+        }
+
+        let expectedCount = size * size * size * 4
+        guard floatData.count == expectedCount else {
+            return nil
+        }
+
+        let data = Data(bytes: floatData, count: floatData.count * MemoryLayout<Float>.size)
+        return (data, size)
+    }
+
+    // 解析 .3dl 格式 LUT（Autodesk/Lustre 格式）
+    private static func parse3DLLUT(from url: URL) -> (data: Data, size: Int)? {
+        guard let lutString = try? String(contentsOf: url, encoding: .utf8) else {
+            return nil
+        }
+
+        let lines = lutString.components(separatedBy: .newlines)
+        var floatData: [Float] = []
+        var meshSize: Int?
+
+        // 查找 Mesh 行
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("Mesh") {
+                let parts = trimmed.components(separatedBy: .whitespaces)
+                if parts.count >= 2, let size = Int(parts[1]) {
+                    meshSize = size
+                }
+            }
+        }
+
+        let size = meshSize ?? 32
+
+        // 解析数据行
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty || trimmed.hasPrefix("#") || trimmed.hasPrefix("Mesh") {
+                continue
+            }
+
+            let values = trimmed.components(separatedBy: .whitespaces).compactMap { Float($0) }
+            if values.count == 3 {
+                // .3dl 格式值范围是 0-1023 或 0-4095，需要归一化
+                let maxValue: Float = values.max() ?? 1.0
+                let scale = maxValue > 10.0 ? maxValue : 1.0
+
+                floatData.append(values[0] / scale)
+                floatData.append(values[1] / scale)
+                floatData.append(values[2] / scale)
+                floatData.append(1.0)
+            }
+        }
+
+        let expectedCount = size * size * size * 4
+        guard floatData.count == expectedCount else {
+            return nil
+        }
+
+        let data = Data(bytes: floatData, count: floatData.count * MemoryLayout<Float>.size)
+        return (data, size)
+    }
+
+    // 解析二进制 .lut 格式
+    private static func parseBinaryLUT(from url: URL) -> (data: Data, size: Int)? {
+        guard let rawData = try? Data(contentsOf: url) else {
+            return nil
+        }
+
+        // 常见的二进制 LUT 格式：64x64x64 或 32x32x32
+        // 尝试推断尺寸
+        let dataSize = rawData.count
+
+        let possibleSizes = [64, 33, 32, 17, 16]
+        var cubeSize: Int?
+
+        for size in possibleSizes {
+            let expectedBytes = size * size * size * 3 * MemoryLayout<Float>.size
+            if dataSize == expectedBytes {
+                cubeSize = size
+                break
+            }
+        }
+
+        guard let size = cubeSize else {
+            return nil
+        }
+
+        // 读取并转换数据
+        var floatData: [Float] = []
+        let floatCount = size * size * size * 3
+
+        rawData.withUnsafeBytes { (ptr: UnsafeRawBufferPointer) in
+            let floatPtr = ptr.bindMemory(to: Float.self)
+            for i in 0 ..< floatCount {
+                if i % 3 == 0, i > 0 {
+                    floatData.append(1.0)
+                }
+                floatData.append(floatPtr[i])
+            }
+            floatData.append(1.0)
+        }
+
+        let data = Data(bytes: floatData, count: floatData.count * MemoryLayout<Float>.size)
+        return (data, size)
     }
 
     private static func applyTransform(

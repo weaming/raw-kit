@@ -1,8 +1,8 @@
 import CoreImage
 import Foundation
 
-struct CurveAdjustment: Equatable {
-    enum Channel {
+struct CurveAdjustment: Equatable, Codable {
+    enum Channel: String, Codable {
         case rgb
         case red
         case green
@@ -17,12 +17,13 @@ struct CurveAdjustment: Equatable {
         lhs.channel == rhs.channel && lhs.points == rhs.points
     }
 
-    struct CurvePoint: Equatable, Identifiable {
-        let id = UUID()
+    struct CurvePoint: Equatable, Identifiable, Codable {
+        let id: UUID
         var input: Double
         var output: Double
 
         init(input: Double, output: Double) {
+            id = UUID()
             self.input = max(0, min(1, input))
             self.output = max(0, min(1, output))
         }

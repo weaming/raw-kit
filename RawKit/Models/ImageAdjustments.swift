@@ -1,6 +1,6 @@
 import Foundation
 
-struct ImageAdjustments: Equatable {
+struct ImageAdjustments: Equatable, Codable {
     var brightness: Double = 0.0
     var contrast: Double = 1.0
     var saturation: Double = 1.0
@@ -27,6 +27,9 @@ struct ImageAdjustments: Equatable {
     var blueCurve = CurveAdjustment()
     var luminanceCurve = CurveAdjustment()
 
+    var lutURL: URL?
+    var lutAlpha: Double = 1.0
+
     static let `default` = ImageAdjustments()
 
     var hasAdjustments: Bool {
@@ -39,17 +42,21 @@ struct ImageAdjustments: Equatable {
     }
 
     mutating func reset() {
-        // 保留变换设置
+        // 保留变换设置和 LUT 设置
         let savedRotation = rotation
         let savedFlipH = flipHorizontal
         let savedFlipV = flipVertical
+        let savedLutURL = lutURL
+        let savedLutAlpha = lutAlpha
 
         self = .default
 
-        // 恢复变换设置
+        // 恢复变换设置和 LUT 设置
         rotation = savedRotation
         flipHorizontal = savedFlipH
         flipVertical = savedFlipV
+        lutURL = savedLutURL
+        lutAlpha = savedLutAlpha
     }
 
     // 检查基础调整组是否有变化
