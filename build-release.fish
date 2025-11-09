@@ -92,3 +92,5 @@ echo "   2. 将 $APP_NAME.app 拖到 /Applications 文件夹"
 echo "   3. 或者运行: cp -R '$OUTPUT_DIR/$APP_NAME.app' /Applications/"
 echo ""
 echo "🎉 完成！"
+
+open ./build/Release/
