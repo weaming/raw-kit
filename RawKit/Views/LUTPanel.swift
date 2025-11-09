@@ -98,12 +98,13 @@ struct LUTPanel: View {
                         .font(.caption)
                         .foregroundColor(.secondary)
 
-                    Text("支持 .cube 格式")
+                    Text("支持 .cube .3dl .lut 格式")
                         .font(.caption2)
                         .foregroundColor(.secondary.opacity(0.7))
                 }
                 .frame(maxWidth: .infinity, alignment: .center)
                 .padding(.vertical, 20)
+
             } else {
                 ScrollView {
                     VStack(spacing: 4) {
@@ -214,25 +215,100 @@ struct LUTPanel: View {
         let dl3Type = UTType(filenameExtension: "3dl")
         let lutType = UTType(filenameExtension: "lut")
         panel.allowedContentTypes = [cubeType, dl3Type, lutType].compactMap(\.self)
-        panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = true
+        panel.message = "选择 LUT 文件或文件夹（支持子目录扫描）"
 
         panel.begin { response in
-            guard response == .OK, let url = panel.url else { return }
+            guard response == .OK else { return }
 
-            // 复制 LUT 文件到应用支持目录
-            let destURL = getLUTFolderURL().appendingPathComponent(url.lastPathComponent)
-
-            do {
-                if FileManager.default.fileExists(atPath: destURL.path) {
-                    try FileManager.default.removeItem(at: destURL)
-                }
-                try FileManager.default.copyItem(at: url, to: destURL)
-                loadLUTFiles()
-            } catch {
-                print("导入 LUT 失败: \(error)")
+            Task {
+                await importLUTFiles(from: panel.urls)
             }
         }
+    }
+
+    private func importLUTFiles(from urls: [URL]) async {
+        let supportedExtensions = ["cube", "3dl", "lut"]
+        var importedCount = 0
+        let lutFolder = getLUTFolderURL()
+
+        for url in urls {
+            var isDirectory: ObjCBool = false
+            FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
+
+            let lutURLs: [URL] = if isDirectory.boolValue {
+                scanLUTFiles(in: url, supportedExtensions: supportedExtensions)
+            } else {
+                [url]
+            }
+
+            for lutURL in lutURLs {
+                guard supportedExtensions.contains(lutURL.pathExtension.lowercased()) else {
+                    continue
+                }
+
+                let fileName = lutURL.lastPathComponent
+                let destURL = lutFolder.appendingPathComponent(fileName)
+
+                do {
+                    if FileManager.default.fileExists(atPath: destURL.path) {
+                        let existingName = destURL.deletingPathExtension().lastPathComponent
+                        let ext = destURL.pathExtension
+                        var counter = 1
+                        var newDestURL = destURL
+
+                        while FileManager.default.fileExists(atPath: newDestURL.path) {
+                            let newName = "\(existingName)_\(counter).\(ext)"
+                            newDestURL = lutFolder.appendingPathComponent(newName)
+                            counter += 1
+                        }
+
+                        try FileManager.default.copyItem(at: lutURL, to: newDestURL)
+                    } else {
+                        try FileManager.default.copyItem(at: lutURL, to: destURL)
+                    }
+
+                    importedCount += 1
+                } catch {
+                    print("导入 LUT 失败 [\(fileName)]: \(error)")
+                }
+            }
+        }
+
+        await MainActor.run {
+            loadLUTFiles()
+            print("成功导入 \(importedCount) 个 LUT 文件")
+        }
+    }
+
+    private func scanLUTFiles(in directory: URL, supportedExtensions: [String]) -> [URL] {
+        var lutFiles: [URL] = []
+        let fileManager = FileManager.default
+
+        guard let enumerator = fileManager.enumerator(
+            at: directory,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+
+        for case let fileURL as URL in enumerator {
+            guard let resourceValues = try? fileURL.resourceValues(forKeys: [.isRegularFileKey]),
+                  let isRegularFile = resourceValues.isRegularFile,
+                  isRegularFile
+            else {
+                continue
+            }
+
+            if supportedExtensions.contains(fileURL.pathExtension.lowercased()) {
+                lutFiles.append(fileURL)
+            }
+        }
+
+        return lutFiles.sorted { $0.lastPathComponent < $1.lastPathComponent }
     }
 
     private func deleteLUT(_ lut: LUTFile) {
