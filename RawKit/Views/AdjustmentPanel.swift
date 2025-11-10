@@ -2,7 +2,8 @@ import SwiftUI
 
 struct ResizableAdjustmentPanel: View {
     @Binding var adjustments: ImageAdjustments
-    let ciImage: CIImage?
+    let originalCIImage: CIImage?
+    let adjustedCIImage: CIImage?
     @Binding var width: CGFloat
     @Binding var whiteBalancePickMode: CurveAdjustmentView.PickMode
     @State private var expandedSection: AdjustmentSection? = .basic
@@ -35,7 +36,8 @@ struct ResizableAdjustmentPanel: View {
 
             AdjustmentPanel(
                 adjustments: $adjustments,
-                ciImage: ciImage,
+                originalCIImage: originalCIImage,
+                adjustedCIImage: adjustedCIImage,
                 whiteBalancePickMode: $whiteBalancePickMode
             )
             .frame(width: width)
@@ -45,7 +47,8 @@ struct ResizableAdjustmentPanel: View {
 
 struct AdjustmentPanel: View {
     @Binding var adjustments: ImageAdjustments
-    let ciImage: CIImage?
+    let originalCIImage: CIImage?
+    let adjustedCIImage: CIImage?
     @Binding var whiteBalancePickMode: CurveAdjustmentView.PickMode
     @State private var expandedSections: Set<AdjustmentSection> = [.basic, .color]
     @State private var histogram: (red: [Int], green: [Int], blue: [Int])?
@@ -85,7 +88,8 @@ struct AdjustmentPanel: View {
 
             ScrollView {
                 VStack(spacing: 0) {
-                    AdjustmentSection.basic.view(
+                    CollapsibleSection(
+                        section: .basic,
                         isExpanded: expandedSections.contains(.basic),
                         hasChanges: adjustments.hasBasicAdjustments,
                         onToggle: { toggleSection(.basic) },
@@ -94,7 +98,8 @@ struct AdjustmentPanel: View {
                         BasicAdjustmentsView(adjustments: $adjustments)
                     }
 
-                    AdjustmentSection.color.view(
+                    CollapsibleSection(
+                        section: .color,
                         isExpanded: expandedSections.contains(.color),
                         hasChanges: adjustments.hasColorAdjustments,
                         onToggle: { toggleSection(.color) },
@@ -102,12 +107,14 @@ struct AdjustmentPanel: View {
                     ) {
                         ColorAdjustmentsView(
                             adjustments: $adjustments,
-                            ciImage: ciImage,
+                            originalCIImage: originalCIImage,
+                            adjustedCIImage: adjustedCIImage,
                             whiteBalancePickMode: $whiteBalancePickMode
                         )
                     }
 
-                    AdjustmentSection.detail.view(
+                    CollapsibleSection(
+                        section: .detail,
                         isExpanded: expandedSections.contains(.detail),
                         hasChanges: adjustments.hasDetailAdjustments,
                         onToggle: { toggleSection(.detail) },
@@ -119,13 +126,13 @@ struct AdjustmentPanel: View {
             }
         }
         .ignoresSafeArea(edges: .top) // 忽略顶部安全区域，让直方图顶到窗口边缘
-        .onChange(of: ciImage) { _, newValue in
+        .onChange(of: adjustedCIImage) { _, newValue in
             if newValue != nil {
                 loadHistogram()
             }
         }
         .onAppear {
-            if ciImage != nil {
+            if adjustedCIImage != nil {
                 loadHistogram()
             }
         }
@@ -140,12 +147,12 @@ struct AdjustmentPanel: View {
     }
 
     private func loadHistogram() {
-        guard let ciImage else {
-            print("AdjustmentPanel.loadHistogram: ciImage 为空")
+        guard let adjustedCIImage else {
+            print("AdjustmentPanel.loadHistogram: adjustedCIImage 为空")
             return
         }
         print("AdjustmentPanel.loadHistogram: 开始计算直方图")
-        histogram = calculateHistogram(from: ciImage)
+        histogram = calculateHistogram(from: adjustedCIImage)
         if histogram != nil {
             print("AdjustmentPanel.loadHistogram: 直方图加载成功")
         } else {
@@ -216,6 +223,74 @@ struct AdjustmentPanel: View {
         print("直方图计算完成: R前5个值=\(Array(red.prefix(5))), max=\(red.max() ?? 0)")
 
         return (red: red, green: green, blue: blue)
+    }
+}
+
+struct CollapsibleSection<Content: View>: View {
+    let section: AdjustmentSection
+    let isExpanded: Bool
+    let hasChanges: Bool
+    let onToggle: () -> Void
+    let onReset: () -> Void
+    let content: Content
+
+    init(
+        section: AdjustmentSection,
+        isExpanded: Bool,
+        hasChanges: Bool,
+        onToggle: @escaping () -> Void,
+        onReset: @escaping () -> Void,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.section = section
+        self.isExpanded = isExpanded
+        self.hasChanges = hasChanges
+        self.onToggle = onToggle
+        self.onReset = onReset
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Button(action: onToggle) {
+                    HStack(spacing: 8) {
+                        Text(section.title)
+                            .font(.subheadline)
+                            .fontWeight(.medium)
+
+                        Spacer()
+
+                        if hasChanges {
+                            Button(action: onReset) {
+                                Image(systemName: "arrow.uturn.backward")
+                                    .font(.body)
+                            }
+                            .buttonStyle(.borderless)
+                            .help("重置此组")
+                        }
+
+                        Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
+
+            content
+                .padding(.vertical, 12)
+                .frame(maxHeight: isExpanded ? nil : 0)
+                .clipped()
+                .opacity(isExpanded ? 1 : 0)
+                .animation(.easeInOut(duration: 0.2), value: isExpanded)
+
+            Divider()
+        }
     }
 }
 
@@ -347,13 +422,14 @@ struct BasicAdjustmentsView: View {
 
 struct ColorAdjustmentsView: View {
     @Binding var adjustments: ImageAdjustments
-    let ciImage: CIImage?
+    let originalCIImage: CIImage?
+    let adjustedCIImage: CIImage?
     @Binding var whiteBalancePickMode: CurveAdjustmentView.PickMode
 
     var body: some View {
         VStack(spacing: 16) {
-            // 白平衡取色器
-            VStack(alignment: .leading, spacing: 8) {
+            // 白平衡工具栏
+            HStack(spacing: 8) {
                 Button(action: {
                     whiteBalancePickMode = whiteBalancePickMode == .whiteBalance ? .none :
                         .whiteBalance
@@ -366,20 +442,30 @@ struct ColorAdjustmentsView: View {
                 .buttonStyle(.bordered)
                 .keyboardShortcut("w", modifiers: [])
 
-                if whiteBalancePickMode == .whiteBalance {
-                    Text("点击图片中的白色或中性灰色区域")
-                        .font(.caption)
-                        .foregroundColor(.blue)
+                Button(action: {
+                    applyAutoWhiteBalance()
+                }) {
+                    Text("自动")
                 }
+                .buttonStyle(.bordered)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 16)
+
+            if whiteBalancePickMode == .whiteBalance {
+                Text("点击图片中的白色或中性灰色区域")
+                    .font(.caption)
+                    .foregroundColor(.blue)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 16)
+                    .padding(.top, -8)
+            }
 
             SliderControl(
                 title: "色温",
                 value: $adjustments.temperature,
                 range: ImageAdjustments.temperatureRange,
-                step: 100
+                step: 1
             )
 
             SliderControl(
@@ -412,11 +498,23 @@ struct ColorAdjustmentsView: View {
             // 曲线调整
             WhiteBalanceAndCurveView(
                 adjustments: $adjustments,
-                ciImage: ciImage,
+                adjustedCIImage: adjustedCIImage,
                 pickMode: $whiteBalancePickMode
             )
         }
         .padding(.horizontal, 16)
+    }
+
+    private func applyAutoWhiteBalance() {
+        guard let originalCIImage else {
+            print("自动白平衡: originalCIImage 为空")
+            return
+        }
+
+        if let wb = ImageProcessor.calculateAutoWhiteBalance(from: originalCIImage) {
+            adjustments.temperature = wb.temperature
+            adjustments.tint = wb.tint
+        }
     }
 }
 
@@ -424,13 +522,13 @@ struct ColorAdjustmentsView: View {
 // 将 CurveAdjustmentView 嵌入到面板中
 struct WhiteBalanceAndCurveView: View {
     @Binding var adjustments: ImageAdjustments
-    let ciImage: CIImage?
+    let adjustedCIImage: CIImage?
     @Binding var pickMode: CurveAdjustmentView.PickMode
 
     var body: some View {
         CurveAdjustmentView(
             adjustments: $adjustments,
-            ciImage: ciImage,
+            ciImage: adjustedCIImage,
             pickMode: $pickMode
         )
         .padding(0)
@@ -467,11 +565,18 @@ struct DetailAdjustmentsView: View {
     }
 }
 
-struct SliderControl: View {
+struct SliderControl: View, Equatable {
     let title: String
     @Binding var value: Double
     let range: ClosedRange<Double>
     let step: Double
+
+    static func == (lhs: SliderControl, rhs: SliderControl) -> Bool {
+        lhs.title == rhs.title &&
+        lhs.value == rhs.value &&
+        lhs.range == rhs.range &&
+        lhs.step == rhs.step
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -490,11 +595,19 @@ struct SliderControl: View {
             }
 
             HStack(spacing: 8) {
-                Slider(value: $value, in: range, step: step)
-                    .onTapGesture(count: 2) {
-                        // 双击滑块重置为默认值
-                        resetToDefault()
-                    }
+                Slider(
+                    value: Binding(
+                        get: { value },
+                        set: { newValue in
+                            let steppedValue = round(newValue / step) * step
+                            value = steppedValue
+                        }
+                    ),
+                    in: range
+                )
+                .onTapGesture(count: 2) {
+                    resetToDefault()
+                }
 
                 Button(action: { resetToDefault() }) {
                     Image(systemName: "arrow.uturn.backward")
@@ -533,7 +646,7 @@ struct SliderControl: View {
         case "黑色": return value == defaultAdjustments.blacks
         case "清晰度": return value == defaultAdjustments.clarity
         case "去雾": return value == defaultAdjustments.dehaze
-        case "色温": return value == defaultAdjustments.temperature
+        case "色温": return abs(value - defaultAdjustments.temperature) < AppConfig.whitePointTolerance
         case "色调": return value == defaultAdjustments.tint
         case "自然饱和度": return value == defaultAdjustments.vibrance
         case "锐化": return value == defaultAdjustments.sharpness

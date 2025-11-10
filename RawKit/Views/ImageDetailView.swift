@@ -51,7 +51,8 @@ struct ImageDetailView: View {
                 Divider()
                 ResizableAdjustmentPanel(
                     adjustments: $adjustments,
-                    ciImage: adjustedCIImage ?? originalCIImage,
+                    originalCIImage: originalCIImage,
+                    adjustedCIImage: adjustedCIImage ?? originalCIImage,
                     width: $sidebarWidth,
                     whiteBalancePickMode: $whiteBalancePickMode
                 )
@@ -60,6 +61,15 @@ struct ImageDetailView: View {
         .task {
             if let saved = savedAdjustments {
                 adjustments = saved
+            } else {
+                let fileExtension = imageInfo.url.pathExtension.lowercased()
+                if fileExtension == "dng" || ["arw", "cr2", "cr3", "nef", "orf", "raf", "rw2"].contains(fileExtension) {
+                    if let wb = ImageProcessor.extractRawWhiteBalance(from: imageInfo.url) {
+                        adjustments.temperature = wb.temperature
+                        adjustments.tint = wb.tint
+                        print("ImageDetailView: 应用原照白平衡 - 色温: \(wb.temperature), 色调: \(wb.tint)")
+                    }
+                }
             }
             await loadImageProgressively()
         }
@@ -198,20 +208,22 @@ struct ImageDetailView: View {
         // 计算采样点的色温特征（基于 R/B 比例）
         let rbRatio = r / max(b, 0.001)
 
-        // 将 R/B 比例映射到 neutral 色温（反向逻辑）
-        // rbRatio > 1.0（偏红/偏黄）-> 需要设置更高的 neutral 色温 -> 滤镜会降温加蓝
-        // rbRatio < 1.0（偏蓝）-> 需要设置更低的 neutral 色温 -> 滤镜会升温加红
-        let baseTemp = 6500.0
+        // 将 R/B 比例映射到色温（反向校正）
+        // rbRatio > 1.0（偏红/偏黄）-> 降低色温让画面变冷
+        // rbRatio < 1.0（偏蓝）-> 升高色温让画面变暖
+        let baseTemp = AppConfig.defaultWhitePoint
         let tempSensitivity = 2000.0
 
         let logRatio = log(rbRatio)
-        let neutralTemp = baseTemp + (logRatio * tempSensitivity)
+        let neutralTemp = baseTemp - (logRatio * tempSensitivity)
 
         // 计算采样点的色调特征（基于绿色偏差）
         let expectedGreen = (r + b) / 2.0
         let greenDiff = g - expectedGreen
 
-        // 将绿色偏差映射到 neutral 色调（反向逻辑）
+        // 将绿色偏差映射到色调（反向校正）
+        // greenDiff > 0（偏绿）-> 添加品红中和（正tint值）
+        // greenDiff < 0（偏品红）-> 添加绿色中和（负tint值）
         let tintSensitivity = 150.0
         let neutralTint = (greenDiff / max(luminance, 0.001)) * tintSensitivity
 

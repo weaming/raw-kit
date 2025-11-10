@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ContentView: View {
     @StateObject private var imageManager = ImageManager()
+    @StateObject private var thumbnailManager = ThumbnailManager()
     @State private var selectedIndices: Set<Int> = []
     @State private var displayedIndex: Int?
     @State private var adjustmentsCache: [UUID: ImageAdjustments] = [:]
@@ -34,6 +35,10 @@ struct ContentView: View {
                         onLoadPreset: { preset in
                             if let imageInfo = getCurrentImageInfo() {
                                 adjustmentsCache[imageInfo.id] = preset
+                                thumbnailManager.generateAdjustedThumbnail(
+                                    for: imageInfo,
+                                    with: preset
+                                )
                             }
                         },
                         onLoadLUT: { url in
@@ -41,6 +46,10 @@ struct ContentView: View {
                                 var currentAdj = adjustmentsCache[imageInfo.id] ?? .default
                                 currentAdj.lutURL = url
                                 adjustmentsCache[imageInfo.id] = currentAdj
+                                thumbnailManager.generateAdjustedThumbnail(
+                                    for: imageInfo,
+                                    with: currentAdj
+                                )
                             }
                         }
                     )
@@ -56,6 +65,10 @@ struct ContentView: View {
                         sidebarWidth: $rightSidebarWidth,
                         onAdjustmentsChanged: { newAdjustments in
                             adjustmentsCache[imageInfo.id] = newAdjustments
+                            thumbnailManager.generateAdjustedThumbnail(
+                                for: imageInfo,
+                                with: newAdjustments
+                            )
                         },
                         history: getCurrentHistory()
                     )
@@ -80,6 +93,8 @@ struct ContentView: View {
                     images: imageManager.images,
                     selectedIndices: $selectedIndices,
                     displayedIndex: $displayedIndex,
+                    adjustmentsCache: adjustmentsCache,
+                    thumbnailManager: thumbnailManager,
                     onDelete: handleDelete
                 )
             }

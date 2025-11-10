@@ -50,13 +50,28 @@ struct ImageInfo: Identifiable {
     }
 
     private static func generateThumbnail(for url: URL) -> NSImage? {
+        let thumbnailURL: URL?
+
+        if url.pathExtension.lowercased() == "x3f" {
+            thumbnailURL = getSameNameJpeg(for: url)
+            if thumbnailURL == nil {
+                return nil
+            }
+        } else {
+            thumbnailURL = url
+        }
+
+        guard let sourceURL = thumbnailURL else {
+            return nil
+        }
+
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceThumbnailMaxPixelSize: 120,
         ]
 
-        guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil),
+        guard let imageSource = CGImageSourceCreateWithURL(sourceURL as CFURL, nil),
               let cgImage = CGImageSourceCreateThumbnailAtIndex(
                   imageSource,
                   0,
@@ -67,6 +82,22 @@ struct ImageInfo: Identifiable {
         }
 
         return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+    }
+
+    private static func getSameNameJpeg(for x3fURL: URL) -> URL? {
+        let directory = x3fURL.deletingLastPathComponent()
+        let baseName = x3fURL.deletingPathExtension().lastPathComponent
+
+        let jpegExtensions = ["jpg", "jpeg", "JPG", "JPEG"]
+
+        for ext in jpegExtensions {
+            let jpegURL = directory.appendingPathComponent(baseName).appendingPathExtension(ext)
+            if FileManager.default.fileExists(atPath: jpegURL.path) {
+                return jpegURL
+            }
+        }
+
+        return nil
     }
 
     private static func getColorSpaceInfo(for url: URL) -> (space: String?, profile: String?) {

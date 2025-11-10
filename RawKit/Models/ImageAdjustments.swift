@@ -12,7 +12,7 @@ struct ImageAdjustments: Equatable, Codable {
     var blacks: Double = 0.0
     var clarity: Double = 0.0
     var dehaze: Double = 0.0
-    var temperature: Double = 6500.0
+    var temperature: Double = AppConfig.defaultWhitePoint
     var tint: Double = 0.0
     var vibrance: Double = 0.0
     var sharpness: Double = 0.0
@@ -76,7 +76,7 @@ struct ImageAdjustments: Equatable, Codable {
     var hasColorAdjustments: Bool {
         saturation != 1.0 ||
             vibrance != 0.0 ||
-            temperature != 6500.0 ||
+            abs(temperature - AppConfig.defaultWhitePoint) > AppConfig.whitePointTolerance ||
             tint != 0.0 ||
             rgbCurve.hasPoints ||
             redCurve.hasPoints ||
@@ -108,7 +108,7 @@ struct ImageAdjustments: Equatable, Codable {
     mutating func resetColor() {
         saturation = 1.0
         vibrance = 0.0
-        temperature = 6500.0
+        temperature = AppConfig.defaultWhitePoint
         tint = 0.0
         rgbCurve.reset()
         redCurve.reset()

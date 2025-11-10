@@ -24,9 +24,24 @@ class ImageProcessor {
         return CIContext(options: options)
     }()
 
+    private static func isRawFormat(_ ext: String) -> Bool {
+        ["arw", "cr2", "cr3", "nef", "orf", "raf", "rw2"].contains(ext)
+    }
+
     static func loadThumbnail(from url: URL) -> CIImage? {
         guard FileManager.default.fileExists(atPath: url.path) else {
             return nil
+        }
+
+        let fileExtension = url.pathExtension.lowercased()
+
+        if fileExtension == "dng" || isRawFormat(fileExtension) {
+            if let rawImage = loadRawWithFilter(from: url) {
+                let extent = rawImage.extent
+                let scale = min(512.0 / extent.width, 512.0 / extent.height)
+                let transform = CGAffineTransform(scaleX: scale, y: scale)
+                return rawImage.transformed(by: transform)
+            }
         }
 
         guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil) else {
@@ -53,6 +68,20 @@ class ImageProcessor {
     static func loadMediumResolution(from url: URL) -> CIImage? {
         guard FileManager.default.fileExists(atPath: url.path) else {
             return nil
+        }
+
+        let fileExtension = url.pathExtension.lowercased()
+
+        if fileExtension == "dng" || isRawFormat(fileExtension) {
+            if let rawImage = loadRawWithFilter(from: url) {
+                let extent = rawImage.extent
+                let scale = min(2048.0 / extent.width, 2048.0 / extent.height)
+                if scale < 1.0 {
+                    let transform = CGAffineTransform(scaleX: scale, y: scale)
+                    return rawImage.transformed(by: transform)
+                }
+                return rawImage
+            }
         }
 
         guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil) else {
@@ -148,11 +177,18 @@ class ImageProcessor {
     private static func loadWithCoreImage(from url: URL) -> CIImage? {
         print("ImageProcessor: 尝试加载图片: \(url.lastPathComponent)")
 
-        // 对于 X3F 格式，跳过 CIImage 加载，直接使用 x3f-extract
         let fileExtension = url.pathExtension.lowercased()
+
         if fileExtension == "x3f" {
             print("ImageProcessor: X3F 格式，跳过 CIImage 加载")
             return nil
+        }
+
+        if fileExtension == "dng" || isRawFormat(fileExtension) {
+            print("ImageProcessor: RAW/DNG 格式，使用 RAW 过滤器加载")
+            if let rawImage = loadRawWithFilter(from: url) {
+                return rawImage
+            }
         }
 
         let options: [CIImageOption: Any] = [
@@ -184,6 +220,297 @@ class ImageProcessor {
         return CIImage(cgImage: cgImage)
     }
 
+    static func extractRawWhiteBalance(from url: URL) -> (temperature: Double, tint: Double)? {
+        guard let rawFilter = CIFilter(imageURL: url, options: [:]) else {
+            return nil
+        }
+
+        let neutralTemp = rawFilter.value(forKey: "inputNeutralTemperature") as? NSNumber
+        let neutralTint = rawFilter.value(forKey: "inputNeutralTint") as? NSNumber
+
+        if let temp = neutralTemp, let tint = neutralTint {
+            print("ImageProcessor: 提取原照白平衡 - 色温: \(temp), 色调: \(tint)")
+            return (temp.doubleValue, tint.doubleValue)
+        }
+
+        return nil
+    }
+
+    static func calculateAutoWhiteBalance(from ciImage: CIImage) -> (temperature: Double, tint: Double)? {
+        let extent = ciImage.extent
+
+        let maxDimension: CGFloat = 512
+        let scale = min(1.0, maxDimension / max(extent.width, extent.height))
+
+        let scaledImage: CIImage
+        if scale < 1.0 {
+            scaledImage = ciImage.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        } else {
+            scaledImage = ciImage
+        }
+
+        // OpenCV Gray World 算法（简单直接，不迭代）
+        guard let pixelData = extractPixelData(from: scaledImage) else {
+            return nil
+        }
+
+        // 1. 计算每个通道的平均值
+        var rSum: Double = 0
+        var gSum: Double = 0
+        var bSum: Double = 0
+
+        for pixel in pixelData {
+            rSum += pixel.r
+            gSum += pixel.g
+            bSum += pixel.b
+        }
+
+        let count = Double(pixelData.count)
+        let avgR = rSum / count
+        let avgG = gSum / count
+        let avgB = bSum / count
+
+        // 2. 计算灰色目标（所有通道的平均）
+        let gray = (avgR + avgG + avgB) / 3.0
+
+        // 3. 计算增益
+        let kr = gray / max(avgR, 0.001)
+        let kg = gray / max(avgG, 0.001)
+        let kb = gray / max(avgB, 0.001)
+
+        print("OpenCV Gray World: RGB平均=(\(String(format: "%.4f", avgR)), \(String(format: "%.4f", avgG)), \(String(format: "%.4f", avgB)))")
+        print("  灰色目标=\(String(format: "%.4f", gray))")
+        print("  RGB增益=(R:\(String(format: "%.4f", kr)), G:\(String(format: "%.4f", kg)), B:\(String(format: "%.4f", kb)))")
+
+        // 4. 归一化到绿色通道（标准做法）
+        let normalizedRedGain = kr / kg
+        let normalizedBlueGain = kb / kg
+
+        // 5. 转换为色温和色调
+        // 使用蓝/红比例计算色温
+        let colorRatio = normalizedBlueGain / normalizedRedGain
+
+        // 色温映射（经验公式）
+        let temperature = AppConfig.defaultWhitePoint * pow(colorRatio, -0.8)
+
+        // 色调基于绿色通道偏移
+        let greenOffset = kg - 1.0
+        let tint = -greenOffset * 100
+
+        let finalTemperature = max(2000, min(25000, temperature))
+        let finalTint = max(-150, min(150, tint))
+
+        print("  归一化增益=(R:\(String(format: "%.4f", normalizedRedGain)), G:1.0000, B:\(String(format: "%.4f", normalizedBlueGain)))")
+        print("最终结果: 色温=\(Int(finalTemperature)), 色调=\(Int(finalTint))")
+
+        return (finalTemperature, finalTint)
+    }
+
+    private static func applyRGBGains(to image: CIImage, r: Double, g: Double, b: Double) -> CIImage {
+        guard let filter = CIFilter(name: "CIColorMatrix") else { return image }
+        filter.setValue(image, forKey: kCIInputImageKey)
+
+        let rVector = CIVector(x: r, y: 0, z: 0, w: 0)
+        let gVector = CIVector(x: 0, y: g, z: 0, w: 0)
+        let bVector = CIVector(x: 0, y: 0, z: b, w: 0)
+        let aVector = CIVector(x: 0, y: 0, z: 0, w: 1)
+        let biasVector = CIVector(x: 0, y: 0, z: 0, w: 0)
+
+        filter.setValue(rVector, forKey: "inputRVector")
+        filter.setValue(gVector, forKey: "inputGVector")
+        filter.setValue(bVector, forKey: "inputBVector")
+        filter.setValue(aVector, forKey: "inputAVector")
+        filter.setValue(biasVector, forKey: "inputBiasVector")
+
+        return filter.outputImage ?? image
+    }
+
+    private static func sign(_ value: Double) -> Double {
+        if value > 0 { return 1.0 }
+        if value < 0 { return -1.0 }
+        return 0.0
+    }
+
+    private static func extractPixelData(from ciImage: CIImage) -> [(r: Double, g: Double, b: Double)]? {
+        let extent = ciImage.extent
+        guard extent.width > 0, extent.height > 0 else {
+            return nil
+        }
+
+        let bytesPerPixel = 4
+        let bytesPerRow = Int(extent.width) * bytesPerPixel * MemoryLayout<Float>.size
+        let totalFloats = Int(extent.width) * Int(extent.height) * bytesPerPixel
+
+        var pixelData = [Float](repeating: 0, count: totalFloats)
+
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        ciContext.render(
+            ciImage,
+            toBitmap: &pixelData,
+            rowBytes: bytesPerRow,
+            bounds: extent,
+            format: .RGBAf,
+            colorSpace: colorSpace
+        )
+
+        var result: [(r: Double, g: Double, b: Double)] = []
+        let pixelCount = Int(extent.width) * Int(extent.height)
+
+        for i in 0 ..< pixelCount {
+            let offset = i * bytesPerPixel
+            let r = Double(pixelData[offset])
+            let g = Double(pixelData[offset + 1])
+            let b = Double(pixelData[offset + 2])
+            result.append((r: r, g: g, b: b))
+        }
+
+        return result
+    }
+
+    private static func calculateAverageRGB(from ciImage: CIImage) -> (red: Double, green: Double, blue: Double)? {
+        let extent = ciImage.extent
+        guard extent.width > 0, extent.height > 0 else {
+            return nil
+        }
+
+        let bytesPerPixel = 4
+        let bytesPerRow = Int(extent.width) * bytesPerPixel * MemoryLayout<Float>.size
+        let totalFloats = Int(extent.width) * Int(extent.height) * bytesPerPixel
+
+        var pixelData = [Float](repeating: 0, count: totalFloats)
+
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        ciContext.render(
+            ciImage,
+            toBitmap: &pixelData,
+            rowBytes: bytesPerRow,
+            bounds: extent,
+            format: .RGBAf,
+            colorSpace: colorSpace
+        )
+
+        let pixelCount = Int(extent.width) * Int(extent.height)
+
+        // 收集所有亮度值
+        var brightnessValues: [Double] = []
+        for i in 0 ..< pixelCount {
+            let offset = i * bytesPerPixel
+            let r = Double(pixelData[offset])
+            let g = Double(pixelData[offset + 1])
+            let b = Double(pixelData[offset + 2])
+            let luminance = r * 0.299 + g * 0.587 + b * 0.114
+            brightnessValues.append(luminance)
+        }
+
+        // 使用百分位数确定范围
+        brightnessValues.sort()
+        let lowerBound = brightnessValues[Int(Double(brightnessValues.count) * 0.05)]
+        let upperBound = brightnessValues[Int(Double(brightnessValues.count) * 0.95)]
+
+        var redSum: Double = 0
+        var greenSum: Double = 0
+        var blueSum: Double = 0
+        var validPixelCount = 0
+
+        for i in 0 ..< pixelCount {
+            let offset = i * bytesPerPixel
+            let r = Double(pixelData[offset])
+            let g = Double(pixelData[offset + 1])
+            let b = Double(pixelData[offset + 2])
+            let luminance = brightnessValues[i]
+
+            if luminance > lowerBound && luminance < upperBound {
+                redSum += r
+                greenSum += g
+                blueSum += b
+                validPixelCount += 1
+            }
+        }
+
+        guard validPixelCount > 0 else {
+            return nil
+        }
+
+        let avgRed = redSum / Double(validPixelCount)
+        let avgGreen = greenSum / Double(validPixelCount)
+        let avgBlue = blueSum / Double(validPixelCount)
+
+        return (avgRed, avgGreen, avgBlue)
+    }
+
+    private static func loadRawWithFilter(from url: URL) -> CIImage? {
+        guard let rawFilter = CIFilter(imageURL: url, options: [:]) else {
+            print("ImageProcessor: ✗ 无法创建 RAW 过滤器")
+            return nil
+        }
+
+        print("ImageProcessor: 使用日光白平衡加载 RAW 数据")
+
+        rawFilter.setValue(AppConfig.defaultWhitePoint, forKey: "inputNeutralTemperature")
+        rawFilter.setValue(0.0, forKey: "inputNeutralTint")
+        print("ImageProcessor: ✓ 设置日光白平衡 (\(AppConfig.defaultWhitePoint)K, Tint 0)")
+
+        if rawFilter.inputKeys.contains("inputDraftMode") {
+            rawFilter.setValue(false, forKey: "inputDraftMode")
+            print("ImageProcessor: ✓ 禁用草稿模式")
+        }
+
+        if rawFilter.inputKeys.contains("inputEV") {
+            rawFilter.setValue(0.0, forKey: "inputEV")
+        }
+
+        if rawFilter.inputKeys.contains("inputBoost") {
+            rawFilter.setValue(1.0, forKey: "inputBoost")
+        }
+
+        if rawFilter.inputKeys.contains("inputBaselineExposure") {
+            rawFilter.setValue(0.0, forKey: "inputBaselineExposure")
+        }
+
+        if rawFilter.inputKeys.contains("inputLinearSpaceFilter") {
+            if let linearFilter = rawFilter.value(forKey: "inputLinearSpaceFilter") {
+                print("ImageProcessor: 检测到线性空间过滤器: \(linearFilter)")
+            }
+        }
+
+        if rawFilter.inputKeys.contains("inputDisableGamutMap") {
+            rawFilter.setValue(false, forKey: "inputDisableGamutMap")
+            print("ImageProcessor: ✓ 启用色域映射")
+        }
+
+        if rawFilter.inputKeys.contains("inputEnableSharpening") {
+            rawFilter.setValue(false, forKey: "inputEnableSharpening")
+        }
+
+        if rawFilter.inputKeys.contains("inputEnableNoiseTracking") {
+            rawFilter.setValue(false, forKey: "inputEnableNoiseTracking")
+        }
+
+        if rawFilter.inputKeys.contains("inputLuminanceNoiseReductionAmount") {
+            rawFilter.setValue(0.0, forKey: "inputLuminanceNoiseReductionAmount")
+        }
+
+        if rawFilter.inputKeys.contains("inputColorNoiseReductionAmount") {
+            rawFilter.setValue(0.0, forKey: "inputColorNoiseReductionAmount")
+        }
+
+        if rawFilter.inputKeys.contains("inputEnableVendorLensCorrection") {
+            rawFilter.setValue(false, forKey: "inputEnableVendorLensCorrection")
+        }
+
+        if rawFilter.inputKeys.contains("inputIgnoreOrientation") {
+            rawFilter.setValue(false, forKey: "inputIgnoreOrientation")
+        }
+
+        guard let outputImage = rawFilter.outputImage else {
+            print("ImageProcessor: ✗ RAW 过滤器无输出")
+            return nil
+        }
+
+        print("ImageProcessor: ✓ RAW 过滤器加载成功（中性白平衡）")
+        return outputImage
+    }
+
     private static func loadWithX3fExtract(from url: URL) async -> NSImage? {
         print("ImageProcessor: 尝试使用 x3f-extract 加载: \(url.lastPathComponent)")
 
@@ -206,10 +533,11 @@ class ImageProcessor {
         let expectedOutputPath = tempDir.appendingPathComponent(outputFileName)
 
         // 执行 x3f-extract 命令
-        // 参数: -dng -o <输出目录> <输入文件>
+        // 参数: -dng -wb Sunlight -o <输出目录> <输入文件>
+        // -wb Sunlight: 使用日光白平衡 (值为 2)
         let process = Process()
         process.executableURL = URL(fileURLWithPath: x3fPath)
-        process.arguments = ["-dng", "-o", tempDir.path, url.path]
+        process.arguments = ["-dng", "-wb", "Sunlight", "-o", tempDir.path, url.path]
 
         let errorPipe = Pipe()
         let outputPipe = Pipe()
@@ -299,7 +627,7 @@ class ImageProcessor {
             )
         }
 
-        if adjustments.temperature != 6500.0 || adjustments.tint != 0.0 {
+        if abs(adjustments.temperature - AppConfig.defaultWhitePoint) > AppConfig.whitePointTolerance || adjustments.tint != 0.0 {
             result = applyWhiteBalance(
                 to: result,
                 temperature: adjustments.temperature,
@@ -529,11 +857,15 @@ class ImageProcessor {
         guard let filter = CIFilter(name: "CITemperatureAndTint") else { return image }
         filter.setValue(image, forKey: kCIInputImageKey)
 
-        // CIVector(x: 色温, y: 色调)
-        // neutral: 源图片的白点（采样点测得的色温和色调）
-        // targetNeutral: 目标白点（6500K 中性色温 + 0 色调）
+        // CITemperatureAndTint 工作原理：
+        // inputNeutral: 假设源图片中"应该是中性灰"的点的当前色温/色调
+        // inputTargetNeutral: 该点应该变成的目标色温/色调
+        //
+        // 用户在取色或设置白平衡时：
+        // - neutral 是采样点/用户设置的色温和色调（认为这应该是灰色）
+        // - target 是日光白平衡（配置的默认白点）
         let neutralPoint = CIVector(x: temperature, y: tint)
-        let targetPoint = CIVector(x: 6500, y: 0)
+        let targetPoint = CIVector(x: AppConfig.defaultWhitePoint, y: 0)
 
         filter.setValue(neutralPoint, forKey: "inputNeutral")
         filter.setValue(targetPoint, forKey: "inputTargetNeutral")

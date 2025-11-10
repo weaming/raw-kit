@@ -5,6 +5,8 @@ struct FilmstripView: View {
     let images: [ImageInfo]
     @Binding var selectedIndices: Set<Int>
     @Binding var displayedIndex: Int?
+    let adjustmentsCache: [UUID: ImageAdjustments]
+    let thumbnailManager: ThumbnailManager
     let onDelete: (Set<Int>) -> Void
 
     @State private var isExpanded = true
@@ -43,6 +45,7 @@ struct FilmstripView: View {
                         ForEach(Array(images.enumerated()), id: \.element.id) { index, imageInfo in
                             ThumbnailItemView(
                                 imageInfo: imageInfo,
+                                adjustedThumbnail: thumbnailManager.adjustedThumbnails[imageInfo.id],
                                 isSelected: selectedIndices.contains(index),
                                 isDisplayed: displayedIndex == index,
                                 size: thumbnailSize
@@ -53,6 +56,15 @@ struct FilmstripView: View {
                             .contextMenu {
                                 Button("删除") {
                                     onDelete([index])
+                                }
+                            }
+                            .onAppear {
+                                let adjustments = adjustmentsCache[imageInfo.id] ?? .default
+                                if adjustments.hasAdjustments || adjustments.lutURL != nil {
+                                    thumbnailManager.generateAdjustedThumbnail(
+                                        for: imageInfo,
+                                        with: adjustments
+                                    )
                                 }
                             }
                         }
@@ -93,13 +105,18 @@ struct FilmstripView: View {
 // 缩略图项
 struct ThumbnailItemView: View {
     let imageInfo: ImageInfo
+    let adjustedThumbnail: NSImage?
     let isSelected: Bool
     let isDisplayed: Bool
     let size: CGFloat
 
+    var displayThumbnail: NSImage? {
+        adjustedThumbnail ?? imageInfo.thumbnail
+    }
+
     var body: some View {
         ZStack(alignment: .topTrailing) {
-            if let thumbnail = imageInfo.thumbnail {
+            if let thumbnail = displayThumbnail {
                 Image(nsImage: thumbnail)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
