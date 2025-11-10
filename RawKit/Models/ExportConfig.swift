@@ -2,15 +2,26 @@ import Foundation
 
 // 导出格式
 enum ExportFormat: String, Codable, CaseIterable {
-    case dng = "DNG"
+    case tiff = "TIFF"
     case jpg = "JPEG"
     case heif = "HEIF"
+    case dng = "DNG"
 
     var fileExtension: String {
         switch self {
-        case .dng: "dng"
+        case .tiff: "tiff"
         case .jpg: "jpg"
         case .heif: "heic"
+        case .dng: "dng"
+        }
+    }
+
+    var description: String {
+        switch self {
+        case .tiff: "16-bit 无损，适合打印和后期处理"
+        case .jpg: "8-bit 有损压缩，适合网络分享"
+        case .heif: "10-bit 高效压缩，适合 Apple 生态"
+        case .dng: "16-bit 数字底片格式"
         }
     }
 }

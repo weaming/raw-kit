@@ -106,6 +106,8 @@ class ImageExporter {
         let cgColorSpace = getColorSpace(for: colorSpace)
 
         switch format {
+        case .tiff:
+            try exportTIFF(image, to: url, colorSpace: cgColorSpace, context: context)
         case .jpg:
             try exportJPEG(
                 image,
@@ -137,6 +139,44 @@ class ImageExporter {
             CGColorSpace(name: CGColorSpace.adobeRGB1998)!
         case .proPhotoRGB:
             CGColorSpace(name: CGColorSpace.rommrgb)!
+        }
+    }
+
+    private static func exportTIFF(
+        _ image: CIImage,
+        to url: URL,
+        colorSpace: CGColorSpace,
+        context: CIContext
+    ) throws {
+        guard let destination = CGImageDestinationCreateWithURL(
+            url as CFURL,
+            UTType.tiff.identifier as CFString,
+            1,
+            nil
+        ) else {
+            throw ExportError.failedToCreateDestination
+        }
+
+        // 使用 16-bit half float 格式以保留更多动态范围
+        guard let cgImage = context.createCGImage(
+            image,
+            from: image.extent,
+            format: .RGBAh,
+            colorSpace: colorSpace
+        )
+        else {
+            throw ExportError.failedToRenderImage
+        }
+
+        let properties: [String: Any] = [
+            kCGImagePropertyTIFFCompression as String: 5,
+            kCGImagePropertyHasAlpha as String: false,
+        ]
+
+        CGImageDestinationAddImage(destination, cgImage, properties as CFDictionary)
+
+        if !CGImageDestinationFinalize(destination) {
+            throw ExportError.failedToFinalizeExport
         }
     }
 
@@ -182,7 +222,6 @@ class ImageExporter {
         colorSpace: CGColorSpace,
         context: CIContext
     ) throws {
-        // DNG 导出需要使用 ImageIO
         guard let destination = CGImageDestinationCreateWithURL(
             url as CFURL,
             UTType.dng.identifier as CFString,
@@ -192,13 +231,11 @@ class ImageExporter {
             throw ExportError.failedToCreateDestination
         }
 
-        // 渲染为 CGImage
-        // 注意：CIContext.createCGImage 会根据图片是否透明自动选择合适的格式
-        // 使用 .RGBA8 格式，如果图片不透明，系统会优化
+        // 使用 16-bit half float 格式以保留更多动态范围
         guard let cgImage = context.createCGImage(
             image,
             from: image.extent,
-            format: .RGBA8,
+            format: .RGBAh,
             colorSpace: colorSpace
         )
         else {
@@ -208,7 +245,7 @@ class ImageExporter {
         let properties: [String: Any] = [
             kCGImagePropertyDNGVersion as String: "1.4.0.0",
             kCGImageDestinationLossyCompressionQuality as String: 1.0,
-            kCGImagePropertyHasAlpha as String: false, // 明确标记为不透明图片，避免保存 alpha 通道
+            kCGImagePropertyHasAlpha as String: false,
         ]
 
         CGImageDestinationAddImage(destination, cgImage, properties as CFDictionary)
