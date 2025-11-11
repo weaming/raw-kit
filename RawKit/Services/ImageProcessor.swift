@@ -17,6 +17,16 @@ class ImageProcessor {
             .priorityRequestLow: false,
         ]
 
+        // 使用扩展线性 sRGB 作为工作色彩空间
+        // extendedLinearSRGB 支持广色域和 HDR，适合 RAW 处理
+        if let extendedLinearSRGB = CGColorSpace(name: CGColorSpace.extendedLinearSRGB) {
+            options[.workingColorSpace] = extendedLinearSRGB
+            print("ImageProcessor: 使用扩展线性 sRGB 工作色彩空间（广色域）")
+        } else if let linearSRGB = CGColorSpace(name: CGColorSpace.linearSRGB) {
+            options[.workingColorSpace] = linearSRGB
+            print("ImageProcessor: 使用线性 sRGB 工作色彩空间")
+        }
+
         #if DEBUG
             options[.name] = "RawKit-CIContext"
         #endif
@@ -225,15 +235,172 @@ class ImageProcessor {
             return nil
         }
 
+        // 获取相机白平衡（As Shot）
         let neutralTemp = rawFilter.value(forKey: "inputNeutralTemperature") as? NSNumber
         let neutralTint = rawFilter.value(forKey: "inputNeutralTint") as? NSNumber
 
         if let temp = neutralTemp, let tint = neutralTint {
-            print("ImageProcessor: 提取原照白平衡 - 色温: \(temp), 色调: \(tint)")
+            print("ImageProcessor: 提取相机白平衡 - 色温: \(temp), 色调: \(tint)")
             return (temp.doubleValue, tint.doubleValue)
         }
 
         return nil
+    }
+
+    private static func isPreprocessedLinearSRGB(properties: [String: Any]) -> Bool {
+        // 检查 Image Description 是否包含 "Preprocessed linear sRGB" 或 "linear sRGB"
+        if let tiffDict = properties[kCGImagePropertyTIFFDictionary as String] as? [String: Any],
+           let imageDesc = tiffDict[kCGImagePropertyTIFFImageDescription as String] as? String {
+            let isPreprocessed = imageDesc.lowercased().contains("linear srgb")
+            if isPreprocessed {
+                print("ImageProcessor: 检测到预处理的线性 sRGB DNG: \"\(imageDesc)\"")
+            }
+            return isPreprocessed
+        }
+        return false
+    }
+
+    private static func extractCameraCalibration1(properties: [String: Any]) -> (r: Double, g: Double, b: Double)? {
+        // 读取 Camera Calibration 1 或 ColorCalibration1 对角矩阵（X3F DNG 用它存储白平衡增益）
+        guard let dngDict = properties[kCGImagePropertyDNGDictionary as String] as? [String: Any] else {
+            return nil
+        }
+
+        // X3F DNG 使用 "ColorCalibration1" 而不是标准的 "CameraCalibration1"
+        var calibration: [NSNumber]?
+        var keyUsed: String?
+
+        if let colorCalib = dngDict["ColorCalibration1"] as? [NSNumber], colorCalib.count >= 9 {
+            calibration = colorCalib
+            keyUsed = "ColorCalibration1"
+        } else if let cameraCalib = dngDict[kCGImagePropertyDNGCameraCalibration1 as String] as? [NSNumber], cameraCalib.count >= 9 {
+            calibration = cameraCalib
+            keyUsed = "CameraCalibration1"
+        }
+
+        guard let calibration = calibration, let keyUsed = keyUsed else {
+            return nil
+        }
+
+        // 提取对角线元素 [0,0], [1,1], [2,2]（3x3 矩阵按行优先存储）
+        let r = calibration[0].doubleValue  // [0,0]
+        let g = calibration[4].doubleValue  // [1,1]
+        let b = calibration[8].doubleValue  // [2,2]
+
+        print("ImageProcessor: 读取 \(keyUsed) 对角线: R=\(String(format: "%.4f", r)), G=\(String(format: "%.4f", g)), B=\(String(format: "%.4f", b))")
+
+        // 归一化到 G=1.0
+        let normalizedR = r / g
+        let normalizedG = 1.0
+        let normalizedB = b / g
+
+        print("ImageProcessor: \(keyUsed) 增益（归一化到 G=1.0）: R=\(String(format: "%.4f", normalizedR)), G=\(String(format: "%.4f", normalizedG)), B=\(String(format: "%.4f", normalizedB))")
+
+        return (r: normalizedR, g: normalizedG, b: normalizedB)
+    }
+
+    private static func extractAsShotNeutralGains(from url: URL) -> (r: Double, g: Double, b: Double)? {
+        guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil) else {
+            print("ImageProcessor: ✗ 无法创建 CGImageSource")
+            return nil
+        }
+
+        guard let properties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [String: Any] else {
+            print("ImageProcessor: ✗ 无法读取图像属性")
+            return nil
+        }
+
+        // 检查是否是预处理的线性 sRGB DNG
+        if isPreprocessedLinearSRGB(properties: properties) {
+            print("ImageProcessor: 预处理的线性 sRGB，跳过白平衡调整")
+            return nil
+        }
+
+        guard let dngDict = properties[kCGImagePropertyDNGDictionary as String] as? [String: Any] else {
+            print("ImageProcessor: ⚠️ 未找到 DNG 字典")
+            return nil
+        }
+
+        // 检测 X3F Foveon DNG（通过 ColorCalibration1 存在来判断）
+        // X3F DNG 的特点：
+        // 1. 有 ColorCalibration1 矩阵（对角矩阵，非单位矩阵）
+        // 2. White Level 不同（但 CGImageSource 读取不到）
+        // 3. CIRAWFilter 无法正确处理 X3F 原始 DNG
+        // 解决方案：标记为需要转换，在 loadRawWithFilter 中处理
+        if let colorCalib = dngDict["ColorCalibration1"] as? [NSNumber], colorCalib.count >= 9 {
+            let r = colorCalib[0].doubleValue
+            let g = colorCalib[4].doubleValue
+            let b = colorCalib[8].doubleValue
+
+            print("ImageProcessor: 检测到 ColorCalibration1: R=\(String(format: "%.4f", r)), G=\(String(format: "%.4f", g)), B=\(String(format: "%.4f", b))")
+
+            // 检查是否为非单位对角矩阵（X3F 特征）
+            let isNonIdentity = abs(r - 1.0) > 0.01 || abs(g - 1.0) > 0.01 || abs(b - 1.0) > 0.01
+            if isNonIdentity {
+                print("ImageProcessor: 检测到 X3F 原始 DNG（不支持直接加载）")
+                print("ImageProcessor: 需要使用 x3f-extract 转换为线性 sRGB DNG")
+                // 返回 nil 表示跳过白平衡调整，但需要在 loadRawWithFilter 中检测并转换
+                return nil
+            }
+        }
+
+        // 从 As Shot Neutral 计算白平衡（标准 Bayer DNG）
+        if let asShotNeutral = dngDict[kCGImagePropertyDNGAsShotNeutral as String] as? [NSNumber],
+           asShotNeutral.count >= 3 {
+
+            let asShotR = asShotNeutral[0].doubleValue
+            let asShotG = asShotNeutral[1].doubleValue
+            let asShotB = asShotNeutral[2].doubleValue
+
+            print("ImageProcessor: 读取 As Shot Neutral: R=\(asShotR), G=\(asShotG), B=\(asShotB)")
+
+            // 检查是否接近 [1, 1, 1]（误差 < 0.01）
+            let isNeutral = abs(asShotR - 1.0) < 0.01 && abs(asShotG - 1.0) < 0.01 && abs(asShotB - 1.0) < 0.01
+            if isNeutral {
+                print("ImageProcessor: As Shot Neutral ≈ [1,1,1]，已应用白平衡，跳过调整")
+                return nil
+            }
+
+            // 计算 RGB 增益：gain = 1.0 / asShotNeutral
+            let rGain = 1.0 / asShotR
+            let gGain = 1.0 / asShotG
+            let bGain = 1.0 / asShotB
+
+            // 归一化到 G=1.0
+            let normalizedR = rGain / gGain
+            let normalizedG = 1.0
+            let normalizedB = bGain / gGain
+
+            print("ImageProcessor: 计算白平衡增益（归一化到 G=1.0）: R=\(String(format: "%.4f", normalizedR)), G=\(String(format: "%.4f", normalizedG)), B=\(String(format: "%.4f", normalizedB))")
+
+            return (r: normalizedR, g: normalizedG, b: normalizedB)
+        }
+
+        print("ImageProcessor: ⚠️ 未找到 As Shot Neutral 数据")
+        return nil
+    }
+
+    private static func asShotNeutralToChromaticity(asShotR: Double, asShotG: Double, asShotB: Double) -> (x: Double, y: Double)? {
+        // As Shot Neutral 是相机认为应该显示为中性的 XYZ 归一化值
+        // 我们需要将其转换为 CIE xy 色度坐标
+
+        // As Shot Neutral 已经是 XYZ 的归一化值
+        let x = asShotR
+        let y = asShotG
+        let z = asShotB
+
+        // 计算 XYZ 总和
+        let sum = x + y + z
+
+        guard sum > 0 else {
+            return nil
+        }
+
+        // 转换为 CIE xy 色度坐标
+        let chromaticityX = x / sum
+        let chromaticityY = y / sum
+
+        return (x: chromaticityX, y: chromaticityY)
     }
 
     static func calculateAutoWhiteBalance(from ciImage: CIImage) -> (temperature: Double, tint: Double)? {
@@ -438,17 +605,209 @@ class ImageProcessor {
         return (avgRed, avgGreen, avgBlue)
     }
 
+    private static func isX3fRawDNG(url: URL) -> Bool {
+        guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [String: Any],
+              let dngDict = properties[kCGImagePropertyDNGDictionary as String] as? [String: Any],
+              let colorCalib = dngDict["ColorCalibration1"] as? [NSNumber],
+              colorCalib.count >= 9 else {
+            return false
+        }
+
+        let r = colorCalib[0].doubleValue
+        let g = colorCalib[4].doubleValue
+        let b = colorCalib[8].doubleValue
+
+        return abs(r - 1.0) > 0.01 || abs(g - 1.0) > 0.01 || abs(b - 1.0) > 0.01
+    }
+
+    private static func findX3fSourceFile(for dngURL: URL) -> URL? {
+        let directory = dngURL.deletingLastPathComponent()
+        let filename = dngURL.lastPathComponent
+
+        // DNG 文件名格式：DP3Q0109.X3F.old.dng 或 DP3Q0109.X3F.dng
+        // 对应的 X3F：DP3Q0109.X3F
+
+        var x3fName: String?
+
+        if filename.hasSuffix(".X3F.old.dng") {
+            x3fName = String(filename.dropLast(8)) // 去掉 ".old.dng"
+        } else if filename.hasSuffix(".X3F.dng") {
+            x3fName = String(filename.dropLast(4)) // 去掉 ".dng"
+        }
+
+        guard let x3fName = x3fName else {
+            return nil
+        }
+
+        let x3fURL = directory.appendingPathComponent(x3fName)
+        if FileManager.default.fileExists(atPath: x3fURL.path) {
+            return x3fURL
+        }
+
+        return nil
+    }
+
+    private static func convertX3fRawDNG(from url: URL) -> URL? {
+        // 寻找源 X3F 文件
+        guard let x3fURL = findX3fSourceFile(for: url) else {
+            print("ImageProcessor: ⚠️ 未找到对应的 X3F 源文件")
+            return nil
+        }
+
+        print("ImageProcessor: 找到源 X3F 文件: \(x3fURL.lastPathComponent)")
+
+        // 生成缓存路径
+        let cacheDir = FileManager.default.temporaryDirectory.appendingPathComponent("RawKit/X3F", isDirectory: true)
+        try? FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
+
+        let baseFilename = x3fURL.deletingPathExtension().lastPathComponent
+        let cachedURL = cacheDir.appendingPathComponent("\(baseFilename)_linear.dng")
+
+        // 检查缓存
+        if FileManager.default.fileExists(atPath: cachedURL.path) {
+            print("ImageProcessor: 使用缓存的线性 sRGB DNG: \(cachedURL.lastPathComponent)")
+            return cachedURL
+        }
+
+        print("ImageProcessor: 转换 X3F 为线性 sRGB DNG...")
+
+        // 从应用 bundle 中查找 x3f-extract
+        guard let x3fExtractPath = Bundle.main.path(forResource: "x3f-extract", ofType: nil) else {
+            print("ImageProcessor: ✗ 应用 bundle 中未找到 x3f-extract 工具")
+            return nil
+        }
+
+        print("ImageProcessor: 使用 bundle 中的 x3f-extract: \(x3fExtractPath)")
+        print("ImageProcessor: 源 X3F 文件: \(x3fURL.path)")
+        print("ImageProcessor: 输出目录: \(cacheDir.path)")
+        print("ImageProcessor: 目标 DNG 文件: \(cachedURL.path)")
+
+        // 调用 x3f-extract
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: x3fExtractPath)
+        process.arguments = ["-dng", "-linear-srgb", "-o", cacheDir.path, x3fURL.path]
+
+        // 捕获标准输出和错误输出
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
+
+        print("ImageProcessor: 执行命令: \(x3fExtractPath) -dng -linear-srgb -o \(cacheDir.path) \(x3fURL.path)")
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+
+            let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+            let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+
+            if let output = String(data: outputData, encoding: .utf8), !output.isEmpty {
+                print("ImageProcessor: x3f-extract 输出:\n\(output)")
+            }
+
+            if let errorOutput = String(data: errorData, encoding: .utf8), !errorOutput.isEmpty {
+                print("ImageProcessor: x3f-extract 错误:\n\(errorOutput)")
+            }
+
+            print("ImageProcessor: x3f-extract 退出码: \(process.terminationStatus)")
+
+            if process.terminationStatus == 0 {
+                // x3f-extract 输出格式：<source>.dng (如 DP3Q0109.X3F.dng)
+                let expectedOutput = cacheDir.appendingPathComponent(x3fURL.lastPathComponent + ".dng")
+                print("ImageProcessor: 检查预期输出: \(expectedOutput.path)")
+
+                if FileManager.default.fileExists(atPath: expectedOutput.path) {
+                    print("ImageProcessor: ✓ 找到输出文件")
+                    // 重命名为我们的缓存格式
+                    try? FileManager.default.removeItem(at: cachedURL) // 删除旧缓存
+                    try? FileManager.default.moveItem(at: expectedOutput, to: cachedURL)
+                    print("ImageProcessor: ✓ 转换成功，已缓存到: \(cachedURL.path)")
+                    return cachedURL
+                } else {
+                    print("ImageProcessor: ✗ 预期输出文件不存在")
+
+                    // 列出输出目录的所有文件
+                    if let files = try? FileManager.default.contentsOfDirectory(atPath: cacheDir.path) {
+                        print("ImageProcessor: 输出目录内容: \(files)")
+                    }
+                }
+            }
+        } catch {
+            print("ImageProcessor: ✗ 转换失败: \(error)")
+        }
+
+        return nil
+    }
+
     private static func loadRawWithFilter(from url: URL) -> CIImage? {
+        print("ImageProcessor: 使用线性空间 filter 加载 RAW")
+        print("ImageProcessor: 输入文件: \(url.path)")
+
+        // 读取 As Shot Neutral 创建白平衡 filter
+        var linearSpaceFilter: CIFilter?
+
+        if let asShotGains = extractAsShotNeutralGains(from: url) {
+            print("ImageProcessor: 创建 As Shot 白平衡 filter: R=\(String(format: "%.4f", asShotGains.r)), G=\(String(format: "%.4f", asShotGains.g)), B=\(String(format: "%.4f", asShotGains.b))")
+
+            // 创建应用 As Shot 增益的 CIColorMatrix
+            if let matrixFilter = CIFilter(name: "CIColorMatrix") {
+                matrixFilter.setValue(
+                    CIVector(x: asShotGains.r, y: 0, z: 0, w: 0),
+                    forKey: "inputRVector"
+                )
+                matrixFilter.setValue(
+                    CIVector(x: 0, y: asShotGains.g, z: 0, w: 0),
+                    forKey: "inputGVector"
+                )
+                matrixFilter.setValue(
+                    CIVector(x: 0, y: 0, z: asShotGains.b, w: 0),
+                    forKey: "inputBVector"
+                )
+                matrixFilter.setValue(
+                    CIVector(x: 0, y: 0, z: 0, w: 1),
+                    forKey: "inputAVector"
+                )
+                matrixFilter.setValue(
+                    CIVector(x: 0, y: 0, z: 0, w: 0),
+                    forKey: "inputBiasVector"
+                )
+
+                linearSpaceFilter = matrixFilter
+                print("ImageProcessor: ✓ 已创建 As Shot 白平衡 filter")
+            }
+        }
+
+        // 如果无法创建 As Shot filter，使用单位矩阵（identity filter）
+        if linearSpaceFilter == nil {
+            print("ImageProcessor: 使用单位矩阵（无白平衡调整）")
+            if let identityFilter = CIFilter(name: "CIColorMatrix") {
+                identityFilter.setValue(CIVector(x: 1, y: 0, z: 0, w: 0), forKey: "inputRVector")
+                identityFilter.setValue(CIVector(x: 0, y: 1, z: 0, w: 0), forKey: "inputGVector")
+                identityFilter.setValue(CIVector(x: 0, y: 0, z: 1, w: 0), forKey: "inputBVector")
+                identityFilter.setValue(CIVector(x: 0, y: 0, z: 0, w: 1), forKey: "inputAVector")
+                identityFilter.setValue(CIVector(x: 0, y: 0, z: 0, w: 0), forKey: "inputBiasVector")
+                linearSpaceFilter = identityFilter
+            }
+        }
+
+        // 创建 RAW filter（先不设置选项）
         guard let rawFilter = CIFilter(imageURL: url, options: [:]) else {
             print("ImageProcessor: ✗ 无法创建 RAW 过滤器")
             return nil
         }
 
-        print("ImageProcessor: 使用日光白平衡加载 RAW 数据")
+        // 设置线性空间 filter（会在线性空间应用 As Shot 增益）
+        if let filter = linearSpaceFilter {
+            rawFilter.setValue(filter, forKey: "inputLinearSpaceFilter")
+            print("ImageProcessor: ✓ 已设置 linearSpaceFilter")
+        }
 
-        rawFilter.setValue(AppConfig.defaultWhitePoint, forKey: "inputNeutralTemperature")
+        // 设置中性白平衡 D65（作为基准）
+        rawFilter.setValue(6500.0, forKey: "inputNeutralTemperature")
         rawFilter.setValue(0.0, forKey: "inputNeutralTint")
-        print("ImageProcessor: ✓ 设置日光白平衡 (\(AppConfig.defaultWhitePoint)K, Tint 0)")
+        print("ImageProcessor: ✓ 已设置 D65 白平衡")
 
         if rawFilter.inputKeys.contains("inputDraftMode") {
             rawFilter.setValue(false, forKey: "inputDraftMode")
@@ -465,17 +824,6 @@ class ImageProcessor {
 
         if rawFilter.inputKeys.contains("inputBaselineExposure") {
             rawFilter.setValue(0.0, forKey: "inputBaselineExposure")
-        }
-
-        if rawFilter.inputKeys.contains("inputLinearSpaceFilter") {
-            if let linearFilter = rawFilter.value(forKey: "inputLinearSpaceFilter") {
-                print("ImageProcessor: 检测到线性空间过滤器: \(linearFilter)")
-            }
-        }
-
-        if rawFilter.inputKeys.contains("inputDisableGamutMap") {
-            rawFilter.setValue(false, forKey: "inputDisableGamutMap")
-            print("ImageProcessor: ✓ 启用色域映射")
         }
 
         if rawFilter.inputKeys.contains("inputEnableSharpening") {
@@ -507,7 +855,11 @@ class ImageProcessor {
             return nil
         }
 
-        print("ImageProcessor: ✓ RAW 过滤器加载成功（中性白平衡）")
+        print("ImageProcessor: ✓ CIRAWFilter 输出完成（As Shot 白平衡已在线性空间应用）")
+        if let colorSpace = outputImage.colorSpace {
+            print("ImageProcessor: 输出色彩空间: \(colorSpace)")
+        }
+
         return outputImage
     }
 
@@ -533,11 +885,11 @@ class ImageProcessor {
         let expectedOutputPath = tempDir.appendingPathComponent(outputFileName)
 
         // 执行 x3f-extract 命令
-        // 参数: -dng -wb Sunlight -o <输出目录> <输入文件>
-        // -wb Sunlight: 使用日光白平衡 (值为 2)
+        // 参数: -dng -linear-srgb -o <输出目录> <输入文件>
+        // -linear-srgb: 输出线性 sRGB，已应用相机白平衡
         let process = Process()
         process.executableURL = URL(fileURLWithPath: x3fPath)
-        process.arguments = ["-dng", "-wb", "Sunlight", "-o", tempDir.path, url.path]
+        process.arguments = ["-dng", "-linear-srgb", "-o", tempDir.path, url.path]
 
         let errorPipe = Pipe()
         let outputPipe = Pipe()
@@ -604,7 +956,7 @@ class ImageProcessor {
             result = applyBrightness(to: result, value: adjustments.brightness)
         }
 
-        if adjustments.contrast != 1.0 {
+        if adjustments.contrast != 0.0 {
             result = applyContrast(to: result, value: adjustments.contrast)
         }
 
@@ -627,7 +979,8 @@ class ImageProcessor {
             )
         }
 
-        if abs(adjustments.temperature - AppConfig.defaultWhitePoint) > AppConfig.whitePointTolerance || adjustments.tint != 0.0 {
+        // 检查是否需要应用白平衡调整（从 D65 基准调整到目标白平衡）
+        if abs(adjustments.temperature - 6500.0) > 0.01 || abs(adjustments.tint) > 0.01 {
             result = applyWhiteBalance(
                 to: result,
                 temperature: adjustments.temperature,
@@ -775,13 +1128,45 @@ class ImageProcessor {
     // Photoshop 风格的对比度调整
     // 对比度围绕中点（0.5）进行 S 曲线调整
     private static func applyContrast(to image: CIImage, value: Double) -> CIImage {
-        if value == 1.0 { return image }
+        if value == 0.0 { return image }
 
-        // Photoshop 的对比度算法：output = (input - 0.5) * contrast + 0.5
-        // 这样可以保证中点不变
-        guard let filter = CIFilter(name: "CIColorControls") else { return image }
+        // Lightroom 风格的对比度算法：使用参数化 S 曲线
+        // value 范围：-1.0 (最低对比度) 到 +1.0 (最高对比度)
+        //
+        // 原理：
+        // - 对比度 > 0: 应用 S 曲线（暗部更暗，亮部更亮）
+        // - 对比度 < 0: 应用反向 S 曲线（降低对比度）
+        // - 使用锚点法：在 1/4 和 3/4 处设置控制点
+
+        // 计算控制点位置
+        // 对比度越强，S 曲线越陡峭
+        let darkPoint: CGFloat
+        let lightPoint: CGFloat
+
+        if value > 0 {
+            // 正对比度：S 曲线
+            // 暗部向下，亮部向上
+            let offset = CGFloat(value * 0.125)  // 最大偏移 12.5%
+            darkPoint = 0.25 - offset
+            lightPoint = 0.75 + offset
+        } else {
+            // 负对比度：反向 S 曲线
+            // 暗部向上，亮部向下
+            let offset = CGFloat(abs(value) * 0.125)
+            darkPoint = 0.25 + offset
+            lightPoint = 0.75 - offset
+        }
+
+        // 使用 CIToneCurve 滤镜应用自定义曲线
+        // 定义 5 个控制点：黑场(0,0)、暗部、中间、亮部、白场(1,1)
+        guard let filter = CIFilter(name: "CIToneCurve") else { return image }
         filter.setValue(image, forKey: kCIInputImageKey)
-        filter.setValue(value, forKey: kCIInputContrastKey)
+        filter.setValue(CIVector(x: 0, y: 0), forKey: "inputPoint0")
+        filter.setValue(CIVector(x: 0.25, y: darkPoint), forKey: "inputPoint1")
+        filter.setValue(CIVector(x: 0.5, y: 0.5), forKey: "inputPoint2")  // 中点不变
+        filter.setValue(CIVector(x: 0.75, y: lightPoint), forKey: "inputPoint3")
+        filter.setValue(CIVector(x: 1, y: 1), forKey: "inputPoint4")
+
         return filter.outputImage ?? image
     }
 
@@ -854,23 +1239,61 @@ class ImageProcessor {
         temperature: Double,
         tint: Double
     ) -> CIImage {
-        guard let filter = CIFilter(name: "CITemperatureAndTint") else { return image }
+        // 从色温/色调计算 RGB 增益
+        let gains = calculateWhiteBalanceGains(temperature: temperature, tint: tint)
+
+        // 使用 CIColorMatrix 应用增益（更透明、可控）
+        guard let filter = CIFilter(name: "CIColorMatrix") else { return image }
         filter.setValue(image, forKey: kCIInputImageKey)
 
-        // CITemperatureAndTint 工作原理：
-        // inputNeutral: 假设源图片中"应该是中性灰"的点的当前色温/色调
-        // inputTargetNeutral: 该点应该变成的目标色温/色调
-        //
-        // 用户在取色或设置白平衡时：
-        // - neutral 是采样点/用户设置的色温和色调（认为这应该是灰色）
-        // - target 是日光白平衡（配置的默认白点）
-        let neutralPoint = CIVector(x: temperature, y: tint)
-        let targetPoint = CIVector(x: AppConfig.defaultWhitePoint, y: 0)
-
-        filter.setValue(neutralPoint, forKey: "inputNeutral")
-        filter.setValue(targetPoint, forKey: "inputTargetNeutral")
+        // 设置 RGB 增益（对角矩阵）
+        filter.setValue(CIVector(x: gains.r, y: 0, z: 0, w: 0), forKey: "inputRVector")
+        filter.setValue(CIVector(x: 0, y: gains.g, z: 0, w: 0), forKey: "inputGVector")
+        filter.setValue(CIVector(x: 0, y: 0, z: gains.b, w: 0), forKey: "inputBVector")
+        filter.setValue(CIVector(x: 0, y: 0, z: 0, w: 1), forKey: "inputAVector")
+        filter.setValue(CIVector(x: 0, y: 0, z: 0, w: 0), forKey: "inputBiasVector")
 
         return filter.outputImage ?? image
+    }
+
+    private static func calculateWhiteBalanceGains(
+        temperature: Double,
+        tint: Double
+    ) -> (r: Double, g: Double, b: Double) {
+        // 将色温转换为 RGB 增益
+        // 基于 Planckian locus 简化算法
+
+        // 1. 将色温转换为归一化值 (以 6500K D65 为基准)
+        let temp = max(2000.0, min(25000.0, temperature))
+        let tempRatio = temp / 6500.0
+
+        // 2. 计算基础 R/B 增益（基于色温）
+        var rGain: Double
+        var bGain: Double
+
+        if tempRatio < 1.0 {
+            // 低色温（偏暖/偏黄）-> 增加蓝色，减少红色
+            rGain = 1.0
+            bGain = 1.0 / pow(tempRatio, 0.6)  // 温度越低，蓝色增益越高
+        } else {
+            // 高色温（偏冷/偏蓝）-> 增加红色，减少蓝色
+            rGain = pow(tempRatio, 0.6)
+            bGain = 1.0
+        }
+
+        // 3. 计算绿色增益（基于色调）
+        // tint > 0: 偏绿，需要减少绿色
+        // tint < 0: 偏品红，需要增加绿色
+        let gGain = 1.0 - (tint / 100.0) * 0.3  // 色调影响相对较小
+
+        // 4. 归一化到绿色通道（类似 Python 脚本的做法）
+        let maxGain = max(rGain, max(gGain, bGain))
+
+        return (
+            r: rGain / maxGain,
+            g: gGain / maxGain,
+            b: bGain / maxGain
+        )
     }
 
     private static func applyClarity(to image: CIImage, value: Double) -> CIImage {

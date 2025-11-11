@@ -200,11 +200,17 @@ def calculate_auto_exposure(raw, dng_path, target_brightness=0.18):
             else:
                 ev_compensation = float(ev_str)
 
-        print(f"  EXIF 曝光参数:")
-        print(f"    ISO: {iso}")
-        print(f"    快门: {exp_time}s" if exp_time else "    快门: 未知")
-        print(f"    光圈: f/{aperture}" if aperture else "    光圈: 未知")
-        print(f"    曝光补偿: {ev_compensation:+.1f} EV")
+        if iso or exp_time or aperture:
+            parts = []
+            if iso:
+                parts.append(f"ISO{int(iso)}")
+            if exp_time:
+                parts.append(f"{exp_time}s")
+            if aperture:
+                parts.append(f"f/{aperture:.1f}")
+            if ev_compensation:
+                parts.append(f"{ev_compensation:+.1f}EV")
+            print(f"  EXIF: {', '.join(parts)}")
 
     except Exception as e:
         print(f"  无法读取 EXIF: {e}")
@@ -220,13 +226,11 @@ def calculate_auto_exposure(raw, dng_path, target_brightness=0.18):
         # ISO 100 为基准
         # ISO 越高，传感器越敏感，需要降低增益
         base_exposure = 100.0 / iso
-        print(f"  基于 ISO 的曝光系数: {base_exposure:.3f}")
 
     # 3. 应用相机的曝光补偿
     if ev_compensation != 0:
         ev_multiplier = 2**ev_compensation
         base_exposure *= ev_multiplier
-        print(f"  应用 EV 补偿后: {base_exposure:.3f}")
 
     # 4. 分析图像直方图
     # 快速处理一个小图来分析亮度
@@ -253,9 +257,6 @@ def calculate_auto_exposure(raw, dng_path, target_brightness=0.18):
     # 中间调平均亮度
     current_brightness = mid_range.mean()
 
-    print(f"  当前中间调亮度: {current_brightness:.4f}")
-    print(f"  目标亮度: {target_brightness:.4f}")
-
     # 5. 计算最终曝光补偿
     if current_brightness > 0:
         histogram_compensation = target_brightness / current_brightness
@@ -267,7 +268,7 @@ def calculate_auto_exposure(raw, dng_path, target_brightness=0.18):
     # 限制范围（避免过曝或过暗）
     final_exposure = np.clip(final_exposure, 0.3, 5.0)
 
-    print(f"  最终曝光补偿: {final_exposure:.3f}")
+    print(f"  曝光: {final_exposure:.2f} (目标亮度: {target_brightness:.2f}, 当前: {current_brightness:.2f})")
 
     return final_exposure
 
@@ -426,28 +427,24 @@ def convert_dng_to_srgb(
     print(f"处理: {dng_path}")
 
     # 1. 读取 DNG
-    print("  [1/8] 读取 DNG...")
+    print("  [1/7] 读取 DNG 元数据")
     with rawpy.imread(str(dng_path)) as raw:
 
         # 提取元数据
         metadata = load_dng_metadata(raw)
-        print(f"  相机: {metadata['color_desc']}")
-        print(f"  相机白平衡: {metadata['camera_wb']}")
-        print(f"  白平衡增益: {metadata['wb_gains']}")
 
         # 2. 自动计算曝光（如果启用）
         if auto_exposure and exposure is None:
-            print("  [2/8] 自动曝光分析...")
+            print("  [2/7] 自动曝光分析")
             exposure = calculate_auto_exposure(raw, dng_path, target_brightness=target_brightness)
         elif exposure is None:
             exposure = 1.0
-            print(f"  [2/8] 使用默认曝光: {exposure}")
+            print(f"  [2/7] 使用默认曝光: {exposure}")
         else:
-            print(f"  [2/8] 使用手动曝光: {exposure}")
+            print(f"  [2/7] 使用手动曝光: {exposure}")
 
         # 3. RAW → RGB（线性空间）
-        print("  [3/8] RAW 解码...")
-
+        print(f"  [3/7] RAW 解码 (去马赛克 AHD, 线性空间, {'相机白平衡' if use_camera_wb else '无白平衡'})")
         params = rawpy.Params(
             use_camera_wb=use_camera_wb,
             use_auto_wb=False,
@@ -462,40 +459,35 @@ def convert_dng_to_srgb(
 
         # 转换到浮点 [0, 1]
         rgb_float = rgb.astype(np.float32) / 65535.0
-
-        print(f"  图像尺寸: {rgb_float.shape[1]}x{rgb_float.shape[0]}")
-        print(f"  动态范围: {rgb_float.min():.4f} - {rgb_float.max():.4f}")
+        print(f"      尺寸: {rgb_float.shape[1]}x{rgb_float.shape[0]}, 范围: [{rgb_float.min():.3f}, {rgb_float.max():.3f}]")
 
     # 4. 迭代白平衡优化（可选）
     if iterative_wb:
-        print(f"  [4/8] 迭代白平衡优化 ({wb_iterations} 次)...")
+        print(f"  [4/7] 迭代白平衡优化 ({wb_iterations} 次)")
         rgb_float = iterative_white_balance(rgb_float, initial_wb=metadata['wb_gains'], max_iter=wb_iterations)
     else:
-        print("  [4/8] 跳过迭代白平衡")
+        print("  [4/7] 跳过白平衡优化")
 
     # 5. 色调映射
-    print(f"  [5/8] 色调映射 (方法: {tone_mapping}, 曝光: {exposure:.3f})...")
+    print(f"  [5/7] 色调映射 ({tone_mapping}, 曝光系数: {exposure:.2f})")
     rgb_mapped = apply_tone_mapping_improved(rgb_float, method=tone_mapping, exposure=exposure)
 
     # 6. Gamma 校正（sRGB）
-    print("  [6/8] Gamma 校正...")
+    print("  [6/7] Gamma 2.2 校正")
     rgb_gamma = np.power(rgb_mapped, 1.0 / 2.2)
 
     # 7. 锐化（可选）
     if sharpen:
-        print(f"  [7/8] 锐化 (强度: {sharpen_strength})...")
+        print(f"  [7/7] 反锐化掩模 (强度: {sharpen_strength})")
         rgb_gamma = unsharp_mask(rgb_gamma, sigma=1.0, strength=sharpen_strength)
     else:
-        print("  [7/8] 跳过锐化")
+        print("  [7/7] 跳过锐化")
 
-    # 8. 转换到 8-bit 并保存
-    print(f"  [8/8] 保存 JPEG (质量: {quality})...")
+    # 8. 保存
     rgb_8bit = (np.clip(rgb_gamma, 0, 1) * 255).astype(np.uint8)
-
     imageio.imwrite(output_path, rgb_8bit, quality=quality)
 
-    print(f"✓ 完成: {output_path}")
-    print(f"  最终尺寸: {rgb_8bit.shape[1]}x{rgb_8bit.shape[0]}")
+    print(f"✓ 完成: {output_path} (JPEG 质量: {quality})")
     print()
 
 

@@ -10,8 +10,6 @@ struct LUTPanel: View {
 
     @State private var lutFiles: [LUTFile] = []
     @State private var selectedLUT: UUID?
-    @State private var tempAlpha: Double = 1.0
-    @State private var isEditingAlpha = false
     @State private var showingSaveLUTDialog = false
     @State private var newLUTName = ""
     @State private var isSavingLUT = false
@@ -50,40 +48,13 @@ struct LUTPanel: View {
 
             // LUT 强度滑块
             if selectedLUT != nil {
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Text("强度")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-
-                        Spacer()
-
-                        Text("\(Int((isEditingAlpha ? tempAlpha : lutAlpha) * 100))%")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                            .frame(minWidth: 35, alignment: .trailing)
-                            .monospacedDigit()
-                    }
-
-                    Slider(
-                        value: Binding(
-                            get: { isEditingAlpha ? tempAlpha : lutAlpha },
-                            set: { tempAlpha = $0 }
-                        ),
-                        in: 0.0 ... 1.0,
-                        step: 0.01,
-                        onEditingChanged: { editing in
-                            if editing {
-                                isEditingAlpha = true
-                                tempAlpha = lutAlpha
-                            } else {
-                                isEditingAlpha = false
-                                lutAlpha = tempAlpha
-                            }
-                        }
-                    )
-                    .controlSize(.small)
-                }
+                SimpleSlider(
+                    title: "强度",
+                    value: $lutAlpha,
+                    range: 0.0...1.0,
+                    step: 0.01,
+                    valueFormatter: { "\(Int($0 * 100))%" }
+                )
                 .padding(.horizontal, 12)
                 .padding(.vertical, 4)
             }
@@ -148,7 +119,6 @@ struct LUTPanel: View {
                                 onSelect: {
                                     selectedLUT = lutFile.id
                                     lutAlpha = 1.0
-                                    tempAlpha = 1.0
                                     // 设置LUT的色彩空间
                                     adjustments
                                         .lutColorSpace = (lutColorSpaces[lutFile.url.path] ?? .sRGB)
@@ -169,15 +139,9 @@ struct LUTPanel: View {
             loadLUTColorSpaces()
             loadLUTFiles()
             syncSelectedLUT()
-            tempAlpha = lutAlpha
         }
         .onChange(of: currentLUTURL) { _, _ in
             syncSelectedLUT()
-        }
-        .onChange(of: lutAlpha) { _, newValue in
-            if !isEditingAlpha {
-                tempAlpha = newValue
-            }
         }
         .sheet(isPresented: $showingSaveLUTDialog) {
             SaveLUTDialog(

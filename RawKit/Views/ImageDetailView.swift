@@ -62,14 +62,10 @@ struct ImageDetailView: View {
             if let saved = savedAdjustments {
                 adjustments = saved
             } else {
-                let fileExtension = imageInfo.url.pathExtension.lowercased()
-                if fileExtension == "dng" || ["arw", "cr2", "cr3", "nef", "orf", "raf", "rw2"].contains(fileExtension) {
-                    if let wb = ImageProcessor.extractRawWhiteBalance(from: imageInfo.url) {
-                        adjustments.temperature = wb.temperature
-                        adjustments.tint = wb.tint
-                        print("ImageDetailView: 应用原照白平衡 - 色温: \(wb.temperature), 色调: \(wb.tint)")
-                    }
-                }
+                // RAW 文件在加载时已经应用了 As Shot 白平衡，
+                // 所以初始调整应该是中性的（6500K/0 tint）
+                // 不需要再从 EXIF 读取和设置白平衡
+                print("ImageDetailView: 使用默认白平衡（RAW 已应用 As Shot）")
             }
             await loadImageProgressively()
         }
@@ -133,7 +129,7 @@ struct ImageDetailView: View {
 
         let newDisplayImage = ImageProcessor.convertToNSImage(adjusted)
         displayImage = newDisplayImage
-        displayImageID = UUID()
+        // 不更新 displayImageID，避免重置视口缩放
     }
 
     private func handleColorPick(point: CGPoint, imageSize _: CGSize) {
