@@ -5,12 +5,12 @@ import UniformTypeIdentifiers
 
 @MainActor
 class ImageProcessor {
-    private static let renderQueue = DispatchQueue(
+    nonisolated private static let renderQueue = DispatchQueue(
         label: "com.bitsflow.rawkit.render",
         qos: .userInteractive
     )
 
-    private static let ciContext: CIContext = {
+    nonisolated(unsafe) private static let ciContext: CIContext = {
         var options: [CIContextOption: Any] = [
             .useSoftwareRenderer: false,
             .cacheIntermediates: true,
@@ -170,7 +170,23 @@ class ImageProcessor {
         return NSImage(cgImage: cgImage, size: size)
     }
 
-    static func convertToCGImage(_ ciImage: CIImage) -> CGImage? {
+    // 非隔离版本，可以在后台线程调用
+    nonisolated static func convertToNSImageAsync(_ ciImage: CIImage) -> NSImage? {
+        let extent = ciImage.extent
+        guard !extent.isEmpty, extent.isInfinite == false else {
+            return nil
+        }
+
+        // 直接在调用线程渲染（后台线程）
+        guard let cgImage = ciContext.createCGImage(ciImage, from: extent) else {
+            return nil
+        }
+
+        let size = NSSize(width: extent.width, height: extent.height)
+        return NSImage(cgImage: cgImage, size: size)
+    }
+
+    nonisolated static func convertToCGImage(_ ciImage: CIImage) -> CGImage? {
         let extent = ciImage.extent
         guard !extent.isEmpty, extent.isInfinite == false else {
             return nil
@@ -248,15 +264,36 @@ class ImageProcessor {
     }
 
     private static func isPreprocessedLinearSRGB(properties: [String: Any]) -> Bool {
-        // 检查 Image Description 是否包含 "Preprocessed linear sRGB" 或 "linear sRGB"
+        guard let dngDict = properties[kCGImagePropertyDNGDictionary as String] as? [String: Any] else {
+            return false
+        }
+
+        // 方法1：检查 As Shot Neutral 是否为 [1, 1, 1]（表示已应用白平衡）
+        if let asShotNeutral = dngDict[kCGImagePropertyDNGAsShotNeutral as String] as? [NSNumber],
+           asShotNeutral.count >= 3 {
+            let r = asShotNeutral[0].doubleValue
+            let g = asShotNeutral[1].doubleValue
+            let b = asShotNeutral[2].doubleValue
+
+            // 如果 As Shot Neutral 接近 [1, 1, 1]，说明已预处理
+            let isUnity = abs(r - 1.0) < 0.01 && abs(g - 1.0) < 0.01 && abs(b - 1.0) < 0.01
+            if isUnity {
+                print("ImageProcessor: 检测到预处理 DNG（As Shot Neutral = [1, 1, 1]）")
+                return true
+            }
+        }
+
+        // 方法2：检查 Image Description 是否包含 "linear" 关键字（作为辅助判断）
         if let tiffDict = properties[kCGImagePropertyTIFFDictionary as String] as? [String: Any],
            let imageDesc = tiffDict[kCGImagePropertyTIFFImageDescription as String] as? String {
-            let isPreprocessed = imageDesc.lowercased().contains("linear srgb")
-            if isPreprocessed {
-                print("ImageProcessor: 检测到预处理的线性 sRGB DNG: \"\(imageDesc)\"")
+            let hasLinearKeyword = imageDesc.lowercased().contains("linear srgb") ||
+                                   imageDesc.lowercased().contains("preprocessed")
+            if hasLinearKeyword {
+                print("ImageProcessor: 检测到预处理 DNG（描述：\"\(imageDesc)\"）")
+                return true
             }
-            return isPreprocessed
         }
+
         return false
     }
 
@@ -742,7 +779,7 @@ class ImageProcessor {
     }
 
     private static func loadRawWithFilter(from url: URL) -> CIImage? {
-        print("ImageProcessor: 使用线性空间 filter 加载 RAW")
+        print("ImageProcessor: 使用线性空间加载 RAW")
         print("ImageProcessor: 输入文件: \(url.path)")
 
         // 读取 As Shot Neutral 创建白平衡 filter
@@ -792,7 +829,7 @@ class ImageProcessor {
             }
         }
 
-        // 创建 RAW filter（先不设置选项）
+        // 创建 RAW filter
         guard let rawFilter = CIFilter(imageURL: url, options: [:]) else {
             print("ImageProcessor: ✗ 无法创建 RAW 过滤器")
             return nil
@@ -855,9 +892,10 @@ class ImageProcessor {
             return nil
         }
 
-        print("ImageProcessor: ✓ CIRAWFilter 输出完成（As Shot 白平衡已在线性空间应用）")
+        print("ImageProcessor: ✓ CIRAWFilter 输出完成（白平衡已在线性空间应用）")
         if let colorSpace = outputImage.colorSpace {
-            print("ImageProcessor: 输出色彩空间: \(colorSpace)")
+            let csName = colorSpace.name.flatMap { String(describing: $0) } ?? "Unknown"
+            print("ImageProcessor: 输出色彩空间: \(csName)")
         }
 
         return outputImage
@@ -1198,33 +1236,43 @@ class ImageProcessor {
             return image
         }
 
-        // 使用 CIToneCurve 构建复杂的曲线来模拟 Photoshop 的算法
-        // Photoshop 的算法特点：
-        // - 高光 (Highlights): 影响 0.5-0.9 范围，中心在 0.7
-        // - 阴影 (Shadows): 影响 0.1-0.5 范围，中心在 0.3
-        // - 白色 (Whites): 影响 0.8-1.0 范围
-        // - 黑色 (Blacks): 影响 0.0-0.2 范围
+        // Lightroom PV2012 风格的曲线算法（改进版）
+        //
+        // 影响范围：
+        // - Blacks:     主要影响 0.0-0.2，对 0.2-0.35 有轻微影响
+        // - Shadows:    主要影响 0.15-0.5，中心在 0.3
+        // - Highlights: 主要影响 0.5-0.85，中心在 0.7
+        // - Whites:     主要影响 0.8-1.0，对 0.65-0.8 有轻微影响
+        //
+        // 调整系数（更接近 Lightroom 行为）：
+        // - Blacks:  0.12 （增强暗部控制力度）
+        // - Whites:  0.15 （降低亮部过曝风险，同时保持效果）
 
         guard let filter = CIFilter(name: "CIToneCurve") else { return image }
         filter.setValue(image, forKey: kCIInputImageKey)
 
         // 计算曲线上的关键点
-        // 黑色点 (input: 0.05, 受 blacks 影响)
-        let blackPoint = 0.05 + blacks * 0.05
+        // 黑色点 (input: 0.0, 受 blacks 影响)
+        // 增强系数到 0.12，提供更明显的暗部控制
+        let blackPoint = blacks * 0.12
 
         // 阴影点 (input: 0.25, 受 shadows 和 blacks 影响)
-        let shadowPoint = 0.25 + shadows * 0.15 + blacks * 0.03
+        // blacks 对阴影点的影响略微增加，使过渡更平滑
+        let shadowPoint = 0.25 + shadows * 0.2 + blacks * 0.08
 
         // 中点 (input: 0.5, 受所有参数轻微影响)
-        let midPoint = 0.5 + (shadows * 0.05) + (highlights - 1.0) * 0.05
+        let midPoint = 0.5 + (shadows * 0.06) + (highlights - 1.0) * 0.06
 
         // 高光点 (input: 0.75, 受 highlights 和 whites 影响)
-        let highlightPoint = 0.75 + (highlights - 1.0) * 0.15 + whites * 0.03
+        // whites 对高光点的影响增加，使过渡更平滑
+        let highlightPoint = 0.75 + (highlights - 1.0) * 0.18 + whites * 0.12
 
-        // 白色点 (input: 0.95, 受 whites 影响)
-        let whitePoint = 0.95 + whites * 0.05
+        // 白色点 (input: 1.0, 受 whites 影响)
+        // 降低系数到 0.15，避免过度曝光，同时保持明显效果
+        let whitePoint = 1.0 + whites * 0.15
 
         // 设置曲线的 5 个控制点
+        // 使用 clamp 确保在有效范围内
         filter.setValue(CIVector(x: 0, y: max(0, min(1, blackPoint))), forKey: "inputPoint0")
         filter.setValue(CIVector(x: 0.25, y: max(0, min(1, shadowPoint))), forKey: "inputPoint1")
         filter.setValue(CIVector(x: 0.5, y: max(0, min(1, midPoint))), forKey: "inputPoint2")

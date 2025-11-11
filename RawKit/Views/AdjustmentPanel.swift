@@ -1,6 +1,6 @@
 import SwiftUI
 
-struct ResizableAdjustmentPanel: View {
+struct ResizableAdjustmentPanel: View, Equatable {
     @Binding var adjustments: ImageAdjustments
     let originalCIImage: CIImage?
     let adjustedCIImage: CIImage?
@@ -8,6 +8,14 @@ struct ResizableAdjustmentPanel: View {
     @Binding var whiteBalancePickMode: CurveAdjustmentView.PickMode
     @State private var expandedSection: AdjustmentSection? = .basic
     @State private var isDragging = false
+
+    static func == (lhs: ResizableAdjustmentPanel, rhs: ResizableAdjustmentPanel) -> Bool {
+        // 只在 adjustments 或 width 变化时才重绘
+        // adjustedCIImage 的变化不应该触发控制面板重绘
+        lhs.adjustments == rhs.adjustments &&
+        lhs.width == rhs.width &&
+        lhs.whiteBalancePickMode == rhs.whiteBalancePickMode
+    }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -52,21 +60,27 @@ struct AdjustmentPanel: View {
     @Binding var whiteBalancePickMode: CurveAdjustmentView.PickMode
     @State private var expandedSections: Set<AdjustmentSection> = [.basic, .color]
     @State private var histogram: (red: [Int], green: [Int], blue: [Int])?
+    @State private var histogramTask: Task<Void, Never>?
 
     var body: some View {
         VStack(spacing: 0) {
-            // 直方图（放在最顶部，无任何空白）
-            if let histogram {
-                HistogramView(histogram: histogram)
-                    .frame(height: 120)
-                    .background(Color(nsColor: .windowBackgroundColor))
-                    .overlay(
-                        Rectangle()
-                            .stroke(Color.gray.opacity(0.2), lineWidth: 1)
-                    )
-                    .padding(.horizontal, 12)
-                    .padding(.bottom, 8)
+            // 直方图（放在最顶部，无任何空白）- 始终显示以保持布局稳定
+            Group {
+                if let histogram {
+                    HistogramView(histogram: histogram)
+                } else {
+                    // 占位符，保持布局稳定
+                    Color(nsColor: .windowBackgroundColor)
+                }
             }
+            .frame(height: 120)
+            .background(Color(nsColor: .windowBackgroundColor))
+            .overlay(
+                Rectangle()
+                    .stroke(Color.gray.opacity(0.2), lineWidth: 1)
+            )
+            .padding(.horizontal, 12)
+            .padding(.bottom, 8)
 
             HStack {
                 Text("调整")
@@ -151,16 +165,41 @@ struct AdjustmentPanel: View {
             print("AdjustmentPanel.loadHistogram: adjustedCIImage 为空")
             return
         }
-        print("AdjustmentPanel.loadHistogram: 开始计算直方图")
-        histogram = calculateHistogram(from: adjustedCIImage)
-        if histogram != nil {
-            print("AdjustmentPanel.loadHistogram: 直方图加载成功")
-        } else {
-            print("AdjustmentPanel.loadHistogram: 直方图加载失败")
+
+        // 取消之前的任务
+        histogramTask?.cancel()
+
+        // 创建新任务，带防抖延迟
+        histogramTask = Task {
+            // 防抖：等待 100ms，如果期间没有新的更新，才计算
+            try? await Task.sleep(nanoseconds: 100_000_000)  // 100ms
+
+            // 检查是否被取消
+            guard !Task.isCancelled else { return }
+
+            print("AdjustmentPanel.loadHistogram: 开始计算直方图")
+
+            // 在后台线程计算直方图
+            let newHistogram = await Task.detached(priority: .userInitiated) {
+                calculateHistogram(from: adjustedCIImage)
+            }.value
+
+            // 检查是否被取消
+            guard !Task.isCancelled else { return }
+
+            // 更新 UI（在主线程）
+            await MainActor.run {
+                histogram = newHistogram
+                if histogram != nil {
+                    print("AdjustmentPanel.loadHistogram: 直方图加载成功")
+                } else {
+                    print("AdjustmentPanel.loadHistogram: 直方图加载失败")
+                }
+            }
         }
     }
 
-    private func calculateHistogram(from ciImage: CIImage) -> (
+    private nonisolated func calculateHistogram(from ciImage: CIImage) -> (
         red: [Int], green: [Int], blue: [Int]
     )? {
         let extent = ciImage.extent
@@ -173,7 +212,7 @@ struct AdjustmentPanel: View {
         let scaledImage: CIImage
         if scale < 1.0 {
             scaledImage = ciImage.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-            print("直方图计算：图像缩小到 \(scale * 100)%")
+            print("直方图计算：图像缩小到 \(String(format: "%.1f", scale * 100))%")
         } else {
             scaledImage = ciImage
         }
@@ -595,7 +634,7 @@ struct SliderControl: View, Equatable {
             }
 
             HStack(spacing: 8) {
-                Slider(
+                SliderWithDoubleTap(
                     value: Binding(
                         get: { value },
                         set: { newValue in
@@ -603,11 +642,9 @@ struct SliderControl: View, Equatable {
                             value = steppedValue
                         }
                     ),
-                    in: range
+                    range: range,
+                    onDoubleTap: { resetToDefault() }
                 )
-                .onTapGesture(count: 2) {
-                    resetToDefault()
-                }
 
                 Button(action: { resetToDefault() }) {
                     Image(systemName: "arrow.uturn.backward")
@@ -674,6 +711,103 @@ struct SliderControl: View, Equatable {
         case "自然饱和度": value = defaultAdjustments.vibrance
         case "锐化": value = defaultAdjustments.sharpness
         default: break
+        }
+    }
+}
+
+// 支持双击重置的滑块
+struct SliderWithDoubleTap: NSViewRepresentable {
+    @Binding var value: Double
+    let range: ClosedRange<Double>
+    let onDoubleTap: () -> Void
+    let enableThrottle: Bool  // 是否启用节流
+
+    init(value: Binding<Double>, range: ClosedRange<Double>, onDoubleTap: @escaping () -> Void, enableThrottle: Bool = false) {
+        self._value = value
+        self.range = range
+        self.onDoubleTap = onDoubleTap
+        self.enableThrottle = enableThrottle
+    }
+
+    func makeNSView(context: Context) -> DragOnlySlider {
+        let slider = DragOnlySlider(value: value, minValue: range.lowerBound, maxValue: range.upperBound, target: context.coordinator, action: #selector(Coordinator.valueChanged(_:)))
+        slider.isContinuous = true  // 保持连续模式，配合节流机制
+
+        // 添加双击手势
+        let doubleClick = NSClickGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleDoubleTap(_:)))
+        doubleClick.numberOfClicksRequired = 2
+        slider.addGestureRecognizer(doubleClick)
+
+        return slider
+    }
+
+    func updateNSView(_ nsView: DragOnlySlider, context: Context) {
+        // 只在值真正不同时才更新，避免干扰用户交互
+        if abs(nsView.doubleValue - value) > 0.0001 {
+            nsView.doubleValue = value
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(value: $value, onDoubleTap: onDoubleTap, enableThrottle: enableThrottle)
+    }
+
+    class Coordinator: NSObject {
+        @Binding var value: Double
+        let onDoubleTap: () -> Void
+        let enableThrottle: Bool
+
+        private var lastUpdateTime: TimeInterval = 0
+        private var pendingValue: Double?
+        private var updateTimer: Timer?
+        private let throttleInterval: TimeInterval = 0.033  // 30fps，避免过于频繁的渲染
+
+        init(value: Binding<Double>, onDoubleTap: @escaping () -> Void, enableThrottle: Bool) {
+            _value = value
+            self.onDoubleTap = onDoubleTap
+            self.enableThrottle = enableThrottle
+        }
+
+        @objc func valueChanged(_ sender: NSSlider) {
+            let newValue = sender.doubleValue
+            let now = CACurrentMediaTime()
+
+            // 如果禁用节流，立即更新
+            guard enableThrottle else {
+                value = newValue
+                return
+            }
+
+            // 节流更新（限制 30fps）
+            let elapsed = now - lastUpdateTime
+            if elapsed >= throttleInterval {
+                // 距离上次更新足够久，立即更新
+                lastUpdateTime = now
+                pendingValue = nil
+                value = newValue
+            } else {
+                // 太频繁，记录待处理值，稍后更新
+                pendingValue = newValue
+
+                // 如果已有定时器在等待，不创建新的
+                guard updateTimer == nil else { return }
+
+                // 创建定时器确保最终值被应用
+                let remainingTime = throttleInterval - elapsed
+                updateTimer = Timer.scheduledTimer(withTimeInterval: remainingTime, repeats: false) { [weak self] _ in
+                    guard let self = self else { return }
+                    if let pending = self.pendingValue {
+                        self.value = pending
+                        self.pendingValue = nil
+                        self.lastUpdateTime = CACurrentMediaTime()
+                    }
+                    self.updateTimer = nil
+                }
+            }
+        }
+
+        @objc func handleDoubleTap(_ sender: NSClickGestureRecognizer) {
+            onDoubleTap()
         }
     }
 }

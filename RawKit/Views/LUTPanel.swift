@@ -2,7 +2,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 // LUT 列表面板
-struct LUTPanel: View {
+struct LUTPanel: View, Equatable {
     let onLoadLUT: (URL?) -> Void
     @Binding var lutAlpha: Double
     @Binding var currentLUTURL: URL?
@@ -16,6 +16,14 @@ struct LUTPanel: View {
     @State private var lutColorSpaces: [String: LUTColorSpace] = [:]
 
     private let colorSpaceStorageKey = "LUTColorSpaces"
+
+    static func == (lhs: LUTPanel, rhs: LUTPanel) -> Bool {
+        // 只在 LUT 相关字段变化时才重绘
+        lhs.lutAlpha == rhs.lutAlpha &&
+        lhs.currentLUTURL == rhs.currentLUTURL &&
+        lhs.adjustments.lutColorSpace == rhs.adjustments.lutColorSpace &&
+        lhs.adjustments.hasAdjustments == rhs.adjustments.hasAdjustments
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -46,7 +54,7 @@ struct LUTPanel: View {
             .padding(.horizontal, 12)
             .disabled(!adjustments.hasAdjustments)
 
-            // LUT 强度滑块
+            // LUT 强度滑块（节流由 ImageDetailView 的渲染队列处理）
             if selectedLUT != nil {
                 SimpleSlider(
                     title: "强度",

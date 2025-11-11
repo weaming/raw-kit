@@ -5,6 +5,7 @@ import SwiftUI
 struct ClickableImageView: View {
     let image: NSImage
     @Binding var scale: CGFloat
+    let maxScale: CGFloat
     @Binding var currentPixelInfo: PixelInfo?
     let originalCIImage: CIImage?
     let adjustedCIImage: CIImage?
@@ -153,7 +154,7 @@ struct ClickableImageView: View {
         let newScale: CGFloat
 
         if keyPress.characters == "+" || keyPress.characters == "=" {
-            newScale = min(scale + zoomFactor, 10.0)
+            newScale = min(scale + zoomFactor, maxScale)
         } else if keyPress.characters == "-" || keyPress.characters == "_" {
             newScale = max(scale - zoomFactor, 0.1)
         } else {
@@ -175,7 +176,7 @@ struct ClickableImageView: View {
     ) {
         let zoomFactor: CGFloat = 1.0 + (deltaY * 0.01)
         let oldScale = scale
-        let newScale = max(0.1, min(oldScale * zoomFactor, 10.0))
+        let newScale = max(0.1, min(oldScale * zoomFactor, maxScale))
 
         if oldScale == newScale {
             return
@@ -246,13 +247,15 @@ struct ClickableImageRepresentable: NSViewRepresentable {
     func makeNSView(context _: Context) -> ClickableNSImageView {
         let view = ClickableNSImageView()
         view.imageView.image = image
+        view.currentScale = scale
         view.onScrollWheel = onScrollWheel
         view.onColorPick = onColorPick
         view.onMouseMove = onMouseMove
-        view.onDragChanged = { translation in
+        view.onDragChanged = { translation, currentScale in
+            // 拖动距离是屏幕空间的，需要除以 scale 转换为 offset 空间
             offset = CGSize(
-                width: lastOffset.width + translation.width,
-                height: lastOffset.height + translation.height
+                width: lastOffset.width + translation.width / currentScale,
+                height: lastOffset.height + translation.height / currentScale
             )
         }
         view.onDragEnded = {
@@ -296,7 +299,7 @@ struct ClickableImageRepresentable: NSViewRepresentable {
 class ClickableNSImageView: NSView {
     let imageView = NSImageView()
     var onScrollWheel: ((CGFloat, CGPoint) -> Void)?
-    var onDragChanged: ((CGSize) -> Void)?
+    var onDragChanged: ((CGSize, CGFloat) -> Void)?
     var onDragEnded: (() -> Void)?
     var onColorPick: ((CGPoint, CGSize) -> Void)?
     var onMouseMove: ((CGPoint, CGSize) -> Void)?
@@ -480,7 +483,7 @@ class ClickableNSImageView: NSView {
             height: currentPoint.y - dragStartPoint.y
         )
 
-        onDragChanged?(translation)
+        onDragChanged?(translation, currentScale)
     }
 
     override func mouseUp(with _: NSEvent) {

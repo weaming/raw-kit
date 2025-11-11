@@ -629,7 +629,7 @@ struct CurveAdjustmentView: View {
         let scaledImage: CIImage
         if scale < 1.0 {
             scaledImage = ciImage.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-            print("直方图计算：图像缩小到 \(scale * 100)%")
+            print("直方图计算：图像缩小到 \(String(format: "%.1f", scale * 100))%")
         } else {
             scaledImage = ciImage
         }

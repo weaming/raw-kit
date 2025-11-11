@@ -9,7 +9,8 @@
       "Bash(tree:*)",
       "Bash(git rm:*)",
       "Bash(git add:*)",
-      "Bash(otool:*)"
+      "Bash(otool:*)",
+      "WebSearch"
     ],
     "deny": [],
     "ask": []

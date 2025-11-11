@@ -1,13 +1,18 @@
 import SwiftUI
 
 // 调整预设面板
-struct PresetsPanel: View {
+struct PresetsPanel: View, Equatable {
     let currentAdjustments: ImageAdjustments
     let onLoadPreset: (ImageAdjustments) -> Void
 
     @State private var presets: [AdjustmentPreset] = []
     @State private var showingSaveDialog = false
     @State private var newPresetName = ""
+
+    static func == (lhs: PresetsPanel, rhs: PresetsPanel) -> Bool {
+        // 只在 hasAdjustments 状态变化时重绘（影响保存按钮的禁用状态）
+        lhs.currentAdjustments.hasAdjustments == rhs.currentAdjustments.hasAdjustments
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {

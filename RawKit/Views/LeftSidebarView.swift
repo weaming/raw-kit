@@ -25,6 +25,7 @@ struct LeftSidebarView: View {
                             currentAdjustments: adjustments,
                             onLoadPreset: onLoadPreset
                         )
+                        .equatable()
                     }
 
                     Divider()
@@ -39,6 +40,7 @@ struct LeftSidebarView: View {
                             currentLUTURL: $adjustments.lutURL,
                             adjustments: $adjustments
                         )
+                        .equatable()
                     }
                 }
             }

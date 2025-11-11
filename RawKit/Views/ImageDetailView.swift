@@ -27,11 +27,15 @@ struct ImageDetailView: View {
     @State private var isLoading = true
     @State private var loadingStage: LoadingStage = .thumbnail
     @State private var scale: CGFloat = 1.0
-    @State private var adjustments = ImageAdjustments.default
+    @State private var adjustments = ImageAdjustments.default  // 面板 UI 使用（立即更新）
     @State private var showAdjustmentPanel = true
     @State private var whiteBalancePickMode: CurveAdjustmentView.PickMode = .none
     @State private var isUpdatingFromHistory = false
     @State private var currentPixelInfo: PixelInfo?
+    @State private var viewportSize: CGSize = .zero
+
+    // 渲染队列（延迟初始化）
+    @State private var renderQueue: RenderQueue?
 
     enum LoadingStage {
         case thumbnail
@@ -56,9 +60,17 @@ struct ImageDetailView: View {
                     width: $sidebarWidth,
                     whiteBalancePickMode: $whiteBalancePickMode
                 )
+                .equatable()
             }
         }
         .task {
+            // 初始化渲染队列（maxFPS: 0 = 不限制，30 = 30fps，60 = 60fps）
+            if renderQueue == nil {
+                renderQueue = RenderQueue(maxFPS: 0) { adjustments in
+                    await self.performRender(adjustments)
+                }
+            }
+
             if let saved = savedAdjustments {
                 adjustments = saved
             } else {
@@ -70,12 +82,15 @@ struct ImageDetailView: View {
             await loadImageProgressively()
         }
         .onChange(of: adjustments) { _, newValue in
+            // 1. 立即更新历史记录和回调（不阻塞 UI）
             if !isUpdatingFromHistory {
                 history.recordImmediate(newValue)
             }
             onAdjustmentsChanged(newValue)
+
+            // 2. 将调整参数加入渲染队列
             Task {
-                await applyAdjustments(newValue)
+                await renderQueue?.enqueue(newValue)
             }
         }
         .onChange(of: savedAdjustments) { _, newValue in
@@ -92,21 +107,35 @@ struct ImageDetailView: View {
     }
 
     private func loadImageProgressively() async {
-        loadingStage = .thumbnail
+        // 检查图像尺寸，决定加载策略
+        let imageSize = getImageDimensions(from: imageInfo.url)
+        let maxDimension = max(imageSize.width, imageSize.height)
 
+        // 小图直接加载完整分辨率，跳过渐进式加载
+        if maxDimension > 0 && maxDimension < 6000 {
+            print("ImageDetailView: 小图片（\(Int(maxDimension))px），直接加载完整分辨率")
+
+            loadingStage = .fullResolution
+            if let fullImage = await ImageProcessor.loadCIImage(from: imageInfo.url) {
+                originalCIImage = fullImage
+                // 等待视口尺寸可用，然后缩放到显示尺寸
+                await waitForViewportSize()
+                await displayScaledImage(fullImage)
+                displayImageID = UUID()
+            }
+
+            isLoading = false
+            return
+        }
+
+        // 大图：缩略图 → 完整分辨率（跳过中等分辨率）
+        print("ImageDetailView: 大图片（\(Int(maxDimension))px），缩略图 → 完整分辨率")
+
+        loadingStage = .thumbnail
         if let thumbnail = ImageProcessor.loadThumbnail(from: imageInfo.url) {
             displayImage = ImageProcessor.convertToNSImage(thumbnail)
             displayImageID = UUID()
             isLoading = false
-        }
-
-        loadingStage = .mediumResolution
-        await Task.yield()
-
-        if let mediumImage = ImageProcessor.loadMediumResolution(from: imageInfo.url) {
-            originalCIImage = mediumImage
-            displayImage = ImageProcessor.convertToNSImage(mediumImage)
-            displayImageID = UUID()
         }
 
         loadingStage = .fullResolution
@@ -114,22 +143,214 @@ struct ImageDetailView: View {
 
         if let fullImage = await ImageProcessor.loadCIImage(from: imageInfo.url) {
             originalCIImage = fullImage
-            displayImage = ImageProcessor.convertToNSImage(fullImage)
+            // 缩放到显示尺寸
+            await displayScaledImage(fullImage)
             displayImageID = UUID()
         }
 
         isLoading = false
     }
 
-    private func applyAdjustments(_ adj: ImageAdjustments) async {
-        guard let original = originalCIImage else { return }
+    // 等待视口尺寸可用
+    private func waitForViewportSize() async {
+        var retries = 0
+        while viewportSize == .zero && retries < 50 {
+            try? await Task.sleep(nanoseconds: 20_000_000) // 20ms
+            retries += 1
+        }
+    }
 
-        let adjusted = ImageProcessor.applyAdjustments(to: original, adjustments: adj)
+    // 缩放并显示图像（初次加载时使用）
+    private func displayScaledImage(_ image: CIImage) async {
+        guard viewportSize != .zero else {
+            // 如果视口尺寸还不可用，暂时显示原图
+            await renderAndUpdateImage(image)
+            return
+        }
+
+        // 计算渲染尺寸（预留放大空间）
+        let renderSize = calculateRenderSize(
+            imageSize: image.extent.size,
+            viewportSize: viewportSize
+        )
+
+        // 缩放到渲染尺寸
+        let scaledImage = scaleImageToDisplay(image, targetSize: renderSize)
+        adjustedCIImage = scaledImage
+
+        // 在后台线程渲染，不阻塞主线程
+        await renderAndUpdateImage(scaledImage)
+    }
+
+    // 辅助函数：在后台渲染并更新 UI
+    private func renderAndUpdateImage(_ image: CIImage) async {
+        // 使用 CGImage 作为中间格式（Sendable）来避免跨线程传递 NSImage
+        let cgImage = await Task.detached(priority: .userInitiated) {
+            // 在后台线程渲染为 CGImage
+            ImageProcessor.convertToCGImage(image)
+        }.value
+
+        // 在主线程从 CGImage 创建 NSImage
+        if let cgImage = cgImage {
+            displayImage = NSImage(cgImage: cgImage, size: image.extent.size)
+        }
+    }
+
+    private func getImageDimensions(from url: URL) -> CGSize {
+        guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [String: Any] else {
+            return .zero
+        }
+
+        let width = properties[kCGImagePropertyPixelWidth as String] as? CGFloat ?? 0
+        let height = properties[kCGImagePropertyPixelHeight as String] as? CGFloat ?? 0
+
+        return CGSize(width: width, height: height)
+    }
+
+    private func applyAdjustmentsSync(_ adj: ImageAdjustments, startTime: CFAbsoluteTime) {
+        guard let original = originalCIImage else { return }
+        guard viewportSize != .zero else { return }
+
+        // 计算渲染尺寸（预留放大空间，但不超过原图）
+        let renderSize = calculateRenderSize(
+            imageSize: original.extent.size,
+            viewportSize: viewportSize
+        )
+
+        // 先缩放到渲染尺寸
+        let scaledImage = scaleImageToDisplay(original, targetSize: renderSize)
+
+        // 在缩放后的图像上应用调整（Core Image 惰性计算，这里立即返回）
+        let adjusted = ImageProcessor.applyAdjustments(to: scaledImage, adjustments: adj)
         adjustedCIImage = adjusted
 
-        let newDisplayImage = ImageProcessor.convertToNSImage(adjusted)
-        displayImage = newDisplayImage
-        // 不更新 displayImageID，避免重置视口缩放
+        let filterTime = CFAbsoluteTimeGetCurrent()
+        print("⏱️ 滤镜构建耗时: \(Int((filterTime - startTime) * 1000))ms")
+
+        // 异步渲染，不阻塞主线程
+        Task.detached(priority: .userInitiated) {
+            let renderStartTime = CFAbsoluteTimeGetCurrent()
+            // 渲染为 CGImage（可以安全地跨线程传递）
+            let cgImage = ImageProcessor.convertToCGImage(adjusted)
+            let renderTime = CFAbsoluteTimeGetCurrent()
+            print("⏱️ 渲染耗时: \(Int((renderTime - renderStartTime) * 1000))ms")
+
+            let beforeUpdate = CFAbsoluteTimeGetCurrent()
+
+            // 在主线程从 CGImage 创建 NSImage 并更新
+            await MainActor.run {
+                let dispatchTime = CFAbsoluteTimeGetCurrent()
+                print("⏱️ MainActor 调度延迟: \(Int((dispatchTime - beforeUpdate) * 1000))ms")
+
+                if let cgImage = cgImage {
+                    self.displayImage = NSImage(cgImage: cgImage, size: adjusted.extent.size)
+                }
+
+                let totalTime = CFAbsoluteTimeGetCurrent()
+                print("⏱️ 总耗时: \(Int((totalTime - startTime) * 1000))ms\n")
+            }
+        }
+    }
+
+    private func applyAdjustments(_ adj: ImageAdjustments) async {
+        let startTime = CFAbsoluteTimeGetCurrent()
+        applyAdjustmentsSync(adj, startTime: startTime)
+    }
+
+    private func applyAdjustmentsAsync(_ adj: ImageAdjustments) async {
+        // 在 MainActor 上获取必要的数据
+        let (original, viewport) = await MainActor.run {
+            (originalCIImage, viewportSize)
+        }
+
+        guard let original = original else { return }
+        guard viewport != .zero else { return }
+
+        // 计算渲染尺寸（预留放大空间，但不超过原图）
+        let renderSize = calculateRenderSize(
+            imageSize: original.extent.size,
+            viewportSize: viewport
+        )
+
+        // 先缩放到渲染尺寸
+        let scaledImage = scaleImageToDisplay(original, targetSize: renderSize)
+
+        // 在缩放后的图像上应用调整（Core Image 惰性计算，这里立即返回）
+        let adjusted = ImageProcessor.applyAdjustments(to: scaledImage, adjustments: adj)
+        let imageSize = adjusted.extent.size
+
+        // 在后台线程渲染为 CGImage（Sendable）
+        let cgImage = await Task.detached(priority: .userInitiated) {
+            ImageProcessor.convertToCGImage(adjusted)
+        }.value
+
+        // 在主线程更新状态
+        await MainActor.run {
+            adjustedCIImage = adjusted
+            if let cgImage = cgImage {
+                displayImage = NSImage(cgImage: cgImage, size: imageSize)
+            }
+        }
+    }
+
+    // 计算渲染尺寸：预留放大空间，让用户可以放大查看细节
+    private nonisolated func calculateRenderSize(
+        imageSize: CGSize,
+        viewportSize: CGSize
+    ) -> CGSize {
+        // 计算 aspect-fit 尺寸
+        let fitRatio = min(
+            viewportSize.width / imageSize.width,
+            viewportSize.height / imageSize.height
+        )
+
+        let fitWidth = imageSize.width * fitRatio
+        let fitHeight = imageSize.height * fitRatio
+
+        // 预留 3 倍放大空间（用户可以放大到 3x 查看细节）
+        // 但不超过原图尺寸
+        let renderWidth = min(fitWidth * 3.0, imageSize.width)
+        let renderHeight = min(fitHeight * 3.0, imageSize.height)
+
+        return CGSize(width: renderWidth, height: renderHeight)
+    }
+
+    // 计算最大允许的缩放倍数（基于 PPI）
+    nonisolated func calculateMaxScale(
+        imageSize: CGSize,
+        viewportSize: CGSize
+    ) -> CGFloat {
+        // 计算 aspect-fit 尺寸
+        let fitRatio = min(
+            viewportSize.width / imageSize.width,
+            viewportSize.height / imageSize.height
+        )
+
+        let fitWidth = imageSize.width * fitRatio
+
+        // 最大放大到图像像素和屏幕像素 1:1
+        // 这样保证视网膜屏 PPI 不会低于标准
+        let maxScale = imageSize.width / fitWidth
+
+        // 限制在合理范围内（至少 1.0，最多 10.0）
+        return max(1.0, min(maxScale, 10.0))
+    }
+
+    // 缩放图像到目标显示尺寸
+    private nonisolated func scaleImageToDisplay(_ image: CIImage, targetSize: CGSize) -> CIImage {
+        let extent = image.extent
+        let scaleX = targetSize.width / extent.width
+        let scaleY = targetSize.height / extent.height
+
+        // 如果目标尺寸与原图尺寸非常接近，不缩放
+        if abs(scaleX - 1.0) < 0.01 && abs(scaleY - 1.0) < 0.01 {
+            return image
+        }
+
+        // 使用 Lanczos 缩放算法获得最佳质量
+        let transform = CGAffineTransform(scaleX: scaleX, y: scaleY)
+        return image.transformed(by: transform, highQualityDownsample: true)
     }
 
     private func handleColorPick(point: CGPoint, imageSize _: CGSize) {
@@ -255,28 +476,62 @@ struct ImageDetailView: View {
         isUpdatingFromHistory = false
     }
 
+    /// 执行实际的渲染操作（由渲染队列调用）
+    private func performRender(_ adj: ImageAdjustments) async {
+        await applyAdjustmentsAsync(adj)
+    }
+
     @ViewBuilder
     private func buildImageView() -> some View {
-        if isLoading {
-            ProgressView("加载中...")
-                .progressViewStyle(.circular)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if let image = displayImage {
-            ClickableImageView(
-                image: image,
-                scale: $scale,
-                currentPixelInfo: $currentPixelInfo,
-                originalCIImage: originalCIImage,
-                adjustedCIImage: adjustedCIImage,
-                onColorPick: whiteBalancePickMode != .none ? handleColorPick : nil
-            )
-            .clipped()
-            .id(displayImageID) // 使用 displayImageID 强制刷新
-        } else {
-            Text("无法加载图像")
-                .foregroundColor(.secondary)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        GeometryReader { geometry in
+            if isLoading {
+                ProgressView("加载中...")
+                    .progressViewStyle(.circular)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let image = displayImage {
+                let maxScale = originalCIImage.map { original in
+                    calculateMaxScale(
+                        imageSize: original.extent.size,
+                        viewportSize: geometry.size
+                    )
+                } ?? 10.0
+
+                ClickableImageView(
+                    image: image,
+                    scale: $scale,
+                    maxScale: maxScale,
+                    currentPixelInfo: $currentPixelInfo,
+                    originalCIImage: originalCIImage,
+                    adjustedCIImage: adjustedCIImage,
+                    onColorPick: whiteBalancePickMode != .none ? handleColorPick : nil
+                )
+                .clipped()
+                .id(displayImageID) // 使用 displayImageID 强制刷新
+            } else {
+                Text("无法加载图像")
+                    .foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
         }
+        .onChange(of: viewportSize) { _, newSize in
+            // 视口尺寸变化时，重新渲染（使用当前调整）
+            if newSize != .zero {
+                Task {
+                    await renderQueue?.enqueue(adjustments)
+                }
+            }
+        }
+        .background(
+            GeometryReader { geo in
+                Color.clear
+                    .onAppear {
+                        viewportSize = geo.size
+                    }
+                    .onChange(of: geo.size) { _, newSize in
+                        viewportSize = newSize
+                    }
+            }
+        )
     }
 
     @ViewBuilder

@@ -8,6 +8,14 @@ struct ExportDialog: View {
     @State private var isExporting = false
     @State private var exportProgress: Double = 0.0
     @State private var isLoadingPreset = false
+    @FocusState private var focusedField: Field?
+
+    enum Field {
+        case none  // 默认焦点，实际不显示
+        case maxDimension
+        case prefix
+        case suffix
+    }
 
     let imagesToExport: [ImageInfo]
     let adjustmentsCache: [UUID: ImageAdjustments]
@@ -29,6 +37,12 @@ struct ExportDialog: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            // 隐藏的焦点接收器，防止输入框自动获得焦点
+            TextField("", text: .constant(""))
+                .frame(width: 0, height: 0)
+                .opacity(0)
+                .focused($focusedField, equals: Field.none)
+
             // 标题
             HStack {
                 Text("导出图片")
@@ -163,6 +177,7 @@ struct ExportDialog: View {
                             ), format: .number)
                                 .textFieldStyle(.roundedBorder)
                                 .frame(width: 100)
+                                .focused($focusedField, equals: .maxDimension)
 
                             Text("px")
                                 .foregroundColor(.secondary)
@@ -200,6 +215,7 @@ struct ExportDialog: View {
                                 .foregroundColor(.secondary)
                             TextField("", text: $currentConfig.prefix)
                                 .textFieldStyle(.roundedBorder)
+                                .focused($focusedField, equals: .prefix)
                         }
 
                         VStack(alignment: .leading, spacing: 4) {
@@ -208,6 +224,7 @@ struct ExportDialog: View {
                                 .foregroundColor(.secondary)
                             TextField("", text: $currentConfig.suffix)
                                 .textFieldStyle(.roundedBorder)
+                                .focused($focusedField, equals: .suffix)
                         }
                     }
 
@@ -287,6 +304,13 @@ struct ExportDialog: View {
             .padding()
         }
         .frame(width: 500, height: 750)
+        .background(
+            Color.clear
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    focusedField = Field.none
+                }
+        )
         .onAppear {
             // 根据上次选择的预设加载配置
             if let selectedID = configManager.selectedPresetID,
@@ -299,6 +323,9 @@ struct ExportDialog: View {
                 print("ExportDialog: onAppear - 加载自定义配置")
                 currentConfig = configManager.lastUsedConfig
             }
+
+            // 默认焦点到隐藏的控件，防止输入框自动获得焦点
+            focusedField = Field.none
         }
         .sheet(isPresented: $showingSavePresetDialog) {
             SaveExportPresetDialog(
@@ -383,14 +410,23 @@ struct SaveExportPresetDialog: View {
     let onSave: () -> Void
     let onCancel: () -> Void
 
+    @FocusState private var isTextFieldFocused: Bool
+
     var body: some View {
         VStack(spacing: 16) {
+            // 隐藏的焦点接收器
+            TextField("", text: .constant(""))
+                .frame(width: 0, height: 0)
+                .opacity(0)
+                .focused($isTextFieldFocused, equals: false)
+
             Text("保存导出预设")
                 .font(.headline)
 
             TextField("预设名称", text: $presetName)
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 300)
+                .focused($isTextFieldFocused, equals: true)
                 .onSubmit {
                     if !presetName.isEmpty {
                         onSave()
@@ -406,5 +442,16 @@ struct SaveExportPresetDialog: View {
             }
         }
         .padding(24)
+        .background(
+            Color.clear
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    isTextFieldFocused = false
+                }
+        )
+        .onAppear {
+            // 默认焦点到隐藏的控件
+            isTextFieldFocused = false
+        }
     }
 }
