@@ -110,6 +110,7 @@ struct AdjustmentPanel: View {
                         onReset: { adjustments.resetBasic() }
                     ) {
                         BasicAdjustmentsView(adjustments: $adjustments)
+                            .equatable()
                     }
 
                     CollapsibleSection(
@@ -125,6 +126,7 @@ struct AdjustmentPanel: View {
                             adjustedCIImage: adjustedCIImage,
                             whiteBalancePickMode: $whiteBalancePickMode
                         )
+                        .equatable()
                     }
 
                     CollapsibleSection(
@@ -135,6 +137,7 @@ struct AdjustmentPanel: View {
                         onReset: { adjustments.resetDetail() }
                     ) {
                         DetailAdjustmentsView(adjustments: $adjustments)
+                            .equatable()
                     }
                 }
             }
@@ -171,16 +174,16 @@ struct AdjustmentPanel: View {
 
         // 创建新任务，带防抖延迟
         histogramTask = Task {
-            // 防抖：等待 100ms，如果期间没有新的更新，才计算
-            try? await Task.sleep(nanoseconds: 100_000_000)  // 100ms
+            // 优化：防抖延迟从 100ms 增加到 200ms，减少计算频率
+            try? await Task.sleep(nanoseconds: 200_000_000)  // 200ms
 
             // 检查是否被取消
             guard !Task.isCancelled else { return }
 
             print("AdjustmentPanel.loadHistogram: 开始计算直方图")
 
-            // 在后台线程计算直方图
-            let newHistogram = await Task.detached(priority: .userInitiated) {
+            // 优化：使用 .utility 优先级（低优先级），不影响主要渲染
+            let newHistogram = await Task.detached(priority: .utility) {
                 calculateHistogram(from: adjustedCIImage)
             }.value
 
@@ -199,14 +202,19 @@ struct AdjustmentPanel: View {
         }
     }
 
+    // 使用 CIContextManager 获取专用的直方图 context
+    private nonisolated static var histogramContext: CIContext {
+        CIContextManager.shared.getHistogramContext()
+    }
+
     private nonisolated func calculateHistogram(from ciImage: CIImage) -> (
         red: [Int], green: [Int], blue: [Int]
     )? {
         let extent = ciImage.extent
         let bins = 256
 
-        // 为了避免内存问题，将大图像缩小到合理尺寸再计算直方图
-        let maxDimension: CGFloat = 2048
+        // 优化：采样尺寸从 2048 降低到 1024（速度提升 4 倍，精度足够）
+        let maxDimension: CGFloat = 1024
         let scale = min(1.0, maxDimension / max(extent.width, extent.height))
 
         let scaledImage: CIImage
@@ -238,8 +246,8 @@ struct AdjustmentPanel: View {
 
         // 渲染直方图数据 - CIAreaHistogram 输出的是 256x1 的图像，每个像素是 RGBA 格式
         var bitmap = [Float](repeating: 0, count: bins * 4)
-        let context = CIContext(options: [.workingColorSpace: NSNull()])
-        context.render(
+        // 优化：使用专用的静态 context，避免每次创建
+        Self.histogramContext.render(
             outputImage,
             toBitmap: &bitmap,
             rowBytes: bins * 4 * MemoryLayout<Float>.size,
@@ -394,8 +402,20 @@ enum AdjustmentSection: Hashable {
     }
 }
 
-struct BasicAdjustmentsView: View {
+struct BasicAdjustmentsView: View, Equatable {
     @Binding var adjustments: ImageAdjustments
+
+    // 优化：只在基础调整变化时才重绘
+    static func == (lhs: BasicAdjustmentsView, rhs: BasicAdjustmentsView) -> Bool {
+        lhs.adjustments.exposure == rhs.adjustments.exposure &&
+        lhs.adjustments.linearExposure == rhs.adjustments.linearExposure &&
+        lhs.adjustments.brightness == rhs.adjustments.brightness &&
+        lhs.adjustments.contrast == rhs.adjustments.contrast &&
+        lhs.adjustments.highlights == rhs.adjustments.highlights &&
+        lhs.adjustments.shadows == rhs.adjustments.shadows &&
+        lhs.adjustments.whites == rhs.adjustments.whites &&
+        lhs.adjustments.blacks == rhs.adjustments.blacks
+    }
 
     var body: some View {
         VStack(spacing: 16) {
@@ -459,11 +479,24 @@ struct BasicAdjustmentsView: View {
     }
 }
 
-struct ColorAdjustmentsView: View {
+struct ColorAdjustmentsView: View, Equatable {
     @Binding var adjustments: ImageAdjustments
     let originalCIImage: CIImage?
     let adjustedCIImage: CIImage?
     @Binding var whiteBalancePickMode: CurveAdjustmentView.PickMode
+
+    // 优化：只在色彩调整变化时才重绘
+    static func == (lhs: ColorAdjustmentsView, rhs: ColorAdjustmentsView) -> Bool {
+        lhs.adjustments.temperature == rhs.adjustments.temperature &&
+        lhs.adjustments.tint == rhs.adjustments.tint &&
+        lhs.adjustments.saturation == rhs.adjustments.saturation &&
+        lhs.adjustments.vibrance == rhs.adjustments.vibrance &&
+        lhs.adjustments.redCurve == rhs.adjustments.redCurve &&
+        lhs.adjustments.greenCurve == rhs.adjustments.greenCurve &&
+        lhs.adjustments.blueCurve == rhs.adjustments.blueCurve &&
+        lhs.adjustments.rgbCurve == rhs.adjustments.rgbCurve &&
+        lhs.whiteBalancePickMode == rhs.whiteBalancePickMode
+    }
 
     var body: some View {
         VStack(spacing: 16) {
@@ -574,8 +607,15 @@ struct WhiteBalanceAndCurveView: View {
     }
 }
 
-struct DetailAdjustmentsView: View {
+struct DetailAdjustmentsView: View, Equatable {
     @Binding var adjustments: ImageAdjustments
+
+    // 优化：只在细节调整变化时才重绘
+    static func == (lhs: DetailAdjustmentsView, rhs: DetailAdjustmentsView) -> Bool {
+        lhs.adjustments.clarity == rhs.adjustments.clarity &&
+        lhs.adjustments.dehaze == rhs.adjustments.dehaze &&
+        lhs.adjustments.sharpness == rhs.adjustments.sharpness
+    }
 
     var body: some View {
         VStack(spacing: 16) {
