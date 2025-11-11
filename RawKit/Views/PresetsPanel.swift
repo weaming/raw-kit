@@ -10,8 +10,8 @@ struct PresetsPanel: View, Equatable {
     @State private var newPresetName = ""
 
     static func == (lhs: PresetsPanel, rhs: PresetsPanel) -> Bool {
-        // 只在 hasAdjustments 状态变化时重绘（影响保存按钮的禁用状态）
-        lhs.currentAdjustments.hasAdjustments == rhs.currentAdjustments.hasAdjustments
+        // 比较完整的 adjustments，确保保存预设时使用最新的值
+        lhs.currentAdjustments == rhs.currentAdjustments
     }
 
     var body: some View {
@@ -81,14 +81,32 @@ struct PresetsPanel: View, Equatable {
     private func savePreset(name: String) {
         guard !name.isEmpty else { return }
 
-        let preset = AdjustmentPreset(
-            name: name,
-            adjustments: currentAdjustments,
-            createdAt: Date()
-        )
-
         // 保存为单独的文件
         let fileURL = getPresetFileURL(for: name)
+
+        // 检查是否存在同名预设（用于覆盖）
+        let existingPreset = presets.first { $0.name == name }
+
+        let preset: AdjustmentPreset
+        if let existing = existingPreset {
+            // 覆盖：保留原有的 id 和 createdAt，只更新 adjustments
+            preset = AdjustmentPreset(
+                id: existing.id,
+                name: name,
+                adjustments: currentAdjustments,
+                createdAt: existing.createdAt
+            )
+            print("预设已覆盖: \(name)")
+        } else {
+            // 新建：创建新的预设
+            preset = AdjustmentPreset(
+                name: name,
+                adjustments: currentAdjustments,
+                createdAt: Date()
+            )
+            print("预设已创建: \(name)")
+        }
+
         do {
             let encoder = JSONEncoder()
             encoder.outputFormatting = .prettyPrinted
@@ -274,6 +292,11 @@ struct SavePresetDialog: View {
             TextField("预设名称", text: $presetName)
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 300)
+                .onSubmit {
+                    if !presetName.isEmpty {
+                        onSave()
+                    }
+                }
 
             HStack(spacing: 12) {
                 Button("取消", action: onCancel)
