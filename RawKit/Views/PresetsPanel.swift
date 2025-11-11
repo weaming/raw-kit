@@ -278,10 +278,12 @@ struct SavePresetDialog: View {
             HStack(spacing: 12) {
                 Button("取消", action: onCancel)
                     .keyboardShortcut(.escape)
+                    .help("取消 (Esc)")
 
                 Button("保存", action: onSave)
                     .keyboardShortcut(.return)
                     .disabled(presetName.isEmpty)
+                    .help("保存预设 (⏎)")
             }
         }
         .padding(24)

@@ -504,10 +504,12 @@ struct SaveLUTDialog: View {
                 Button("取消", action: onCancel)
                     .keyboardShortcut(.escape)
                     .disabled(isSaving)
+                    .help("取消 (Esc)")
 
                 Button("保存", action: onSave)
                     .disabled(lutName.isEmpty || isSaving)
                     .keyboardShortcut(.return)
+                    .help("保存 LUT (⏎)")
             }
         }
         .padding(24)

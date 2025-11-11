@@ -33,6 +33,11 @@ struct ImageDetailView: View {
     @State private var isUpdatingFromHistory = false
     @State private var currentPixelInfo: PixelInfo?
     @State private var viewportSize: CGSize = .zero
+    @State private var showOriginal = false  // 是否显示原图（Before/After 切换）
+
+    // Before/After 缓存
+    @State private var cachedAdjustedImage: NSImage?  // 缓存的调整后图像
+    @State private var cachedAdjustments: ImageAdjustments?  // 缓存对应的调整参数
 
     // 渲染队列（延迟初始化）
     @State private var renderQueue: RenderQueue?
@@ -88,7 +93,14 @@ struct ImageDetailView: View {
             }
             onAdjustmentsChanged(newValue)
 
-            // 2. 将调整参数加入渲染队列
+            // 2. 如果在原图模式下修改了参数，清空缓存
+            if showOriginal {
+                cachedAdjustedImage = nil
+                cachedAdjustments = nil
+                print("Before/After: 在原图模式下修改参数，清空缓存")
+            }
+
+            // 3. 将调整参数加入渲染队列
             Task {
                 await renderQueue?.enqueue(newValue)
             }
@@ -99,6 +111,31 @@ struct ImageDetailView: View {
                     isUpdatingFromHistory = true
                     adjustments = newValue
                     isUpdatingFromHistory = false
+                }
+            }
+        }
+        .onChange(of: showOriginal) { _, newValue in
+            if newValue {
+                // 切换到原图：保存当前调整图到缓存，然后渲染原图
+                if adjustments == cachedAdjustments {
+                    // 参数没变，保存当前显示的图像
+                    cachedAdjustedImage = displayImage
+                }
+                Task {
+                    await renderQueue?.enqueue(adjustments)
+                }
+            } else {
+                // 切换回调整效果：检查缓存是否有效
+                if let cached = cachedAdjustedImage, adjustments == cachedAdjustments {
+                    // 缓存有效，直接使用缓存图像（无需重新渲染）
+                    displayImage = cached
+                    print("Before/After: 使用缓存的调整图像")
+                } else {
+                    // 缓存失效或不存在，重新渲染
+                    print("Before/After: 缓存失效，重新渲染调整图像")
+                    Task {
+                        await renderQueue?.enqueue(adjustments)
+                    }
                 }
             }
         }
@@ -260,8 +297,8 @@ struct ImageDetailView: View {
 
     private func applyAdjustmentsAsync(_ adj: ImageAdjustments) async {
         // 在 MainActor 上获取必要的数据
-        let (original, viewport) = await MainActor.run {
-            (originalCIImage, viewportSize)
+        let (original, viewport, shouldShowOriginal) = await MainActor.run {
+            (originalCIImage, viewportSize, showOriginal)
         }
 
         guard let original = original else { return }
@@ -276,8 +313,16 @@ struct ImageDetailView: View {
         // 先缩放到渲染尺寸
         let scaledImage = scaleImageToDisplay(original, targetSize: renderSize)
 
-        // 在缩放后的图像上应用调整（Core Image 惰性计算，这里立即返回）
-        let adjusted = ImageProcessor.applyAdjustments(to: scaledImage, adjustments: adj)
+        // 根据 showOriginal 状态决定是否应用调整
+        let adjusted: CIImage
+        if shouldShowOriginal {
+            // 显示原图（不应用任何调整）
+            adjusted = scaledImage
+        } else {
+            // 应用调整
+            adjusted = ImageProcessor.applyAdjustments(to: scaledImage, adjustments: adj)
+        }
+
         let imageSize = adjusted.extent.size
 
         // 在后台线程渲染为 CGImage（Sendable）
@@ -287,9 +332,22 @@ struct ImageDetailView: View {
 
         // 在主线程更新状态
         await MainActor.run {
-            adjustedCIImage = adjusted
-            if let cgImage = cgImage {
-                displayImage = NSImage(cgImage: cgImage, size: imageSize)
+            if !shouldShowOriginal {
+                // 只在非原图模式下更新 adjustedCIImage
+                adjustedCIImage = adjusted
+
+                // 更新缓存：保存当前调整图像和参数
+                if let cgImage = cgImage {
+                    let newImage = NSImage(cgImage: cgImage, size: imageSize)
+                    cachedAdjustedImage = newImage
+                    cachedAdjustments = adj
+                    displayImage = newImage
+                }
+            } else {
+                // 原图模式：只更新显示，不更新缓存
+                if let cgImage = cgImage {
+                    displayImage = NSImage(cgImage: cgImage, size: imageSize)
+                }
             }
         }
     }
@@ -541,6 +599,7 @@ struct ImageDetailView: View {
             scale: scale,
             adjustments: $adjustments,
             showAdjustmentPanel: $showAdjustmentPanel,
+            showOriginal: $showOriginal,
             pixelInfo: currentPixelInfo
         )
     }
@@ -551,6 +610,7 @@ struct ImageInfoBar: View {
     let scale: CGFloat
     @Binding var adjustments: ImageAdjustments
     @Binding var showAdjustmentPanel: Bool
+    @Binding var showOriginal: Bool
     let pixelInfo: PixelInfo?
 
     var body: some View {
@@ -610,6 +670,24 @@ struct ImageInfoBar: View {
             }
 
             Spacer()
+
+            // Before/After 切换按钮
+            Button(action: {
+                showOriginal.toggle()
+            }) {
+                HStack(spacing: 4) {
+                    Image(systemName: showOriginal ? "eye.slash" : "eye")
+                        .font(.caption)
+                    Text(showOriginal ? "调整" : "原图")
+                        .font(.caption)
+                }
+            }
+            .buttonStyle(.bordered)
+            .help(showOriginal ? "显示调整效果 (\\\\)" : "显示原图 (\\\\)")
+            .keyboardShortcut("\\", modifiers: [])
+
+            Spacer()
+                .frame(width: 8)
 
             // 重置按钮
             Button(action: {

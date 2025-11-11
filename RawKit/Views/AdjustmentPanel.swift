@@ -508,10 +508,11 @@ struct ColorAdjustmentsView: View, Equatable {
                 }) {
                     HStack {
                         Image(systemName: "eyedropper")
-                        Text(whiteBalancePickMode == .whiteBalance ? "取消(w)" : "白平衡(w)")
+                        Text(whiteBalancePickMode == .whiteBalance ? "取消" : "白平衡")
                     }
                 }
                 .buttonStyle(.bordered)
+                .help(whiteBalancePickMode == .whiteBalance ? "取消白平衡吸管 (w)" : "使用吸管选取白平衡 (w)")
                 .keyboardShortcut("w", modifiers: [])
 
                 Button(action: {

@@ -277,6 +277,7 @@ struct ExportDialog: View {
                         onCancel()
                     }
                     .keyboardShortcut(.escape)
+                    .help("取消导出 (Esc)")
 
                     Button("导出") {
                         print("ExportDialog: 点击导出按钮")
@@ -299,6 +300,7 @@ struct ExportDialog: View {
                         onExport(currentConfig)
                     }
                     .keyboardShortcut(.return)
+                    .help("开始导出 (⏎)")
                 }
             }
             .padding()
@@ -436,9 +438,12 @@ struct SaveExportPresetDialog: View {
             HStack(spacing: 12) {
                 Button("取消", action: onCancel)
                     .keyboardShortcut(.escape)
+                    .help("取消 (Esc)")
 
                 Button("保存", action: onSave)
                     .disabled(presetName.isEmpty)
+                    .keyboardShortcut(.return)
+                    .help("保存导出预设 (⏎)")
             }
         }
         .padding(24)
