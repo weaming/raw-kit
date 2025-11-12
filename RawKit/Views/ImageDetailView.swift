@@ -155,10 +155,13 @@ struct ImageDetailView: View {
             loadingStage = .fullResolution
             if let fullImage = await ImageProcessor.loadCIImage(from: imageInfo.url) {
                 originalCIImage = fullImage
+                print("ImageDetailView: ✓ originalCIImage 已加载（小图）")
                 // 等待视口尺寸可用，然后缩放到显示尺寸
                 await waitForViewportSize()
                 await displayScaledImage(fullImage)
                 displayImageID = UUID()
+            } else {
+                print("ImageDetailView: ✗ 加载 CIImage 失败（小图）")
             }
 
             isLoading = false
@@ -180,9 +183,12 @@ struct ImageDetailView: View {
 
         if let fullImage = await ImageProcessor.loadCIImage(from: imageInfo.url) {
             originalCIImage = fullImage
+            print("ImageDetailView: ✓ originalCIImage 已加载（大图）")
             // 缩放到显示尺寸
             await displayScaledImage(fullImage)
             displayImageID = UUID()
+        } else {
+            print("ImageDetailView: ✗ 加载 CIImage 失败（大图）")
         }
 
         isLoading = false

@@ -330,30 +330,7 @@ class ImageProcessor {
             return nil
         }
 
-        // 检测 X3F Foveon DNG（通过 ColorCalibration1 存在来判断）
-        // X3F DNG 的特点：
-        // 1. 有 ColorCalibration1 矩阵（对角矩阵，非单位矩阵）
-        // 2. White Level 不同（但 CGImageSource 读取不到）
-        // 3. CIRAWFilter 无法正确处理 X3F 原始 DNG
-        // 解决方案：标记为需要转换，在 loadRawWithFilter 中处理
-        if let colorCalib = dngDict["ColorCalibration1"] as? [NSNumber], colorCalib.count >= 9 {
-            let r = colorCalib[0].doubleValue
-            let g = colorCalib[4].doubleValue
-            let b = colorCalib[8].doubleValue
-
-            print("ImageProcessor: 检测到 ColorCalibration1: R=\(String(format: "%.4f", r)), G=\(String(format: "%.4f", g)), B=\(String(format: "%.4f", b))")
-
-            // 检查是否为非单位对角矩阵（X3F 特征）
-            let isNonIdentity = abs(r - 1.0) > 0.01 || abs(g - 1.0) > 0.01 || abs(b - 1.0) > 0.01
-            if isNonIdentity {
-                print("ImageProcessor: 检测到 X3F 原始 DNG（不支持直接加载）")
-                print("ImageProcessor: 需要使用 x3f-extract 转换为线性 sRGB DNG")
-                // 返回 nil 表示跳过白平衡调整，但需要在 loadRawWithFilter 中检测并转换
-                return nil
-            }
-        }
-
-        // 从 As Shot Neutral 计算白平衡（标准 Bayer DNG）
+        // 从 As Shot Neutral 计算白平衡
         if let asShotNeutral = dngDict[kCGImagePropertyDNGAsShotNeutral as String] as? [NSNumber],
            asShotNeutral.count >= 3 {
 

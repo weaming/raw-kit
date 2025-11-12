@@ -12,9 +12,11 @@ struct ResizableAdjustmentPanel: View, Equatable {
     static func == (lhs: ResizableAdjustmentPanel, rhs: ResizableAdjustmentPanel) -> Bool {
         // 只在 adjustments 或 width 变化时才重绘
         // adjustedCIImage 的变化不应该触发控制面板重绘
+        // 但 originalCIImage 从 nil 变为有值时需要重绘（解锁自动白平衡按钮）
         lhs.adjustments == rhs.adjustments &&
         lhs.width == rhs.width &&
-        lhs.whiteBalancePickMode == rhs.whiteBalancePickMode
+        lhs.whiteBalancePickMode == rhs.whiteBalancePickMode &&
+        (lhs.originalCIImage != nil) == (rhs.originalCIImage != nil)
     }
 
     var body: some View {
@@ -495,7 +497,8 @@ struct ColorAdjustmentsView: View, Equatable {
         lhs.adjustments.greenCurve == rhs.adjustments.greenCurve &&
         lhs.adjustments.blueCurve == rhs.adjustments.blueCurve &&
         lhs.adjustments.rgbCurve == rhs.adjustments.rgbCurve &&
-        lhs.whiteBalancePickMode == rhs.whiteBalancePickMode
+        lhs.whiteBalancePickMode == rhs.whiteBalancePickMode &&
+        (lhs.originalCIImage != nil) == (rhs.originalCIImage != nil)
     }
 
     var body: some View {
@@ -521,6 +524,8 @@ struct ColorAdjustmentsView: View, Equatable {
                     Text("自动")
                 }
                 .buttonStyle(.bordered)
+                .disabled(originalCIImage == nil)
+                .help(originalCIImage == nil ? "等待图片加载..." : "自动白平衡")
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 16)
@@ -579,14 +584,20 @@ struct ColorAdjustmentsView: View, Equatable {
     }
 
     private func applyAutoWhiteBalance() {
+        print("自动白平衡: 开始计算，originalCIImage = \(originalCIImage != nil ? "有值" : "nil")")
+
         guard let originalCIImage else {
-            print("自动白平衡: originalCIImage 为空")
+            print("自动白平衡: ✗ originalCIImage 为空，无法计算")
             return
         }
 
+        print("自动白平衡: 调用 ImageProcessor.calculateAutoWhiteBalance")
         if let wb = ImageProcessor.calculateAutoWhiteBalance(from: originalCIImage) {
+            print("自动白平衡: ✓ 计算成功 - 色温: \(wb.temperature)K, 色调: \(wb.tint)")
             adjustments.temperature = wb.temperature
             adjustments.tint = wb.tint
+        } else {
+            print("自动白平衡: ✗ 计算失败")
         }
     }
 }
