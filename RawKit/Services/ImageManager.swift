@@ -48,13 +48,34 @@ class ImageManager: ObservableObject {
     }
 
     func addImages(from urls: [URL]) {
-        let newImages = urls
-            .filter { supportedExtensions.contains($0.pathExtension.lowercased()) }
-            .filter { url in !images.contains(where: { $0.url == url }) }
-            .map { ImageInfo(url: $0) }
+        guard !urls.isEmpty else { return }
 
-        images.append(contentsOf: newImages)
-        images.sort { $0.filename < $1.filename }
+        let supportedExtensions = self.supportedExtensions
+        let rawExtensions = self.rawExtensions
+
+        Task {
+            isScanning = true
+            defer { isScanning = false }
+
+            let resolvedURLs = await Task.detached(priority: .userInitiated) {
+                Self.resolveInputURLs(
+                    urls,
+                    supportedExtensions: supportedExtensions,
+                    rawExtensions: rawExtensions
+                )
+            }.value
+
+            guard !resolvedURLs.isEmpty else {
+                return
+            }
+
+            let newImages = resolvedURLs
+                .filter { url in !images.contains(where: { $0.url == url }) }
+                .map { ImageInfo(url: $0) }
+
+            images.append(contentsOf: newImages)
+            images.sort { $0.filename < $1.filename }
+        }
     }
 
     func removeImage(at index: Int) {
@@ -148,6 +169,51 @@ class ImageManager: ObservableObject {
         return deduplicated
     }
 
+    private nonisolated static func resolveInputURLs(
+        _ urls: [URL],
+        supportedExtensions: [String],
+        rawExtensions: [String]
+    ) -> [URL] {
+        var collectedURLs: [URL] = []
+
+        for originalURL in urls {
+            let url = originalURL.standardizedFileURL
+            var isDirectory: ObjCBool = false
+            let exists = FileManager.default.fileExists(
+                atPath: url.path,
+                isDirectory: &isDirectory
+            )
+
+            guard exists else {
+                continue
+            }
+
+            if isDirectory.boolValue {
+                collectedURLs.append(
+                    contentsOf: scanDirectoryURLs(
+                        url,
+                        supportedExtensions: supportedExtensions,
+                        rawExtensions: rawExtensions
+                    )
+                )
+            } else if supportedExtensions.contains(url.pathExtension.lowercased()) {
+                collectedURLs.append(url)
+            }
+        }
+
+        var uniqueURLs: [URL] = []
+        var seenPaths = Set<String>()
+
+        for url in collectedURLs {
+            let path = url.standardizedFileURL.path
+            if seenPaths.insert(path).inserted {
+                uniqueURLs.append(url)
+            }
+        }
+
+        return deduplicateRawAndJpeg(urls: uniqueURLs, rawExtensions: rawExtensions)
+    }
+
     private nonisolated static func deduplicateRawAndJpeg(
         urls: [URL],
         rawExtensions: [String]
@@ -182,6 +248,19 @@ class ImageManager: ObservableObject {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowedContentTypes = allowedContentTypes()
+
+        panel.begin { [weak self] response in
+            guard response == .OK else { return }
+            self?.addImages(from: panel.urls)
+        }
+    }
+
+    func openImportDialog() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = true
         panel.canChooseFiles = true
         panel.allowedContentTypes = allowedContentTypes()
 

@@ -19,23 +19,40 @@ struct ImageDetailView: View {
         let adjustments: ImageAdjustments
     }
 
+    private struct RenderSnapshot: @unchecked Sendable {
+        let requestID: Int
+        let originalImage: CIImage
+        let viewportSize: CGSize
+        let adjustments: ImageAdjustments
+        let showOriginal: Bool
+    }
+
+    private struct RenderOutput: @unchecked Sendable {
+        let requestID: Int
+        let image: CIImage
+        let cgImage: CGImage?
+        let adjustments: ImageAdjustments
+        let showOriginal: Bool
+    }
+
     let imageInfo: ImageInfo
-    let savedAdjustments: ImageAdjustments?
+    let session: ImageEditingSession
+    @ObservedObject var editingState: ImageEditingState
+    @ObservedObject private var history: AdjustmentHistory
     @Binding var sidebarWidth: CGFloat
-    let onAdjustmentsChanged: (ImageAdjustments) -> Void
-    @ObservedObject var history: AdjustmentHistory
+    let onFilesDrop: (([URL]) -> Void)?
 
     @State private var originalCIImage: CIImage?
     @State private var adjustedCIImage: CIImage?
+    @State private var previewCIImage: CIImage?
+    @State private var previewRevision = 0
     @State private var displayImage: NSImage?
     @State private var displayImageID = UUID() // 用于强制刷新视图
     @State private var isLoading = true
     @State private var loadingStage: LoadingStage = .thumbnail
     @State private var scale: CGFloat = 1.0
-    @State private var adjustments = ImageAdjustments.default  // 面板 UI 使用（立即更新）
     @State private var showAdjustmentPanel = true
     @State private var whiteBalancePickMode: CurveAdjustmentView.PickMode = .none
-    @State private var isUpdatingFromHistory = false
     @State private var currentPixelInfo: PixelInfo?
     @State private var viewportSize: CGSize = .zero
     @State private var showOriginal = false  // 是否显示原图（Before/After 切换）
@@ -56,6 +73,21 @@ struct ImageDetailView: View {
         case fullResolution
     }
 
+    init(
+        imageInfo: ImageInfo,
+        session: ImageEditingSession,
+        editingState: ImageEditingState,
+        sidebarWidth: Binding<CGFloat>,
+        onFilesDrop: (([URL]) -> Void)?
+    ) {
+        self.imageInfo = imageInfo
+        self.session = session
+        self._editingState = ObservedObject(wrappedValue: editingState)
+        self._history = ObservedObject(wrappedValue: session.history)
+        self._sidebarWidth = sidebarWidth
+        self.onFilesDrop = onFilesDrop
+    }
+
     var body: some View {
         HStack(spacing: 0) {
             VStack(spacing: 0) {
@@ -67,17 +99,19 @@ struct ImageDetailView: View {
             if showAdjustmentPanel {
                 Divider()
                 ResizableAdjustmentPanel(
-                    adjustments: $adjustments,
+                    adjustments: $editingState.adjustments,
                     curvePickSamples: $curvePickSamples,
                     originalCIImage: originalCIImage,
                     adjustedCIImage: adjustedCIImage ?? originalCIImage,
+                    previewCIImage: previewCIImage,
+                    previewRevision: previewRevision,
                     width: $sidebarWidth,
                     whiteBalancePickMode: $whiteBalancePickMode
                 )
                 .equatable()
             }
         }
-        .task {
+        .task(id: imageInfo.id) {
             // 初始化渲染队列（maxFPS: 0 = 不限制，30 = 30fps，60 = 60fps）
             if renderQueue == nil {
                 renderQueue = RenderQueue(maxFPS: 30) { request in
@@ -85,66 +119,54 @@ struct ImageDetailView: View {
                 }
             }
 
-            if let saved = savedAdjustments {
-                adjustments = saved
-            } else {
-                // RAW 文件在加载时已经应用了 As Shot 白平衡，
-                // 所以初始调整应该是中性的（6500K/0 tint）
-                // 不需要再从 EXIF 读取和设置白平衡
-                print("ImageDetailView: 使用默认白平衡（RAW 已应用 As Shot）")
-            }
-            history.recordImmediate(adjustments)
             await loadImageProgressively()
         }
-        .onChange(of: adjustments) { _, newValue in
-            // 1. 立即更新历史记录和回调（不阻塞 UI）
-            if !isUpdatingFromHistory {
-                history.record(newValue)
-            }
-            onAdjustmentsChanged(newValue)
-
-            // 2. 如果在原图模式下修改了参数，清空缓存
+        .onChange(of: editingState.adjustments) { _, newValue in
             if showOriginal {
                 cachedAdjustedImage = nil
                 cachedAdjustments = nil
                 print("Before/After: 在原图模式下修改参数，清空缓存")
             }
 
-            // 3. 将调整参数加入渲染队列
             enqueueRender(newValue)
-        }
-        .onChange(of: savedAdjustments) { _, newValue in
-            if let newValue, newValue != adjustments {
-                Task { @MainActor in
-                    isUpdatingFromHistory = true
-                    adjustments = newValue
-                    isUpdatingFromHistory = false
-                }
-            }
         }
         .onChange(of: showOriginal) { _, newValue in
             if newValue {
                 // 切换到原图：保存当前调整图到缓存，然后渲染原图
-                if adjustments == cachedAdjustments {
+                if editingState.adjustments == cachedAdjustments {
                     // 参数没变，保存当前显示的图像
                     cachedAdjustedImage = displayImage
                 }
-                enqueueRender(adjustments)
+                enqueueRender(editingState.adjustments)
             } else {
                 // 切换回调整效果：检查缓存是否有效
-                if let cached = cachedAdjustedImage, adjustments == cachedAdjustments {
+                if let cached = cachedAdjustedImage, editingState.adjustments == cachedAdjustments {
                     // 缓存有效，直接使用缓存图像（无需重新渲染）
                     displayImage = cached
+                    if let adjustedCIImage {
+                        commitPreviewImage(adjustedCIImage)
+                    }
                     print("Before/After: 使用缓存的调整图像")
                 } else {
                     // 缓存失效或不存在，重新渲染
                     print("Before/After: 缓存失效，重新渲染调整图像")
-                    enqueueRender(adjustments)
+                    enqueueRender(editingState.adjustments)
                 }
             }
         }
         .focusedSceneValue(\.undoAction, history.canUndo ? undo : nil)
         .focusedSceneValue(\.redoAction, history.canRedo ? redo : nil)
+        .background(
+            Button("") {
+                cancelWhiteBalancePickMode()
+            }
+            .keyboardShortcut(.escape)
+            .disabled(whiteBalancePickMode != .whiteBalance)
+            .hidden()
+        )
+        .onDisappear {
+            session.flushPendingEdits()
+        }
     }
 
     private func loadImageProgressively() async {
@@ -157,15 +179,13 @@ struct ImageDetailView: View {
             print("ImageDetailView: 小图片（\(Int(maxDimension))px），直接加载完整分辨率")
 
             loadingStage = .fullResolution
-                if let fullImage = await ImageProcessor.loadCIImage(from: imageInfo.url) {
-                    originalCIImage = fullImage
-                    print("ImageDetailView: ✓ originalCIImage 已加载（小图）")
-                    // 等待视口尺寸可用，然后缩放到显示尺寸
-                    await waitForViewportSize()
-                    await displayScaledImage(fullImage)
-                    enqueueRender(adjustments)
-                    displayImageID = UUID()
-                } else {
+            if let fullImage = await ImageProcessor.loadCIImage(from: imageInfo.url) {
+                originalCIImage = fullImage
+                print("ImageDetailView: ✓ originalCIImage 已加载（小图）")
+                await waitForViewportSize()
+                await renderCurrentStateImmediately()
+                displayImageID = UUID()
+            } else {
                 print("ImageDetailView: ✗ 加载 CIImage 失败（小图）")
             }
 
@@ -189,9 +209,8 @@ struct ImageDetailView: View {
         if let fullImage = await ImageProcessor.loadCIImage(from: imageInfo.url) {
             originalCIImage = fullImage
             print("ImageDetailView: ✓ originalCIImage 已加载（大图）")
-            // 缩放到显示尺寸
-            await displayScaledImage(fullImage)
-            enqueueRender(adjustments)
+            await waitForViewportSize()
+            await renderCurrentStateImmediately()
             displayImageID = UUID()
         } else {
             print("ImageDetailView: ✗ 加载 CIImage 失败（大图）")
@@ -209,42 +228,6 @@ struct ImageDetailView: View {
         }
     }
 
-    // 缩放并显示图像（初次加载时使用）
-    private func displayScaledImage(_ image: CIImage) async {
-        guard viewportSize != .zero else {
-            // 如果视口尺寸还不可用，暂时显示原图
-            await renderAndUpdateImage(image)
-            return
-        }
-
-        // 计算渲染尺寸（预留放大空间）
-        let renderSize = calculateRenderSize(
-            imageSize: image.extent.size,
-            viewportSize: viewportSize
-        )
-
-        // 缩放到渲染尺寸
-        let scaledImage = scaleImageToDisplay(image, targetSize: renderSize)
-        adjustedCIImage = scaledImage
-
-        // 在后台线程渲染，不阻塞主线程
-        await renderAndUpdateImage(scaledImage)
-    }
-
-    // 辅助函数：在后台渲染并更新 UI
-    private func renderAndUpdateImage(_ image: CIImage) async {
-        // 使用 CGImage 作为中间格式（Sendable）来避免跨线程传递 NSImage
-        let cgImage = await Task.detached(priority: .userInitiated) {
-            // 在后台线程渲染为 CGImage
-            ImageProcessor.convertToCGImage(image)
-        }.value
-
-        // 在主线程从 CGImage 创建 NSImage
-        if let cgImage = cgImage {
-            displayImage = NSImage(cgImage: cgImage, size: image.extent.size)
-        }
-    }
-
     private func getImageDimensions(from url: URL) -> CGSize {
         guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil),
               let properties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [String: Any] else {
@@ -257,128 +240,74 @@ struct ImageDetailView: View {
         return CGSize(width: width, height: height)
     }
 
-    private func applyAdjustmentsSync(_ adj: ImageAdjustments, startTime: CFAbsoluteTime) {
-        guard let original = originalCIImage else { return }
-        guard viewportSize != .zero else { return }
-
-        // 计算渲染尺寸（预留放大空间，但不超过原图）
-        let renderSize = calculateRenderSize(
-            imageSize: original.extent.size,
-            viewportSize: viewportSize
-        )
-
-        // 先缩放到渲染尺寸
-        let scaledImage = scaleImageToDisplay(original, targetSize: renderSize)
-
-        // 在缩放后的图像上应用调整（Core Image 惰性计算，这里立即返回）
-        let adjusted = ImageProcessor.applyAdjustments(to: scaledImage, adjustments: adj)
-        adjustedCIImage = adjusted
-
-        let filterTime = CFAbsoluteTimeGetCurrent()
-        print("⏱️ 滤镜构建耗时: \(Int((filterTime - startTime) * 1000))ms")
-
-        // 异步渲染，不阻塞主线程
-        Task.detached(priority: .userInitiated) {
-            let renderStartTime = CFAbsoluteTimeGetCurrent()
-            // 渲染为 CGImage（可以安全地跨线程传递）
-            let cgImage = ImageProcessor.convertToCGImage(adjusted)
-            let renderTime = CFAbsoluteTimeGetCurrent()
-            print("⏱️ 渲染耗时: \(Int((renderTime - renderStartTime) * 1000))ms")
-
-            let beforeUpdate = CFAbsoluteTimeGetCurrent()
-
-            // 在主线程从 CGImage 创建 NSImage 并更新
-            await MainActor.run {
-                let dispatchTime = CFAbsoluteTimeGetCurrent()
-                print("⏱️ MainActor 调度延迟: \(Int((dispatchTime - beforeUpdate) * 1000))ms")
-
-                if let cgImage = cgImage {
-                    self.displayImage = NSImage(cgImage: cgImage, size: adjusted.extent.size)
-                }
-
-                let totalTime = CFAbsoluteTimeGetCurrent()
-                print("⏱️ 总耗时: \(Int((totalTime - startTime) * 1000))ms\n")
+    private func renderCurrentStateImmediately() async {
+        guard let request = await MainActor.run(body: { () -> RenderRequest? in
+            guard originalCIImage != nil, viewportSize != .zero else {
+                return nil
             }
-        }
-    }
 
-    private func applyAdjustments(_ adj: ImageAdjustments) async {
-        let startTime = CFAbsoluteTimeGetCurrent()
-        applyAdjustmentsSync(adj, startTime: startTime)
+            nextRenderRequestID += 1
+            let request = RenderRequest(id: nextRenderRequestID, adjustments: editingState.adjustments)
+            latestRenderRequestID = request.id
+            return request
+        }) else {
+            return
+        }
+
+        await applyAdjustmentsAsync(request)
     }
 
     private func applyAdjustmentsAsync(_ request: RenderRequest) async {
-        let requestID = request.id
-        let adj = request.adjustments
+        guard let snapshot = await MainActor.run(body: { () -> RenderSnapshot? in
+            guard let originalImage = originalCIImage,
+                  viewportSize != .zero,
+                  latestRenderRequestID == request.id else {
+                return nil
+            }
 
-        // 在 MainActor 上获取必要的数据
-        let (original, viewport, shouldShowOriginal, latestRequestID) = await MainActor.run {
-            (originalCIImage, viewportSize, showOriginal, latestRenderRequestID)
+            return RenderSnapshot(
+                requestID: request.id,
+                originalImage: originalImage,
+                viewportSize: viewportSize,
+                adjustments: request.adjustments,
+                showOriginal: showOriginal
+            )
+        }) else {
+            return
         }
 
-        guard let original = original else { return }
-        guard viewport != .zero else { return }
-        guard latestRequestID == requestID else { return }
-
-        // 计算渲染尺寸（预留放大空间，但不超过原图）
-        let renderSize = calculateRenderSize(
-            imageSize: original.extent.size,
-            viewportSize: viewport
-        )
-
-        // 先缩放到渲染尺寸
-        let scaledImage = scaleImageToDisplay(original, targetSize: renderSize)
-
-        // 根据 showOriginal 状态决定是否应用调整
-        let adjusted: CIImage
-        if shouldShowOriginal {
-            // 显示原图（不应用任何调整）
-            adjusted = scaledImage
-        } else {
-            // 应用调整
-            adjusted = ImageProcessor.applyAdjustments(to: scaledImage, adjustments: adj)
+        let outputTask = Task.detached(priority: .userInitiated) {
+            Self.renderPreview(from: snapshot)
         }
+        let output = await outputTask.value
 
-        let imageSize = adjusted.extent.size
-
-        let shouldRender = await MainActor.run {
-            latestRenderRequestID == requestID
-        }
-        guard shouldRender else { return }
-
-        // 在后台线程渲染为 CGImage（Sendable）
-        let cgImage = await Task.detached(priority: .userInitiated) {
-            ImageProcessor.convertToCGImage(adjusted)
-        }.value
-
-        // 在主线程更新状态
         await MainActor.run {
-            guard latestRenderRequestID == requestID else {
+            guard latestRenderRequestID == output.requestID else {
                 return
             }
 
-            if !shouldShowOriginal {
-                // 只在非原图模式下更新 adjustedCIImage
-                adjustedCIImage = adjusted
-
-                // 更新缓存：保存当前调整图像和参数
-                if let cgImage = cgImage {
-                    let newImage = NSImage(cgImage: cgImage, size: imageSize)
-                    cachedAdjustedImage = newImage
-                    cachedAdjustments = adj
-                    displayImage = newImage
-                }
-            } else {
-                // 原图模式：只更新显示，不更新缓存
-                if let cgImage = cgImage {
-                    displayImage = NSImage(cgImage: cgImage, size: imageSize)
-                }
+            let displayImage = output.cgImage.map {
+                NSImage(cgImage: $0, size: output.image.extent.size)
             }
+
+            if !output.showOriginal {
+                adjustedCIImage = output.image
+
+                if let displayImage {
+                    cachedAdjustedImage = displayImage
+                    cachedAdjustments = output.adjustments
+                    self.displayImage = displayImage
+                }
+            } else if let displayImage {
+                self.displayImage = displayImage
+            }
+
+            commitPreviewImage(output.image)
         }
     }
 
     // 计算渲染尺寸：预留放大空间，让用户可以放大查看细节
-    private nonisolated func calculateRenderSize(
+    private nonisolated static func calculateRenderSize(
         imageSize: CGSize,
         viewportSize: CGSize
     ) -> CGSize {
@@ -400,7 +329,7 @@ struct ImageDetailView: View {
     }
 
     // 计算最大允许的缩放倍数（基于 PPI）
-    nonisolated func calculateMaxScale(
+    private nonisolated static func calculateMaxScale(
         imageSize: CGSize,
         viewportSize: CGSize
     ) -> CGFloat {
@@ -421,7 +350,7 @@ struct ImageDetailView: View {
     }
 
     // 缩放图像到目标显示尺寸
-    private nonisolated func scaleImageToDisplay(_ image: CIImage, targetSize: CGSize) -> CIImage {
+    private nonisolated static func scaleImageToDisplay(_ image: CIImage, targetSize: CGSize) -> CIImage {
         let extent = image.extent
         let scaleX = targetSize.width / extent.width
         let scaleY = targetSize.height / extent.height
@@ -434,6 +363,31 @@ struct ImageDetailView: View {
         // 使用 Lanczos 缩放算法获得最佳质量
         let transform = CGAffineTransform(scaleX: scaleX, y: scaleY)
         return image.transformed(by: transform, highQualityDownsample: true)
+    }
+
+    private nonisolated static func renderPreview(from snapshot: RenderSnapshot) -> RenderOutput {
+        let renderSize = calculateRenderSize(
+            imageSize: snapshot.originalImage.extent.size,
+            viewportSize: snapshot.viewportSize
+        )
+        let scaledImage = scaleImageToDisplay(snapshot.originalImage, targetSize: renderSize)
+        let outputImage = snapshot.showOriginal
+            ? scaledImage
+            : ImageProcessor.applyAdjustments(to: scaledImage, adjustments: snapshot.adjustments)
+
+        return RenderOutput(
+            requestID: snapshot.requestID,
+            image: outputImage,
+            cgImage: ImageProcessor.convertToCGImage(outputImage),
+            adjustments: snapshot.adjustments,
+            showOriginal: snapshot.showOriginal
+        )
+    }
+
+    @MainActor
+    private func commitPreviewImage(_ image: CIImage) {
+        previewCIImage = image
+        previewRevision &+= 1
     }
 
     private func handleColorPick(point: CGPoint, imageSize: CGSize) {
@@ -473,31 +427,37 @@ struct ImageDetailView: View {
         switch whiteBalancePickMode {
         case .black:
             curvePickSamples.black = pixelInfo
+            var updatedAdjustments = editingState.adjustments
             if curvePickSamples.white != nil {
-                CurveCalibration.apply(samples: curvePickSamples, to: &adjustments)
+                CurveCalibration.apply(samples: curvePickSamples, to: &updatedAdjustments)
             } else {
-                _ = adjustments.redCurve.addPoint(input: pixelInfo.linearRGB.r, output: 0.0)
-                _ = adjustments.greenCurve.addPoint(input: pixelInfo.linearRGB.g, output: 0.0)
-                _ = adjustments.blueCurve.addPoint(input: pixelInfo.linearRGB.b, output: 0.0)
+                _ = updatedAdjustments.redCurve.addPoint(input: pixelInfo.linearRGB.r, output: 0.0)
+                _ = updatedAdjustments.greenCurve.addPoint(input: pixelInfo.linearRGB.g, output: 0.0)
+                _ = updatedAdjustments.blueCurve.addPoint(input: pixelInfo.linearRGB.b, output: 0.0)
             }
+            editingState.adjustments = updatedAdjustments
         case .gray:
             curvePickSamples.gray = pixelInfo
+            var updatedAdjustments = editingState.adjustments
             if curvePickSamples.black != nil, curvePickSamples.white != nil {
-                CurveCalibration.apply(samples: curvePickSamples, to: &adjustments)
+                CurveCalibration.apply(samples: curvePickSamples, to: &updatedAdjustments)
             } else {
-                _ = adjustments.redCurve.addPoint(input: pixelInfo.linearRGB.r, output: 0.5)
-                _ = adjustments.greenCurve.addPoint(input: pixelInfo.linearRGB.g, output: 0.5)
-                _ = adjustments.blueCurve.addPoint(input: pixelInfo.linearRGB.b, output: 0.5)
+                _ = updatedAdjustments.redCurve.addPoint(input: pixelInfo.linearRGB.r, output: 0.5)
+                _ = updatedAdjustments.greenCurve.addPoint(input: pixelInfo.linearRGB.g, output: 0.5)
+                _ = updatedAdjustments.blueCurve.addPoint(input: pixelInfo.linearRGB.b, output: 0.5)
             }
+            editingState.adjustments = updatedAdjustments
         case .white:
             curvePickSamples.white = pixelInfo
+            var updatedAdjustments = editingState.adjustments
             if curvePickSamples.black != nil {
-                CurveCalibration.apply(samples: curvePickSamples, to: &adjustments)
+                CurveCalibration.apply(samples: curvePickSamples, to: &updatedAdjustments)
             } else {
-                _ = adjustments.redCurve.addPoint(input: pixelInfo.linearRGB.r, output: 1.0)
-                _ = adjustments.greenCurve.addPoint(input: pixelInfo.linearRGB.g, output: 1.0)
-                _ = adjustments.blueCurve.addPoint(input: pixelInfo.linearRGB.b, output: 1.0)
+                _ = updatedAdjustments.redCurve.addPoint(input: pixelInfo.linearRGB.r, output: 1.0)
+                _ = updatedAdjustments.greenCurve.addPoint(input: pixelInfo.linearRGB.g, output: 1.0)
+                _ = updatedAdjustments.blueCurve.addPoint(input: pixelInfo.linearRGB.b, output: 1.0)
             }
+            editingState.adjustments = updatedAdjustments
         case .whiteBalance, .none:
             return
         }
@@ -546,8 +506,10 @@ struct ImageDetailView: View {
         let neutralTint = (greenDiff / max(luminance, 0.001)) * tintSensitivity
 
         // 设置绝对值（幂等操作）
-        adjustments.temperature = max(2000, min(10000, neutralTemp))
-        adjustments.tint = max(-100, min(100, neutralTint))
+        var updatedAdjustments = editingState.adjustments
+        updatedAdjustments.temperature = max(2000, min(10000, neutralTemp))
+        updatedAdjustments.tint = max(-100, min(100, neutralTint))
+        editingState.adjustments = updatedAdjustments
 
         print(
             "✅ 白平衡取色: GammaRGB(\(String(format: "%.3f", r)), \(String(format: "%.3f", g)), \(String(format: "%.3f", b))) 亮度: \(String(format: "%.3f", luminance))"
@@ -559,24 +521,16 @@ struct ImageDetailView: View {
             "  绿色偏差: \(String(format: "%.3f", greenDiff)), 期望绿色: \(String(format: "%.3f", expectedGreen))"
         )
         print(
-            "  Neutral色温: \(Int(adjustments.temperature))K, Neutral色调: \(String(format: "%.1f", adjustments.tint))"
+            "  Neutral色温: \(Int(updatedAdjustments.temperature))K, Neutral色调: \(String(format: "%.1f", updatedAdjustments.tint))"
         )
     }
 
     private func undo() {
-        history.flush()
-        guard let previousAdjustments = history.undo() else { return }
-        isUpdatingFromHistory = true
-        adjustments = previousAdjustments
-        isUpdatingFromHistory = false
+        session.undo()
     }
 
     private func redo() {
-        history.flush()
-        guard let nextAdjustments = history.redo() else { return }
-        isUpdatingFromHistory = true
-        adjustments = nextAdjustments
-        isUpdatingFromHistory = false
+        session.redo()
     }
 
     /// 执行实际的渲染操作（由渲染队列调用）
@@ -604,7 +558,7 @@ struct ImageDetailView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let image = displayImage {
                 let maxScale = originalCIImage.map { original in
-                    calculateMaxScale(
+                    Self.calculateMaxScale(
                         imageSize: original.extent.size,
                         viewportSize: geometry.size
                     )
@@ -618,7 +572,8 @@ struct ImageDetailView: View {
                     originalCIImage: originalCIImage,
                     adjustedCIImage: adjustedCIImage,
                     pickMode: whiteBalancePickMode,
-                    onColorPick: whiteBalancePickMode != .none ? handleColorPick : nil
+                    onColorPick: whiteBalancePickMode != .none ? handleColorPick : nil,
+                    onFilesDrop: onFilesDrop
                 )
                 .clipped()
                 .id(displayImageID) // 使用 displayImageID 强制刷新
@@ -631,7 +586,7 @@ struct ImageDetailView: View {
         .onChange(of: viewportSize) { _, newSize in
             // 视口尺寸变化时，重新渲染（使用当前调整）
             if newSize != .zero {
-                enqueueRender(adjustments)
+                enqueueRender(editingState.adjustments)
             }
         }
         .background(
@@ -652,12 +607,18 @@ struct ImageDetailView: View {
         ImageInfoBar(
             imageInfo: imageInfo,
             scale: scale,
-            adjustments: $adjustments,
+            adjustments: $editingState.adjustments,
             curvePickSamples: $curvePickSamples,
             showAdjustmentPanel: $showAdjustmentPanel,
             showOriginal: $showOriginal,
             pixelInfo: currentPixelInfo
         )
+    }
+
+    private func cancelWhiteBalancePickMode() {
+        guard whiteBalancePickMode == .whiteBalance else { return }
+        whiteBalancePickMode = .none
+        currentPixelInfo = nil
     }
 }
 

@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import UniformTypeIdentifiers
 
 private final class FileURLCollector: @unchecked Sendable {
     private let lock = NSLock()
@@ -24,8 +25,7 @@ struct ContentView: View {
     @StateObject private var thumbnailManager = ThumbnailManager()
     @State private var selectedIndices: Set<Int> = []
     @State private var displayedIndex: Int?
-    @State private var adjustmentsCache: [UUID: ImageAdjustments] = [:]
-    @State private var historyCache: [UUID: AdjustmentHistory] = [:]
+    @State private var editingSessions: [UUID: ImageEditingSession] = [:]
     @State private var rightSidebarWidth: CGFloat = 400
     @State private var leftSidebarWidth: CGFloat = 250
     @State private var presetsExpanded = true
@@ -45,61 +45,40 @@ struct ContentView: View {
             // 主内容区域
             HStack(spacing: 0) {
                 // 左侧边栏
-                if !imageManager.images.isEmpty {
+                if let currentSession = getCurrentSession() {
                     LeftSidebarView(
                         width: $leftSidebarWidth,
                         presetsExpanded: $presetsExpanded,
                         lutExpanded: $lutExpanded,
-                        adjustments: getCurrentAdjustmentsBinding(),
+                        editingState: currentSession.state,
                         onLoadPreset: { preset in
-                            if let imageInfo = getCurrentImageInfo() {
-                                adjustmentsCache[imageInfo.id] = preset
-                                thumbnailManager.generateAdjustedThumbnail(
-                                    for: imageInfo,
-                                    with: preset
-                                )
-                            }
+                            currentSession.apply(preset)
                         },
                         onLoadLUT: { url in
-                            if let imageInfo = getCurrentImageInfo() {
-                                var currentAdj = adjustmentsCache[imageInfo.id] ?? .default
-                                currentAdj.lutURL = url
-                                adjustmentsCache[imageInfo.id] = currentAdj
-                                thumbnailManager.generateAdjustedThumbnail(
-                                    for: imageInfo,
-                                    with: currentAdj
-                                )
-                            }
+                            currentSession.applyLUT(url)
                         }
                     )
                 }
 
                 // 中间图片详情区域
                 if let index = displayedIndex,
-                   index < imageManager.images.count {
+                   index < imageManager.images.count,
+                   let session = session(for: imageManager.images[index].id) {
                     let imageInfo = imageManager.images[index]
                     ImageDetailView(
                         imageInfo: imageInfo,
-                        savedAdjustments: adjustmentsCache[imageInfo.id],
+                        session: session,
+                        editingState: session.state,
                         sidebarWidth: $rightSidebarWidth,
-                        onAdjustmentsChanged: { newAdjustments in
-                            adjustmentsCache[imageInfo.id] = newAdjustments
-                            thumbnailManager.generateAdjustedThumbnail(
-                                for: imageInfo,
-                                with: newAdjustments
-                            )
-                        },
-                        history: getCurrentHistory()
+                        onFilesDrop: { urls in
+                            imageManager.addImages(from: urls)
+                        }
                     )
                     .id(imageInfo.id)
                 } else {
                     EmptyStateView()
                         .onTapGesture(count: 2) {
-                            imageManager.openFileDialog()
-                        }
-                        .onDrop(of: [.fileURL], isTargeted: nil) { providers in
-                            handleDrop(providers: providers)
-                            return true
+                            imageManager.openImportDialog()
                         }
                 }
             }
@@ -112,11 +91,15 @@ struct ContentView: View {
                     images: imageManager.images,
                     selectedIndices: $selectedIndices,
                     displayedIndex: $displayedIndex,
-                    adjustmentsCache: adjustmentsCache,
+                    adjustmentsForImageID: adjustments(for:),
                     thumbnailManager: thumbnailManager,
                     onDelete: handleDelete
                 )
             }
+        }
+        .onDrop(of: [.fileURL], isTargeted: nil) { providers in
+            handleDrop(providers: providers)
+            return true
         }
         .onChange(of: imageManager.images.count) { oldCount, newCount in
             // 当从空列表添加图片时，自动显示第一张
@@ -125,15 +108,21 @@ struct ContentView: View {
                 selectedIndices = [0]
             }
         }
+        .onAppear {
+            syncEditingSessions(for: imageManager.images)
+        }
+        .onChange(of: imageManager.images.map(\.id)) { _, _ in
+            syncEditingSessions(for: imageManager.images)
+        }
         .sheet(isPresented: $showingExportDialog) {
             ExportDialog(
                 imagesToExport: getImagesToExport(),
-                adjustmentsCache: adjustmentsCache,
-                onExport: { config in
-                    Task {
-                        await performExport(config: config)
-                    }
-                    showingExportDialog = false
+                adjustmentsForImageID: adjustments(for:),
+                onExport: { config, progress in
+                    await performExport(
+                        config: config,
+                        progress: progress
+                    )
                 },
                 onCancel: {
                     showingExportDialog = false
@@ -169,6 +158,14 @@ struct ContentView: View {
                 }
                 .keyboardShortcut(.delete, modifiers: [])
                 .hidden()
+
+                // 全选照片快捷键
+                Button("") {
+                    handleSelectAll()
+                }
+                .keyboardShortcut("a", modifiers: .command)
+                .disabled(imageManager.images.isEmpty)
+                .hidden()
             }
         )
     }
@@ -188,22 +185,47 @@ struct ContentView: View {
         }
     }
 
-    private func performExport(config: ExportConfig) async {
+    private func performExport(
+        config: ExportConfig,
+        progress: @escaping @MainActor @Sendable (Double) -> Void
+    ) async {
         let imagesToExport = getImagesToExport()
+        guard !imagesToExport.isEmpty else {
+            await MainActor.run {
+                progress(1.0)
+            }
+            return
+        }
 
-        for imageInfo in imagesToExport {
-            let adjustments = adjustmentsCache[imageInfo.id] ?? .default
+        await MainActor.run {
+            progress(0.0)
+        }
+
+        for (index, imageInfo) in imagesToExport.enumerated() {
+            let adjustments = adjustments(for: imageInfo.id)
 
             do {
                 let outputURL = try await ImageExporter.export(
                     imageInfo: imageInfo,
                     adjustments: adjustments,
                     config: config,
-                    progress: { _ in }
+                    progress: { imageProgress in
+                        let overallProgress =
+                            (Double(index) + imageProgress) / Double(imagesToExport.count)
+
+                        Task { @MainActor in
+                            progress(overallProgress)
+                        }
+                    }
                 )
                 print("导出成功: \(outputURL.path)")
             } catch {
                 print("导出失败: \(error.localizedDescription)")
+            }
+
+            let completedProgress = Double(index + 1) / Double(imagesToExport.count)
+            await MainActor.run {
+                progress(completedProgress)
             }
         }
     }
@@ -214,39 +236,33 @@ struct ContentView: View {
         return imageManager.images[index]
     }
 
-    private func getCurrentHistory() -> AdjustmentHistory {
-        guard let imageInfo = getCurrentImageInfo() else {
-            return AdjustmentHistory()
-        }
-
-        if let history = historyCache[imageInfo.id] {
-            return history
-        }
-
-        let newHistory = AdjustmentHistory()
-        // 延迟修改状态，避免在视图更新期间修改
-        DispatchQueue.main.async {
-            if historyCache[imageInfo.id] == nil {
-                historyCache[imageInfo.id] = newHistory
-            }
-        }
-        return newHistory
+    private func getCurrentSession() -> ImageEditingSession? {
+        guard let imageInfo = getCurrentImageInfo() else { return nil }
+        return session(for: imageInfo.id)
     }
 
-    private func getCurrentAdjustmentsBinding() -> Binding<ImageAdjustments> {
-        Binding(
-            get: {
-                if let imageInfo = getCurrentImageInfo() {
-                    return adjustmentsCache[imageInfo.id] ?? .default
-                }
-                return .default
-            },
-            set: { newValue in
-                if let imageInfo = getCurrentImageInfo() {
-                    adjustmentsCache[imageInfo.id] = newValue
-                }
-            }
-        )
+    private func session(for imageID: UUID) -> ImageEditingSession? {
+        editingSessions[imageID]
+    }
+
+    private func adjustments(for imageID: UUID) -> ImageAdjustments {
+        session(for: imageID)?.currentAdjustments ?? .default
+    }
+
+    private func syncEditingSessions(for images: [ImageInfo]) {
+        let validIDs = Set(images.map(\.id))
+
+        for removedID in editingSessions.keys.filter({ !validIDs.contains($0) }) {
+            editingSessions.removeValue(forKey: removedID)
+            thumbnailManager.clearThumbnail(for: removedID)
+        }
+
+        for imageInfo in images where editingSessions[imageInfo.id] == nil {
+            editingSessions[imageInfo.id] = ImageEditingSession(
+                imageInfo: imageInfo,
+                thumbnailManager: thumbnailManager
+            )
+        }
     }
 
     private func handleDrop(providers: [NSItemProvider]) {
@@ -254,26 +270,74 @@ struct ContentView: View {
         let urls = FileURLCollector()
 
         for provider in providers {
-            group.enter()
-            provider.loadItem(forTypeIdentifier: "public.file-url", options: nil) { item, _ in
-                defer { group.leave() }
+            guard provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) else {
+                continue
+            }
 
-                if let data = item as? Data,
-                   let url = URL(dataRepresentation: data, relativeTo: nil) {
+            group.enter()
+            loadDroppedURL(from: provider) { url in
+                if let url {
                     urls.append(url)
                 }
+                group.leave()
             }
         }
 
         group.notify(queue: .main) {
-            let wasEmpty = imageManager.images.isEmpty
-            imageManager.addImages(from: urls.values())
+            let droppedURLs = urls.values()
+            guard !droppedURLs.isEmpty else {
+                return
+            }
 
-            if wasEmpty, !imageManager.images.isEmpty {
-                displayedIndex = 0
-                selectedIndices = [0]
+            imageManager.addImages(from: droppedURLs)
+        }
+    }
+
+    private func loadDroppedURL(
+        from provider: NSItemProvider,
+        completion: @escaping (URL?) -> Void
+    ) {
+        let fileURLType = UTType.fileURL.identifier
+
+        provider.loadDataRepresentation(forTypeIdentifier: fileURLType) { data, _ in
+            if let data,
+               let url = URL(dataRepresentation: data, relativeTo: nil) {
+                completion(url)
+                return
+            }
+
+            provider.loadItem(forTypeIdentifier: fileURLType, options: nil) { item, _ in
+                completion(extractDroppedURL(from: item))
             }
         }
+    }
+
+    private func extractDroppedURL(from item: NSSecureCoding?) -> URL? {
+        if let url = item as? URL {
+            return url
+        }
+
+        if let data = item as? Data,
+           let url = URL(dataRepresentation: data, relativeTo: nil) {
+            return url
+        }
+
+        if let string = item as? String {
+            if let url = URL(string: string) {
+                return url
+            }
+            return URL(fileURLWithPath: string)
+        }
+
+        if let nsString = item as? NSString {
+            let string = nsString as String
+            if let url = URL(string: string) {
+                return url
+            }
+            return URL(fileURLWithPath: string)
+        }
+
+        return nil
     }
 
     private func handleDelete(indices: Set<Int>) {
@@ -291,23 +355,11 @@ struct ContentView: View {
     }
 
     private func handleUndo() {
-        guard let imageInfo = getCurrentImageInfo() else { return }
-        let history = getCurrentHistory()
-        history.flush()
-
-        if let adjustments = history.undo() {
-            adjustmentsCache[imageInfo.id] = adjustments
-        }
+        getCurrentSession()?.undo()
     }
 
     private func handleRedo() {
-        guard let imageInfo = getCurrentImageInfo() else { return }
-        let history = getCurrentHistory()
-        history.flush()
-
-        if let adjustments = history.redo() {
-            adjustmentsCache[imageInfo.id] = adjustments
-        }
+        getCurrentSession()?.redo()
     }
 
     private func handleDeleteSelected() {
@@ -315,6 +367,16 @@ struct ContentView: View {
             handleDelete(indices: selectedIndices)
         } else if let index = displayedIndex {
             handleDelete(indices: [index])
+        }
+    }
+
+    private func handleSelectAll() {
+        guard !imageManager.images.isEmpty else { return }
+
+        selectedIndices = Set(imageManager.images.indices)
+
+        if displayedIndex == nil || displayedIndex! >= imageManager.images.count {
+            displayedIndex = 0
         }
     }
 }

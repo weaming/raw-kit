@@ -478,38 +478,46 @@ struct CurveAdjustmentView: View {
 
         // 限制裁剪百分比在合理范围内
         let clipPercent = max(0.0, min(5.0, autoLevelClipPercent)) / 100.0
+        curvePickSamples.reset()
 
-        // 计算每个通道的黑白点
-        guard let histogram = calculateHistogram(from: ciImage) else { return }
+        switch selectedChannel {
+        case .rgb:
+            guard let histogram = calculateLuminanceHistogram(from: ciImage) else { return }
+            var curve = CurveAdjustment()
+            curve.channel = .rgb
+            applyAutoStretch(to: &curve, histogram: histogram, clipPercent: clipPercent)
+            adjustments.rgbCurve = curve
 
-        let blackPoints = findBlackWhitePoints(
-            redHistogram: histogram.red,
-            greenHistogram: histogram.green,
-            blueHistogram: histogram.blue,
-            clipPercent: clipPercent
-        )
+        case .luminance:
+            guard let histogram = calculateLuminanceHistogram(from: ciImage) else { return }
+            var curve = CurveAdjustment()
+            curve.channel = .luminance
+            applyAutoStretch(to: &curve, histogram: histogram, clipPercent: clipPercent)
+            adjustments.luminanceCurve = curve
 
-        // 应用三点定标法（不使用灰点）
-        var redCurve = adjustments.redCurve
-        var greenCurve = adjustments.greenCurve
-        var blueCurve = adjustments.blueCurve
+        case .red, .green, .blue:
+            guard let histograms = calculateHistogram(from: ciImage) else { return }
+            let histogram: [Int]
+            var curve = CurveAdjustment()
+            curve.channel = selectedChannel
 
-        CurveCalibration.applyThreePointCalibration(
-            redCurve: &redCurve,
-            greenCurve: &greenCurve,
-            blueCurve: &blueCurve,
-            blackRGB: blackPoints.black,
-            grayRGB: nil,
-            whiteRGB: blackPoints.white
-        )
-
-        adjustments.redCurve = redCurve
-        adjustments.greenCurve = greenCurve
-        adjustments.blueCurve = blueCurve
-
-        print(
-            "自动色阶 (裁剪 \(String(format: "%.2f", clipPercent * 100))%): 黑点 RGB(\(String(format: "%.3f", blackPoints.black.r)), \(String(format: "%.3f", blackPoints.black.g)), \(String(format: "%.3f", blackPoints.black.b))), 白点 RGB(\(String(format: "%.3f", blackPoints.white.r)), \(String(format: "%.3f", blackPoints.white.g)), \(String(format: "%.3f", blackPoints.white.b)))"
-        )
+            switch selectedChannel {
+            case .red:
+                histogram = histograms.red
+                applyAutoStretch(to: &curve, histogram: histogram, clipPercent: clipPercent)
+                adjustments.redCurve = curve
+            case .green:
+                histogram = histograms.green
+                applyAutoStretch(to: &curve, histogram: histogram, clipPercent: clipPercent)
+                adjustments.greenCurve = curve
+            case .blue:
+                histogram = histograms.blue
+                applyAutoStretch(to: &curve, histogram: histogram, clipPercent: clipPercent)
+                adjustments.blueCurve = curve
+            default:
+                return
+            }
+        }
     }
 
     // 计算 RGB 三通道直方图
@@ -531,14 +539,21 @@ struct CurveAdjustmentView: View {
             scaledImage = ciImage
         }
 
-        let scaledExtent = scaledImage.extent
+        let histogramImage = scaledImage.applyingFilter(
+            "CIColorClamp",
+            parameters: [
+                "inputMinComponents": CIVector(x: 0, y: 0, z: 0, w: 0),
+                "inputMaxComponents": CIVector(x: 1, y: 1, z: 1, w: 1),
+            ]
+        )
+        let scaledExtent = histogramImage.extent
 
         // 创建直方图计算滤镜
         guard
             let filter = CIFilter(
                 name: "CIAreaHistogram",
                 parameters: [
-                    kCIInputImageKey: scaledImage,
+                    kCIInputImageKey: histogramImage,
                     kCIInputExtentKey: CIVector(cgRect: scaledExtent),
                     "inputCount": bins,
                     "inputScale": 1.0,
@@ -581,31 +596,43 @@ struct CurveAdjustmentView: View {
         CIContextManager.shared.getHistogramContext()
     }
 
-    // 根据直方图和裁剪百分比找到黑白点
-    private func findBlackWhitePoints(
-        redHistogram: [Int],
-        greenHistogram: [Int],
-        blueHistogram: [Int],
+    private func calculateLuminanceHistogram(from ciImage: CIImage) -> [Int]? {
+        guard let histogram = calculateHistogram(
+            from: ciImage.applyingFilter(
+                "CIColorControls",
+                parameters: [kCIInputSaturationKey: 0.0]
+            )
+        ) else {
+            return nil
+        }
+
+        return histogram.red
+    }
+
+    private func applyAutoStretch(
+        to curve: inout CurveAdjustment,
+        histogram: [Int],
         clipPercent: Double
-    ) -> (black: (r: Double, g: Double, b: Double), white: (r: Double, g: Double, b: Double)) {
-        let blackR = findBlackPoint(histogram: redHistogram, clipPercent: clipPercent)
-        let blackG = findBlackPoint(histogram: greenHistogram, clipPercent: clipPercent)
-        let blackB = findBlackPoint(histogram: blueHistogram, clipPercent: clipPercent)
+    ) {
+        let blackPoint = findBlackPoint(histogram: histogram, clipPercent: clipPercent)
+        let whitePoint = findWhitePoint(histogram: histogram, clipPercent: clipPercent)
 
-        let whiteR = findWhitePoint(histogram: redHistogram, clipPercent: clipPercent)
-        let whiteG = findWhitePoint(histogram: greenHistogram, clipPercent: clipPercent)
-        let whiteB = findWhitePoint(histogram: blueHistogram, clipPercent: clipPercent)
+        guard whitePoint - blackPoint >= 0.02 else { return }
 
-        return (
-            black: (r: blackR, g: blackG, b: blackB),
-            white: (r: whiteR, g: whiteG, b: whiteB)
+        curve.reset()
+        _ = curve.addPoint(input: blackPoint, output: 0.0)
+        _ = curve.addPoint(input: whitePoint, output: 1.0)
+
+        print(
+            "自动色阶 [\(curve.channel.rawValue)] (裁剪 \(String(format: "%.3f", clipPercent * 100))%): 黑点 \(String(format: "%.3f", blackPoint)), 白点 \(String(format: "%.3f", whitePoint))"
         )
     }
 
     // 找到黑点：从暗部累计到达 clipPercent 的位置
     private func findBlackPoint(histogram: [Int], clipPercent: Double) -> Double {
         let total = histogram.reduce(0, +)
-        let threshold = Int(Double(total) * clipPercent)
+        guard total > 0 else { return 0.0 }
+        let threshold = max(1, Int(Double(total) * clipPercent))
 
         var cumulative = 0
         for (i, count) in histogram.enumerated() {
@@ -622,7 +649,8 @@ struct CurveAdjustmentView: View {
     // 找到白点：从高光累计到达 clipPercent 的位置
     private func findWhitePoint(histogram: [Int], clipPercent: Double) -> Double {
         let total = histogram.reduce(0, +)
-        let threshold = Int(Double(total) * clipPercent)
+        guard total > 0 else { return 1.0 }
+        let threshold = max(1, Int(Double(total) * clipPercent))
 
         var cumulative = 0
         for (i, count) in histogram.enumerated().reversed() {

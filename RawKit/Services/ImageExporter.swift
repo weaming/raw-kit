@@ -24,7 +24,7 @@ class ImageExporter {
         progress(0.3)
 
         // 应用调整
-        let adjustedImage = await ImageProcessor.applyAdjustments(
+        let adjustedImage = ImageProcessor.applyAdjustments(
             to: originalImage,
             adjustments: adjustments
         )

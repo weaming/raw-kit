@@ -4,13 +4,7 @@ import Foundation
 import UniformTypeIdentifiers
 import simd
 
-@MainActor
 class ImageProcessor {
-    nonisolated private static let renderQueue = DispatchQueue(
-        label: "com.bitsflow.rawkit.render",
-        qos: .userInteractive
-    )
-
     private struct LUTCacheKey: Hashable {
         let path: String
         let modificationTime: TimeInterval
@@ -20,6 +14,7 @@ class ImageProcessor {
     private static var lutCache: [LUTCacheKey: (data: Data, size: Int)] = [:]
     private static var lutCacheOrder: [LUTCacheKey] = []
     private static let lutCacheLimit = 16
+    private static let lutCacheLock = NSLock()
 
     private struct ChromaticityPoint {
         let x: Double
@@ -325,29 +320,46 @@ class ImageProcessor {
     }
     """
 
-    private static let lutInputTransformKernel: CIColorKernel? = {
-        CIColorKernel(source: lutKernelHelpers + """
-        kernel vec4 lutInputTransform(__sample image, vec3 row0, vec3 row1, vec3 row2, float transferMode) {
-            vec3 linearColor = applyMatrix(image.rgb, row0, row1, row2);
-            vec3 encodedColor = encodeTransfer(linearColor, transferMode);
-            return vec4(encodedColor, image.a);
+    private static let lutMetalKernelSource = """
+    #include <CoreImage/CoreImage.h>
+    using namespace metal;
+    extern "C" namespace coreimage {
+    """ + lutKernelHelpers + """
+    [[ stitchable ]] float4 lutInputTransform(sample_t image, float3 row0, float3 row1, float3 row2, float transferMode) {
+        float3 linearColor = applyMatrix(image.rgb, row0, row1, row2);
+        float3 encodedColor = encodeTransfer(linearColor, transferMode);
+        return float4(encodedColor, image.a);
+    }
+
+    [[ stitchable ]] float4 lutOutputTransform(sample_t image, float3 row0, float3 row1, float3 row2, float transferMode) {
+        float3 linearColor = decodeTransfer(image.rgb, transferMode);
+        float3 workingColor = applyMatrix(linearColor, row0, row1, row2);
+        return float4(workingColor, image.a);
+    }
+    }
+    """
+
+    private static let lutColorKernels: [String: CIColorKernel] = {
+        do {
+            let kernels = try CIKernel.kernels(withMetalString: lutMetalKernelSource)
+            return kernels.reduce(into: [String: CIColorKernel]()) { result, kernel in
+                if let colorKernel = kernel as? CIColorKernel {
+                    result[colorKernel.name] = colorKernel
+                }
+            }
+        } catch {
+            print("ImageProcessor: ⚠️ LUT Metal kernel 编译失败: \(error)")
+            return [:]
         }
-        """)
     }()
 
-    private static let lutOutputTransformKernel: CIColorKernel? = {
-        CIColorKernel(source: lutKernelHelpers + """
-        kernel vec4 lutOutputTransform(__sample image, vec3 row0, vec3 row1, vec3 row2, float transferMode) {
-            vec3 linearColor = decodeTransfer(image.rgb, transferMode);
-            vec3 workingColor = applyMatrix(linearColor, row0, row1, row2);
-            return vec4(workingColor, image.a);
-        }
-        """)
-    }()
+    private static let lutInputTransformKernel: CIColorKernel? = lutColorKernels["lutInputTransform"]
+
+    private static let lutOutputTransformKernel: CIColorKernel? = lutColorKernels["lutOutputTransform"]
 
     // 使用 CIContextManager 替代直接创建 context
     // CIContext 本身是线程安全的，通过 Manager 的 nonisolated getter 访问
-    nonisolated private static var ciContext: CIContext {
+    private static var ciContext: CIContext {
         CIContextManager.shared.getRenderContext()
     }
 
@@ -481,7 +493,7 @@ class ImageProcessor {
     }
 
     // 非隔离版本，可以在后台线程调用
-    nonisolated static func convertToNSImageAsync(_ ciImage: CIImage) -> NSImage? {
+    static func convertToNSImageAsync(_ ciImage: CIImage) -> NSImage? {
         let extent = ciImage.extent
         guard !extent.isEmpty, extent.isInfinite == false else {
             return nil
@@ -496,7 +508,7 @@ class ImageProcessor {
         return NSImage(cgImage: cgImage, size: size)
     }
 
-    nonisolated static func convertToCGImage(_ ciImage: CIImage) -> CGImage? {
+    static func convertToCGImage(_ ciImage: CIImage) -> CGImage? {
         let extent = ciImage.extent
         guard !extent.isEmpty, extent.isInfinite == false else {
             return nil
@@ -1802,7 +1814,7 @@ class ImageProcessor {
             return parseLUTData(from: url)
         }
 
-        if let cached = lutCache[key] {
+        if let cached = cachedLUTData(for: key) {
             return cached
         }
 
@@ -1810,15 +1822,29 @@ class ImageProcessor {
             return nil
         }
 
+        storeLUTData(parsed, for: key)
+
+        return parsed
+    }
+
+    private static func cachedLUTData(for key: LUTCacheKey) -> (data: Data, size: Int)? {
+        lutCacheLock.lock()
+        defer { lutCacheLock.unlock() }
+        return lutCache[key]
+    }
+
+    private static func storeLUTData(_ parsed: (data: Data, size: Int), for key: LUTCacheKey) {
+        lutCacheLock.lock()
+        defer { lutCacheLock.unlock() }
+
         lutCache[key] = parsed
+        lutCacheOrder.removeAll { $0 == key }
         lutCacheOrder.append(key)
 
         while lutCacheOrder.count > lutCacheLimit {
             let oldestKey = lutCacheOrder.removeFirst()
             lutCache.removeValue(forKey: oldestKey)
         }
-
-        return parsed
     }
 
     private static func lutCacheKey(for url: URL) -> LUTCacheKey? {

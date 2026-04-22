@@ -5,8 +5,7 @@ struct LeftSidebarView: View {
     @Binding var width: CGFloat
     @Binding var presetsExpanded: Bool
     @Binding var lutExpanded: Bool
-
-    @Binding var adjustments: ImageAdjustments
+    @ObservedObject var editingState: ImageEditingState
     let onLoadPreset: (ImageAdjustments) -> Void
     let onLoadLUT: (URL?) -> Void
 
@@ -22,7 +21,7 @@ struct LeftSidebarView: View {
                         isExpanded: $presetsExpanded
                     ) {
                         PresetsPanel(
-                            currentAdjustments: adjustments,
+                            currentAdjustments: editingState.adjustments,
                             onLoadPreset: onLoadPreset
                         )
                         .equatable()
@@ -36,9 +35,26 @@ struct LeftSidebarView: View {
                     ) {
                         LUTPanel(
                             onLoadLUT: onLoadLUT,
-                            lutAlpha: $adjustments.lutAlpha,
-                            currentLUTURL: $adjustments.lutURL,
-                            adjustments: $adjustments
+                            lutAlpha: Binding(
+                                get: { editingState.adjustments.lutAlpha },
+                                set: { newValue in
+                                    var updated = editingState.adjustments
+                                    updated.lutAlpha = newValue
+                                    editingState.adjustments = updated
+                                }
+                            ),
+                            currentLUTURL: Binding(
+                                get: { editingState.adjustments.lutURL },
+                                set: { newValue in
+                                    var updated = editingState.adjustments
+                                    updated.lutURL = newValue
+                                    editingState.adjustments = updated
+                                }
+                            ),
+                            adjustments: Binding(
+                                get: { editingState.adjustments },
+                                set: { editingState.adjustments = $0 }
+                            )
                         )
                         .equatable()
                     }

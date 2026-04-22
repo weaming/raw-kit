@@ -15,7 +15,7 @@ class LUTGenerator {
         print("LUTGenerator: Identity LUT 创建成功，尺寸: \(identityLUT.extent)")
 
         // 应用所有调整到identity LUT
-        let adjustedLUT = await ImageProcessor.applyAdjustments(
+        let adjustedLUT = ImageProcessor.applyAdjustments(
             to: identityLUT,
             adjustments: adjustments
         )

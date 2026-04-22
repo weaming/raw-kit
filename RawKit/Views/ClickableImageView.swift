@@ -173,6 +173,7 @@ struct ClickableImageView: View {
     let adjustedCIImage: CIImage?
     let pickMode: CurveAdjustmentView.PickMode
     let onColorPick: ((CGPoint, CGSize) -> Void)?
+    let onFilesDrop: (([URL]) -> Void)?
 
     @State private var offset: CGSize = .zero
     @State private var lastOffset: CGSize = .zero
@@ -192,6 +193,7 @@ struct ClickableImageView: View {
                 },
                 pickMode: pickMode,
                 onColorPick: onColorPick,
+                onFilesDrop: onFilesDrop,
                 onMouseMove: { sample in
                     handleMouseMove(sample: sample, geometrySize: geometry.size)
                 }
@@ -277,7 +279,7 @@ struct ClickableImageView: View {
             point: sample.pixelPoint,
             imageSize: sample.imageSize,
             sampleSpan: 17,
-            outputSize: 76
+            outputSize: 104
         ) else {
             return nil
         }
@@ -292,9 +294,9 @@ struct ClickableImageView: View {
     }
 
     private func loupePosition(for viewLocation: CGPoint, in geometrySize: CGSize) -> CGPoint {
-        let panelSize = CGSize(width: 200, height: 94)
+        let panelSize = CGSize(width: 120, height: 120)
         let margin: CGFloat = 16
-        let cursorOffset = CGSize(width: 26, height: 28)
+        let cursorOffset = CGSize(width: 22, height: 24)
 
         var x = viewLocation.x + cursorOffset.width + panelSize.width / 2
         var y = viewLocation.y + cursorOffset.height + panelSize.height / 2
@@ -412,6 +414,7 @@ struct ClickableImageRepresentable: NSViewRepresentable {
     let onScrollWheel: (CGFloat, CGPoint) -> Void
     let pickMode: CurveAdjustmentView.PickMode
     let onColorPick: ((CGPoint, CGSize) -> Void)?
+    let onFilesDrop: (([URL]) -> Void)?
     let onMouseMove: ((ImageHoverSample?) -> Void)?
 
     func makeNSView(context _: Context) -> ClickableNSImageView {
@@ -421,6 +424,7 @@ struct ClickableImageRepresentable: NSViewRepresentable {
         view.onScrollWheel = onScrollWheel
         view.pickMode = pickMode
         view.onColorPick = onColorPick
+        view.onFilesDrop = onFilesDrop
         view.onMouseMove = onMouseMove
         view.onDragChanged = { translation, currentScale in
             // 拖动距离是屏幕空间的，需要除以 scale 转换为 offset 空间
@@ -443,6 +447,7 @@ struct ClickableImageRepresentable: NSViewRepresentable {
         nsView.onScrollWheel = onScrollWheel
         nsView.pickMode = pickMode
         nsView.onColorPick = onColorPick
+        nsView.onFilesDrop = onFilesDrop
         nsView.onMouseMove = onMouseMove
 
         // 检查 scale 或 offset 是否变化
@@ -569,6 +574,7 @@ class ClickableNSImageView: NSView {
     var onDragChanged: ((CGSize, CGFloat) -> Void)?
     var onDragEnded: (() -> Void)?
     var onColorPick: ((CGPoint, CGSize) -> Void)?
+    var onFilesDrop: (([URL]) -> Void)?
     var onMouseMove: ((ImageHoverSample?) -> Void)?
     var pickMode: CurveAdjustmentView.PickMode = .none {
         didSet {
@@ -657,6 +663,7 @@ class ClickableNSImageView: NSView {
 
     private func setupView() {
         wantsLayer = true
+        registerForDraggedTypes([.fileURL])
 
         imageView.imageScaling = .scaleProportionallyUpOrDown
         imageView.wantsLayer = true
@@ -833,6 +840,21 @@ class ClickableNSImageView: NSView {
         addCursorRect(bounds, cursor: currentCursor())
     }
 
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        droppedFileURLs(from: sender.draggingPasteboard).isEmpty ? [] : .copy
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        draggingEntered(sender)
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let urls = droppedFileURLs(from: sender.draggingPasteboard)
+        guard !urls.isEmpty else { return false }
+        onFilesDrop?(urls)
+        return true
+    }
+
     private func currentCursor() -> NSCursor {
         if isDragging {
             return .closedHand
@@ -860,15 +882,28 @@ class ClickableNSImageView: NSView {
             currentCursor().set()
         }
     }
+
+    private func droppedFileURLs(from pasteboard: NSPasteboard) -> [URL] {
+        let options: [NSPasteboard.ReadingOptionKey: Any] = [
+            .urlReadingFileURLsOnly: true,
+        ]
+        return (pasteboard.readObjects(forClasses: [NSURL.self], options: options) as? [URL]) ?? []
+    }
 }
 
 private struct WhiteBalanceLoupeOverlay: View {
     let image: NSImage
     let pixelInfo: PixelInfo?
-    private let loupeSize: CGFloat = 76
+    private let panelSize: CGFloat = 120
+    private let loupeSize: CGFloat = 104
+    private let focusBoxSize: CGFloat = 12
+    private let focusBoxLineWidth: CGFloat = 1.25
+    private let crosshairLineWidth: CGFloat = 1
+    private let crosshairInnerGap: CGFloat = 9
+    private let crosshairEdgeInset: CGFloat = 7
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
+        ZStack(alignment: .topLeading) {
             ZStack {
                 Image(nsImage: image)
                     .resizable()
@@ -876,72 +911,108 @@ private struct WhiteBalanceLoupeOverlay: View {
                     .frame(width: loupeSize, height: loupeSize)
                     .clipped()
 
-                Rectangle()
-                    .stroke(Color.white.opacity(0.9), lineWidth: 1.25)
-                    .frame(width: 12, height: 12)
+                Canvas { context, size in
+                    let center = CGPoint(x: size.width / 2, y: size.height / 2)
+                    let boxRect = CGRect(
+                        x: center.x - focusBoxSize / 2,
+                        y: center.y - focusBoxSize / 2,
+                        width: focusBoxSize,
+                        height: focusBoxSize
+                    )
 
-                Path { path in
-                    let mid = loupeSize / 2
-                    let innerGap: CGFloat = 8
-                    let edgeInset: CGFloat = 6
+                    var crosshairPath = Path()
+                    crosshairPath.move(to: CGPoint(x: center.x, y: crosshairEdgeInset))
+                    crosshairPath.addLine(
+                        to: CGPoint(x: center.x, y: center.y - crosshairInnerGap)
+                    )
+                    crosshairPath.move(
+                        to: CGPoint(x: center.x, y: center.y + crosshairInnerGap)
+                    )
+                    crosshairPath.addLine(
+                        to: CGPoint(x: center.x, y: size.height - crosshairEdgeInset)
+                    )
+                    crosshairPath.move(to: CGPoint(x: crosshairEdgeInset, y: center.y))
+                    crosshairPath.addLine(
+                        to: CGPoint(x: center.x - crosshairInnerGap, y: center.y)
+                    )
+                    crosshairPath.move(
+                        to: CGPoint(x: center.x + crosshairInnerGap, y: center.y)
+                    )
+                    crosshairPath.addLine(
+                        to: CGPoint(x: size.width - crosshairEdgeInset, y: center.y)
+                    )
 
-                    path.move(to: CGPoint(x: mid, y: edgeInset))
-                    path.addLine(to: CGPoint(x: mid, y: mid - innerGap))
-                    path.move(to: CGPoint(x: mid, y: mid + innerGap))
-                    path.addLine(to: CGPoint(x: mid, y: loupeSize - edgeInset))
-                    path.move(to: CGPoint(x: edgeInset, y: mid))
-                    path.addLine(to: CGPoint(x: mid - innerGap, y: mid))
-                    path.move(to: CGPoint(x: mid + innerGap, y: mid))
-                    path.addLine(to: CGPoint(x: loupeSize - edgeInset, y: mid))
+                    context.stroke(
+                        crosshairPath,
+                        with: .color(Color.white.opacity(0.8)),
+                        lineWidth: crosshairLineWidth
+                    )
+                    context.stroke(
+                        Path(boxRect),
+                        with: .color(Color.white.opacity(0.9)),
+                        lineWidth: focusBoxLineWidth
+                    )
                 }
-                .stroke(Color.white.opacity(0.8), lineWidth: 1)
+                .frame(width: loupeSize, height: loupeSize)
             }
             .overlay(
                 RoundedRectangle(cornerRadius: 8)
                     .stroke(Color.white.opacity(0.18), lineWidth: 1)
             )
             .clipShape(RoundedRectangle(cornerRadius: 8))
+            .frame(width: panelSize, height: panelSize)
 
-            VStack(alignment: .leading, spacing: 7) {
-                HStack(spacing: 5) {
-                    Image(systemName: "eyedropper")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(.white)
+            HStack(spacing: 4) {
+                Image(systemName: "eyedropper")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.white)
 
-                    Text("白平衡")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(.white)
-                }
+                Text("WB")
+                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+                    .foregroundColor(.white)
+            }
+            .padding(.horizontal, 7)
+            .padding(.vertical, 4)
+            .background(
+                Capsule()
+                    .fill(Color.black.opacity(0.62))
+            )
+            .padding(.top, 8)
+            .padding(.leading, 8)
+
+            VStack {
+                Spacer()
 
                 HStack(spacing: 6) {
                     RoundedRectangle(cornerRadius: 4)
                         .fill(sampleColor)
-                        .frame(width: 16, height: 16)
+                        .frame(width: 14, height: 14)
                         .overlay(
                             RoundedRectangle(cornerRadius: 4)
-                                .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                                .stroke(Color.white.opacity(0.22), lineWidth: 1)
                         )
 
-                    Text(pixelInfo.map { "RGB \(formatRGB($0.gammaRGB))" } ?? "RGB ---")
-                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    Image(systemName: "eyedropper")
+                        .font(.system(size: 10, weight: .semibold))
                         .foregroundColor(.white.opacity(0.92))
-                        .lineLimit(1)
-                }
-                .frame(height: 16)
 
-                if let pixelInfo {
-                    Text("H \(formatHue(pixelInfo.hsl.h))°  S \(formatPercent(pixelInfo.hsl.s))%")
+                    Text(pixelInfo.map { formatRGB($0.gammaRGB) } ?? "---")
                         .font(.system(size: 10, weight: .medium, design: .monospaced))
-                        .foregroundColor(.white.opacity(0.72))
+                        .foregroundColor(.white.opacity(0.96))
                         .lineLimit(1)
                 }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 7)
+                .frame(width: panelSize - 12, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(Color.black.opacity(0.70))
+                )
+                .padding(.bottom, 6)
             }
-            .frame(width: 94, alignment: .leading)
-            .padding(.top, 2)
+            .frame(width: panelSize, height: panelSize)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 9)
-        .frame(width: 200, alignment: .leading)
+        .frame(width: panelSize, height: panelSize)
         .background(
             RoundedRectangle(cornerRadius: 12)
                 .fill(Color.black.opacity(0.82))
@@ -970,13 +1041,5 @@ private struct WhiteBalanceLoupeOverlay: View {
         let g = Int((value.g * 255).rounded())
         let b = Int((value.b * 255).rounded())
         return "\(r),\(g),\(b)"
-    }
-
-    private func formatHue(_ value: Double) -> String {
-        String(Int(value.rounded()))
-    }
-
-    private func formatPercent(_ value: Double) -> String {
-        String(Int(value.rounded()))
     }
 }

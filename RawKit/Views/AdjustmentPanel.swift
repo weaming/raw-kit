@@ -5,19 +5,18 @@ struct ResizableAdjustmentPanel: View, Equatable {
     @Binding var curvePickSamples: CurvePickSamples
     let originalCIImage: CIImage?
     let adjustedCIImage: CIImage?
+    let previewCIImage: CIImage?
+    let previewRevision: Int
     @Binding var width: CGFloat
     @Binding var whiteBalancePickMode: CurveAdjustmentView.PickMode
-    @State private var expandedSection: AdjustmentSection? = .basic
     @State private var isDragging = false
 
     static func == (lhs: ResizableAdjustmentPanel, rhs: ResizableAdjustmentPanel) -> Bool {
-        // 只在 adjustments 或 width 变化时才重绘
-        // adjustedCIImage 的变化不应该触发控制面板重绘
-        // 但 originalCIImage 从 nil 变为有值时需要重绘（解锁自动白平衡按钮）
         lhs.adjustments == rhs.adjustments &&
         lhs.curvePickSamples == rhs.curvePickSamples &&
         lhs.width == rhs.width &&
         lhs.whiteBalancePickMode == rhs.whiteBalancePickMode &&
+        lhs.previewRevision == rhs.previewRevision &&
         (lhs.originalCIImage != nil) == (rhs.originalCIImage != nil)
     }
 
@@ -51,6 +50,8 @@ struct ResizableAdjustmentPanel: View, Equatable {
                 curvePickSamples: $curvePickSamples,
                 originalCIImage: originalCIImage,
                 adjustedCIImage: adjustedCIImage,
+                previewCIImage: previewCIImage,
+                previewRevision: previewRevision,
                 whiteBalancePickMode: $whiteBalancePickMode
             )
             .frame(width: width)
@@ -59,12 +60,19 @@ struct ResizableAdjustmentPanel: View, Equatable {
 }
 
 struct AdjustmentPanel: View {
+    private struct HistogramInput: @unchecked Sendable {
+        let image: CIImage
+        let revision: Int
+    }
+
     @Binding var adjustments: ImageAdjustments
     @Binding var curvePickSamples: CurvePickSamples
     let originalCIImage: CIImage?
     let adjustedCIImage: CIImage?
+    let previewCIImage: CIImage?
+    let previewRevision: Int
     @Binding var whiteBalancePickMode: CurveAdjustmentView.PickMode
-    @State private var expandedSections: Set<AdjustmentSection> = [.basic, .color]
+    @State private var expandedSections: Set<AdjustmentSection> = [.basic, .color, .detail]
     @State private var histogram: (red: [Int], green: [Int], blue: [Int])?
     @State private var histogramTask: Task<Void, Never>?
 
@@ -135,6 +143,7 @@ struct AdjustmentPanel: View {
                             curvePickSamples: $curvePickSamples,
                             originalCIImage: originalCIImage,
                             adjustedCIImage: adjustedCIImage,
+                            previewRevision: previewRevision,
                             whiteBalancePickMode: $whiteBalancePickMode
                         )
                         .equatable()
@@ -154,15 +163,14 @@ struct AdjustmentPanel: View {
             }
         }
         .ignoresSafeArea(edges: .top) // 忽略顶部安全区域，让直方图顶到窗口边缘
-        .onChange(of: adjustedCIImage) { _, newValue in
-            if newValue != nil {
-                loadHistogram()
-            }
-        }
         .onAppear {
-            if adjustedCIImage != nil {
-                loadHistogram()
-            }
+            scheduleHistogramLoad()
+        }
+        .onChange(of: previewRevision) { _, _ in
+            scheduleHistogramLoad()
+        }
+        .onDisappear {
+            histogramTask?.cancel()
         }
     }
 
@@ -174,51 +182,48 @@ struct AdjustmentPanel: View {
         }
     }
 
-    private func loadHistogram() {
-        guard let adjustedCIImage else {
-            print("AdjustmentPanel.loadHistogram: adjustedCIImage 为空")
+    private func scheduleHistogramLoad() {
+        guard let previewCIImage else {
+            histogramTask?.cancel()
+            histogram = nil
             return
         }
 
-        // 取消之前的任务
         histogramTask?.cancel()
+        let input = HistogramInput(image: previewCIImage, revision: previewRevision)
 
-        // 创建新任务，带防抖延迟
         histogramTask = Task {
-            // 优化：防抖延迟从 100ms 增加到 200ms，减少计算频率
-            try? await Task.sleep(nanoseconds: 200_000_000)  // 200ms
-
-            // 检查是否被取消
+            try? await Task.sleep(nanoseconds: 80_000_000)
             guard !Task.isCancelled else { return }
 
-            print("AdjustmentPanel.loadHistogram: 开始计算直方图")
-
-            // 优化：使用 .utility 优先级（低优先级），不影响主要渲染
             let newHistogram = await Task.detached(priority: .utility) {
-                calculateHistogram(from: adjustedCIImage)
+                Self.calculateHistogram(from: input.image)
             }.value
 
-            // 检查是否被取消
             guard !Task.isCancelled else { return }
 
-            // 更新 UI（在主线程）
             await MainActor.run {
+                guard previewRevision == input.revision else { return }
                 histogram = newHistogram
-                if histogram != nil {
-                    print("AdjustmentPanel.loadHistogram: 直方图加载成功")
-                } else {
-                    print("AdjustmentPanel.loadHistogram: 直方图加载失败")
-                }
             }
         }
     }
 
-    // 使用 CIContextManager 获取专用的直方图 context
     private nonisolated static var histogramContext: CIContext {
         CIContextManager.shared.getHistogramContext()
     }
 
-    private nonisolated func calculateHistogram(from ciImage: CIImage) -> (
+    private nonisolated static func prepareHistogramImage(_ image: CIImage) -> CIImage {
+        image.applyingFilter(
+            "CIColorClamp",
+            parameters: [
+                "inputMinComponents": CIVector(x: 0, y: 0, z: 0, w: 0),
+                "inputMaxComponents": CIVector(x: 1, y: 1, z: 1, w: 1),
+            ]
+        )
+    }
+
+    private nonisolated static func calculateHistogram(from ciImage: CIImage) -> (
         red: [Int], green: [Int], blue: [Int]
     )? {
         let extent = ciImage.extent
@@ -236,14 +241,15 @@ struct AdjustmentPanel: View {
             scaledImage = ciImage
         }
 
-        let scaledExtent = scaledImage.extent
+        let histogramImage = Self.prepareHistogramImage(scaledImage)
+        let scaledExtent = histogramImage.extent
 
         // 创建直方图计算滤镜
         guard
             let filter = CIFilter(
                 name: "CIAreaHistogram",
                 parameters: [
-                    kCIInputImageKey: scaledImage,
+                    kCIInputImageKey: histogramImage,
                     kCIInputExtentKey: CIVector(cgRect: scaledExtent),
                     "inputCount": bins,
                     "inputScale": 1.0,
@@ -495,9 +501,9 @@ struct ColorAdjustmentsView: View, Equatable {
     @Binding var curvePickSamples: CurvePickSamples
     let originalCIImage: CIImage?
     let adjustedCIImage: CIImage?
+    let previewRevision: Int
     @Binding var whiteBalancePickMode: CurveAdjustmentView.PickMode
 
-    // 优化：只在色彩调整变化时才重绘
     static func == (lhs: ColorAdjustmentsView, rhs: ColorAdjustmentsView) -> Bool {
         lhs.adjustments.temperature == rhs.adjustments.temperature &&
         lhs.adjustments.tint == rhs.adjustments.tint &&
@@ -509,6 +515,7 @@ struct ColorAdjustmentsView: View, Equatable {
         lhs.adjustments.rgbCurve == rhs.adjustments.rgbCurve &&
         lhs.curvePickSamples == rhs.curvePickSamples &&
         lhs.whiteBalancePickMode == rhs.whiteBalancePickMode &&
+        lhs.previewRevision == rhs.previewRevision &&
         (lhs.originalCIImage != nil) == (rhs.originalCIImage != nil)
     }
 
@@ -675,12 +682,26 @@ struct SliderControl: View, Equatable {
     @Binding var value: Double
     let range: ClosedRange<Double>
     let step: Double
+    @State private var displayValue: Double
 
     static func == (lhs: SliderControl, rhs: SliderControl) -> Bool {
         lhs.title == rhs.title &&
         lhs.value == rhs.value &&
         lhs.range == rhs.range &&
         lhs.step == rhs.step
+    }
+
+    init(
+        title: String,
+        value: Binding<Double>,
+        range: ClosedRange<Double>,
+        step: Double
+    ) {
+        self.title = title
+        self._value = value
+        self.range = range
+        self.step = step
+        self._displayValue = State(initialValue: value.wrappedValue)
     }
 
     var body: some View {
@@ -692,7 +713,7 @@ struct SliderControl: View, Equatable {
 
                 Spacer()
 
-                Text(formatValue(value))
+                Text(formatValue(displayValue))
                     .font(.body)
                     .foregroundColor(.secondary)
                     .monospacedDigit()
@@ -702,15 +723,11 @@ struct SliderControl: View, Equatable {
             HStack(spacing: 8) {
                 SliderWithDoubleTap(
                     value: Binding(
-                        get: { value },
-                        set: { newValue in
-                            let steppedValue = round(newValue / step) * step
-                            value = steppedValue
-                        }
+                        get: { displayValue },
+                        set: handleDisplayValueChange
                     ),
                     range: range,
-                    onDoubleTap: { resetToDefault() },
-                    enableThrottle: true
+                    onDoubleTap: { resetToDefault() }
                 )
 
                 Button(action: { resetToDefault() }) {
@@ -721,6 +738,11 @@ struct SliderControl: View, Equatable {
                 .frame(width: 24, height: 24)
                 .opacity(isDefaultValue ? 0.3 : 1.0)
                 .disabled(isDefaultValue)
+            }
+        }
+        .onChange(of: value) { _, newValue in
+            if abs(displayValue - newValue) > 0.0001 {
+                displayValue = newValue
             }
         }
     }
@@ -739,45 +761,66 @@ struct SliderControl: View, Equatable {
         let defaultAdjustments = ImageAdjustments.default
 
         switch title {
-        case "曝光": return value == defaultAdjustments.exposure
-        case "线性曝光": return value == defaultAdjustments.linearExposure
-        case "亮度": return value == defaultAdjustments.brightness
-        case "对比度": return value == defaultAdjustments.contrast
-        case "饱和度": return value == defaultAdjustments.saturation
-        case "高光": return value == defaultAdjustments.highlights
-        case "阴影": return value == defaultAdjustments.shadows
-        case "白色": return value == defaultAdjustments.whites
-        case "黑色": return value == defaultAdjustments.blacks
-        case "清晰度": return value == defaultAdjustments.clarity
-        case "去雾": return value == defaultAdjustments.dehaze
-        case "色温": return abs(value - defaultAdjustments.temperature) < AppConfig.whitePointTolerance
-        case "色调": return value == defaultAdjustments.tint
-        case "自然饱和度": return value == defaultAdjustments.vibrance
-        case "锐化": return value == defaultAdjustments.sharpness
+        case "曝光": return displayValue == defaultAdjustments.exposure
+        case "线性曝光": return displayValue == defaultAdjustments.linearExposure
+        case "亮度": return displayValue == defaultAdjustments.brightness
+        case "对比度": return displayValue == defaultAdjustments.contrast
+        case "饱和度": return displayValue == defaultAdjustments.saturation
+        case "高光": return displayValue == defaultAdjustments.highlights
+        case "阴影": return displayValue == defaultAdjustments.shadows
+        case "白色": return displayValue == defaultAdjustments.whites
+        case "黑色": return displayValue == defaultAdjustments.blacks
+        case "清晰度": return displayValue == defaultAdjustments.clarity
+        case "去雾": return displayValue == defaultAdjustments.dehaze
+        case "色温": return abs(displayValue - defaultAdjustments.temperature) < AppConfig.whitePointTolerance
+        case "色调": return displayValue == defaultAdjustments.tint
+        case "自然饱和度": return displayValue == defaultAdjustments.vibrance
+        case "锐化": return displayValue == defaultAdjustments.sharpness
         default: return false
+        }
+    }
+
+    private func handleDisplayValueChange(_ newValue: Double) {
+        let steppedValue = round(newValue / step) * step
+        if abs(displayValue - steppedValue) > 0.0001 {
+            displayValue = steppedValue
+        }
+
+        let binding = _value
+        DispatchQueue.main.async {
+            if abs(binding.wrappedValue - steppedValue) > 0.0001 {
+                binding.wrappedValue = steppedValue
+            }
         }
     }
 
     private func resetToDefault() {
         let defaultAdjustments = ImageAdjustments.default
 
+        let resetValue: Double
         switch title {
-        case "曝光": value = defaultAdjustments.exposure
-        case "线性曝光": value = defaultAdjustments.linearExposure
-        case "亮度": value = defaultAdjustments.brightness
-        case "对比度": value = defaultAdjustments.contrast
-        case "饱和度": value = defaultAdjustments.saturation
-        case "高光": value = defaultAdjustments.highlights
-        case "阴影": value = defaultAdjustments.shadows
-        case "白色": value = defaultAdjustments.whites
-        case "黑色": value = defaultAdjustments.blacks
-        case "清晰度": value = defaultAdjustments.clarity
-        case "去雾": value = defaultAdjustments.dehaze
-        case "色温": value = defaultAdjustments.temperature
-        case "色调": value = defaultAdjustments.tint
-        case "自然饱和度": value = defaultAdjustments.vibrance
-        case "锐化": value = defaultAdjustments.sharpness
-        default: break
+        case "曝光": resetValue = defaultAdjustments.exposure
+        case "线性曝光": resetValue = defaultAdjustments.linearExposure
+        case "亮度": resetValue = defaultAdjustments.brightness
+        case "对比度": resetValue = defaultAdjustments.contrast
+        case "饱和度": resetValue = defaultAdjustments.saturation
+        case "高光": resetValue = defaultAdjustments.highlights
+        case "阴影": resetValue = defaultAdjustments.shadows
+        case "白色": resetValue = defaultAdjustments.whites
+        case "黑色": resetValue = defaultAdjustments.blacks
+        case "清晰度": resetValue = defaultAdjustments.clarity
+        case "去雾": resetValue = defaultAdjustments.dehaze
+        case "色温": resetValue = defaultAdjustments.temperature
+        case "色调": resetValue = defaultAdjustments.tint
+        case "自然饱和度": resetValue = defaultAdjustments.vibrance
+        case "锐化": resetValue = defaultAdjustments.sharpness
+        default: return
+        }
+
+        displayValue = resetValue
+        let binding = _value
+        DispatchQueue.main.async {
+            binding.wrappedValue = resetValue
         }
     }
 }
@@ -787,28 +830,22 @@ struct SliderWithDoubleTap: NSViewRepresentable {
     @Binding var value: Double
     let range: ClosedRange<Double>
     let onDoubleTap: () -> Void
-    let enableThrottle: Bool  // 是否启用节流
 
-    init(value: Binding<Double>, range: ClosedRange<Double>, onDoubleTap: @escaping () -> Void, enableThrottle: Bool = false) {
+    init(value: Binding<Double>, range: ClosedRange<Double>, onDoubleTap: @escaping () -> Void) {
         self._value = value
         self.range = range
         self.onDoubleTap = onDoubleTap
-        self.enableThrottle = enableThrottle
     }
 
-    func makeNSView(context: Context) -> DragOnlySlider {
-        let slider = DragOnlySlider(value: value, minValue: range.lowerBound, maxValue: range.upperBound, target: context.coordinator, action: #selector(Coordinator.valueChanged(_:)))
+    func makeNSView(context: Context) -> TrackClickableSlider {
+        let slider = TrackClickableSlider(value: value, minValue: range.lowerBound, maxValue: range.upperBound, target: context.coordinator, action: #selector(Coordinator.valueChanged(_:)))
         slider.isContinuous = true  // 保持连续模式，配合节流机制
-
-        // 添加双击手势
-        let doubleClick = NSClickGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleDoubleTap(_:)))
-        doubleClick.numberOfClicksRequired = 2
-        slider.addGestureRecognizer(doubleClick)
+        slider.onDoubleClick = onDoubleTap
 
         return slider
     }
 
-    func updateNSView(_ nsView: DragOnlySlider, context: Context) {
+    func updateNSView(_ nsView: TrackClickableSlider, context: Context) {
         // 只在值真正不同时才更新，避免干扰用户交互
         if abs(nsView.doubleValue - value) > 0.0001 {
             nsView.doubleValue = value
@@ -816,65 +853,20 @@ struct SliderWithDoubleTap: NSViewRepresentable {
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(value: $value, onDoubleTap: onDoubleTap, enableThrottle: enableThrottle)
+        Coordinator(value: $value, onDoubleTap: onDoubleTap)
     }
 
     class Coordinator: NSObject {
         @Binding var value: Double
         let onDoubleTap: () -> Void
-        let enableThrottle: Bool
 
-        private var lastUpdateTime: TimeInterval = 0
-        private var pendingValue: Double?
-        private var updateTimer: Timer?
-        private let throttleInterval: TimeInterval = 0.033  // 30fps，避免过于频繁的渲染
-
-        init(value: Binding<Double>, onDoubleTap: @escaping () -> Void, enableThrottle: Bool) {
+        init(value: Binding<Double>, onDoubleTap: @escaping () -> Void) {
             _value = value
             self.onDoubleTap = onDoubleTap
-            self.enableThrottle = enableThrottle
         }
 
         @objc func valueChanged(_ sender: NSSlider) {
-            let newValue = sender.doubleValue
-            let now = CACurrentMediaTime()
-
-            // 如果禁用节流，立即更新
-            guard enableThrottle else {
-                value = newValue
-                return
-            }
-
-            // 节流更新（限制 30fps）
-            let elapsed = now - lastUpdateTime
-            if elapsed >= throttleInterval {
-                // 距离上次更新足够久，立即更新
-                lastUpdateTime = now
-                pendingValue = nil
-                value = newValue
-            } else {
-                // 太频繁，记录待处理值，稍后更新
-                pendingValue = newValue
-
-                // 如果已有定时器在等待，不创建新的
-                guard updateTimer == nil else { return }
-
-                // 创建定时器确保最终值被应用
-                let remainingTime = throttleInterval - elapsed
-                updateTimer = Timer.scheduledTimer(withTimeInterval: remainingTime, repeats: false) { [weak self] _ in
-                    guard let self = self else { return }
-                    if let pending = self.pendingValue {
-                        self.value = pending
-                        self.pendingValue = nil
-                        self.lastUpdateTime = CACurrentMediaTime()
-                    }
-                    self.updateTimer = nil
-                }
-            }
-        }
-
-        @objc func handleDoubleTap(_ sender: NSClickGestureRecognizer) {
-            onDoubleTap()
+            value = sender.doubleValue
         }
     }
 }

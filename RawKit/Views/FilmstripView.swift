@@ -5,8 +5,8 @@ struct FilmstripView: View {
     let images: [ImageInfo]
     @Binding var selectedIndices: Set<Int>
     @Binding var displayedIndex: Int?
-    let adjustmentsCache: [UUID: ImageAdjustments]
-    let thumbnailManager: ThumbnailManager
+    let adjustmentsForImageID: (UUID) -> ImageAdjustments
+    @ObservedObject var thumbnailManager: ThumbnailManager
     let onDelete: (Set<Int>) -> Void
 
     @State private var isExpanded = true
@@ -59,7 +59,7 @@ struct FilmstripView: View {
                                 }
                             }
                             .onAppear {
-                                let adjustments = adjustmentsCache[imageInfo.id] ?? .default
+                                let adjustments = adjustmentsForImageID(imageInfo.id)
                                 if adjustments.hasAdjustments || adjustments.lutURL != nil {
                                     thumbnailManager.generateAdjustedThumbnail(
                                         for: imageInfo,

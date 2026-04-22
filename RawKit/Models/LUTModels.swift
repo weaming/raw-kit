@@ -1,15 +1,25 @@
 import Foundation
 
+struct LUTSourceGroup: Codable, Hashable {
+    let id: String
+    let name: String
+
+    static let saved = LUTSourceGroup(id: "__saved__", name: "已保存")
+    static let ungrouped = LUTSourceGroup(id: "__ungrouped__", name: "未分组")
+}
+
 // LUT 文件数据模型
 struct LUTFile: Identifiable {
     let id: UUID
     let name: String
     let url: URL
+    let sourceGroup: LUTSourceGroup
 
-    init(name: String, url: URL) {
+    init(name: String, url: URL, sourceGroup: LUTSourceGroup = .ungrouped) {
         id = UUID()
         self.name = name
         self.url = url
+        self.sourceGroup = sourceGroup
     }
 }
 

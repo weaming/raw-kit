@@ -8,6 +8,7 @@ struct SimpleSlider: View {
     let step: Double
     let valueFormatter: (Double) -> String
     let defaultValue: Double
+    @State private var displayValue: Double
 
     init(
         title: String,
@@ -23,6 +24,7 @@ struct SimpleSlider: View {
         self.step = step
         self.defaultValue = defaultValue
         self.valueFormatter = valueFormatter
+        self._displayValue = State(initialValue: value.wrappedValue)
     }
 
     var body: some View {
@@ -34,7 +36,7 @@ struct SimpleSlider: View {
 
                 Spacer()
 
-                Text(valueFormatter(value))
+                Text(valueFormatter(displayValue))
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .frame(minWidth: 35, alignment: .trailing)
@@ -43,37 +45,132 @@ struct SimpleSlider: View {
 
             SliderWithDoubleTapSmall(
                 value: Binding(
-                    get: { value },
-                    set: { newValue in
-                        let steppedValue = round(newValue / step) * step
-                        value = steppedValue
-                    }
+                    get: { displayValue },
+                    set: handleDisplayValueChange
                 ),
                 range: range,
-                onDoubleTap: { value = defaultValue }
+                onDoubleTap: resetToDefault
             )
+        }
+        .onChange(of: value) { _, newValue in
+            if abs(displayValue - newValue) > 0.0001 {
+                displayValue = newValue
+            }
+        }
+    }
+
+    private func handleDisplayValueChange(_ newValue: Double) {
+        let steppedValue = round(newValue / step) * step
+        if abs(displayValue - steppedValue) > 0.0001 {
+            displayValue = steppedValue
+        }
+
+        let binding = _value
+        DispatchQueue.main.async {
+            if abs(binding.wrappedValue - steppedValue) > 0.0001 {
+                binding.wrappedValue = steppedValue
+            }
+        }
+    }
+
+    private func resetToDefault() {
+        displayValue = defaultValue
+        let binding = _value
+        DispatchQueue.main.async {
+            binding.wrappedValue = defaultValue
         }
     }
 }
 
-// 自定义 NSSlider：禁用点击轨道跳转，只允许拖动
-public class DragOnlySlider: NSSlider {
+// 自定义 NSSlider：点击轨道时立即跳到目标值，并保留原生拖动行为
+public final class TrackClickableSlider: NSSlider {
+    public var onDoubleClick: (() -> Void)?
+
+    private var pendingActionSelector: Selector?
+    private weak var pendingActionTarget: AnyObject?
+    private var isActionDispatchQueued = false
+
     public override func mouseDown(with event: NSEvent) {
-        let point = convert(event.locationInWindow, from: nil)
-
-        // 获取滑块圆点的矩形区域
-        if let sliderCell = cell as? NSSliderCell {
-            let knobBounds = sliderCell.knobRect(flipped: false)
-
-            // 只有点击在滑块圆点上时才响应
-            if knobBounds.contains(point) {
-                super.mouseDown(with: event)
-            }
-            // 点击轨道时忽略事件
-        } else {
-            // 如果无法获取 cell，则使用默认行为
-            super.mouseDown(with: event)
+        if event.clickCount == 2 {
+            onDoubleClick?()
+            return
         }
+
+        guard let sliderCell = cell as? NSSliderCell else {
+            super.mouseDown(with: event)
+            return
+        }
+
+        let point = convert(event.locationInWindow, from: nil)
+        let knobRect = sliderCell.knobRect(flipped: isFlipped)
+
+        if knobRect.contains(point) {
+            super.mouseDown(with: event)
+            return
+        }
+
+        updateValueAndSend(for: point, knobRect: knobRect)
+    }
+
+    private func updateValueAndSend(for point: NSPoint, knobRect: NSRect) {
+        doubleValue = value(at: point, knobRect: knobRect)
+        needsDisplay = true
+        displayIfNeeded()
+        sendAction(action, to: target)
+    }
+
+    @discardableResult
+    public override func sendAction(_ action: Selector?, to target: Any?) -> Bool {
+        guard let action else { return false }
+
+        pendingActionSelector = action
+        pendingActionTarget = target as AnyObject?
+
+        if isActionDispatchQueued {
+            return true
+        }
+
+        isActionDispatchQueued = true
+        needsDisplay = true
+        displayIfNeeded()
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.isActionDispatchQueued = false
+
+            guard let pendingActionSelector = self.pendingActionSelector else { return }
+            let pendingActionTarget = self.pendingActionTarget
+            self.pendingActionSelector = nil
+            self.pendingActionTarget = nil
+
+            NSApp.sendAction(
+                pendingActionSelector,
+                to: pendingActionTarget,
+                from: self
+            )
+        }
+
+        return true
+    }
+
+    private func value(at point: NSPoint, knobRect: NSRect) -> Double {
+        if isVertical {
+            let knobHeight = knobRect.height
+            let usableHeight = max(bounds.height - knobHeight, 1)
+            let minY = knobHeight / 2
+            let maxY = bounds.height - knobHeight / 2
+            let clampedY = min(max(point.y, minY), maxY)
+            let ratio = Double((clampedY - minY) / usableHeight)
+            return minValue + ratio * (maxValue - minValue)
+        }
+
+        let knobWidth = knobRect.width
+        let usableWidth = max(bounds.width - knobWidth, 1)
+        let minX = knobWidth / 2
+        let maxX = bounds.width - knobWidth / 2
+        let clampedX = min(max(point.x, minX), maxX)
+        let ratio = Double((clampedX - minX) / usableWidth)
+        return minValue + ratio * (maxValue - minValue)
     }
 }
 
@@ -89,20 +186,16 @@ struct SliderWithDoubleTapSmall: NSViewRepresentable {
         self.onDoubleTap = onDoubleTap
     }
 
-    func makeNSView(context: Context) -> DragOnlySlider {
-        let slider = DragOnlySlider(value: value, minValue: range.lowerBound, maxValue: range.upperBound, target: context.coordinator, action: #selector(Coordinator.valueChanged(_:)))
+    func makeNSView(context: Context) -> TrackClickableSlider {
+        let slider = TrackClickableSlider(value: value, minValue: range.lowerBound, maxValue: range.upperBound, target: context.coordinator, action: #selector(Coordinator.valueChanged(_:)))
         slider.isContinuous = true
         slider.controlSize = .small
-
-        // 添加双击手势
-        let doubleClick = NSClickGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleDoubleTap(_:)))
-        doubleClick.numberOfClicksRequired = 2
-        slider.addGestureRecognizer(doubleClick)
+        slider.onDoubleClick = onDoubleTap
 
         return slider
     }
 
-    func updateNSView(_ nsView: DragOnlySlider, context: Context) {
+    func updateNSView(_ nsView: TrackClickableSlider, context: Context) {
         // 只在值真正不同时才更新，避免干扰用户交互
         // 允许小的浮点误差（0.0001）
         if abs(nsView.doubleValue - value) > 0.0001 {
@@ -125,10 +218,6 @@ struct SliderWithDoubleTapSmall: NSViewRepresentable {
 
         @objc func valueChanged(_ sender: NSSlider) {
             value = sender.doubleValue
-        }
-
-        @objc func handleDoubleTap(_ sender: NSClickGestureRecognizer) {
-            onDoubleTap()
         }
     }
 }

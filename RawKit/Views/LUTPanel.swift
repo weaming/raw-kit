@@ -3,6 +3,12 @@ import UniformTypeIdentifiers
 
 // LUT list panel
 struct LUTPanel: View, Equatable {
+    private struct LUTGroupSection: Identifiable {
+        let id: String
+        let name: String
+        let files: [LUTFile]
+    }
+
     let onLoadLUT: (URL?) -> Void
     @Binding var lutAlpha: Double
     @Binding var currentLUTURL: URL?
@@ -14,9 +20,12 @@ struct LUTPanel: View, Equatable {
     @State private var newLUTName = ""
     @State private var isSavingLUT = false
     @State private var lutProfiles: [String: LUTColorProfile] = [:]
+    @State private var lutSourceGroups: [String: LUTSourceGroup] = [:]
+    @State private var collapsedGroupIDs: Set<String> = []
 
     private let colorProfileStorageKey = "LUTColorProfiles"
     private let legacyColorSpaceStorageKey = "LUTColorSpaces"
+    private let sourceGroupStorageKey = "LUTSourceGroups"
 
     static func == (lhs: LUTPanel, rhs: LUTPanel) -> Bool {
         lhs.lutAlpha == rhs.lutAlpha &&
@@ -27,6 +36,21 @@ struct LUTPanel: View, Equatable {
 
     private var selectedLUTFile: LUTFile? {
         lutFiles.first { $0.id == selectedLUT }
+    }
+
+    private var groupedLUTFiles: [LUTGroupSection] {
+        Dictionary(grouping: lutFiles, by: { $0.sourceGroup.id })
+            .compactMap { groupID, files in
+                guard let first = files.first else { return nil }
+                return LUTGroupSection(
+                    id: groupID,
+                    name: first.sourceGroup.name,
+                    files: files.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+                )
+            }
+            .sorted { lhs, rhs in
+                groupSortKey(for: lhs) < groupSortKey(for: rhs)
+            }
     }
 
     var body: some View {
@@ -102,18 +126,32 @@ struct LUTPanel: View, Equatable {
                             onDelete: nil
                         )
 
-                        ForEach(lutFiles) { lutFile in
-                            LUTItemView(
-                                name: lutFile.name,
-                                summary: lutProfile(for: lutFile).summary,
-                                isSelected: selectedLUT == lutFile.id,
-                                onSelect: {
-                                    selectLUT(lutFile)
-                                },
-                                onDelete: {
-                                    deleteLUT(lutFile)
+                        ForEach(groupedLUTFiles) { group in
+                            LUTGroupView(
+                                title: group.name,
+                                itemCount: group.files.count,
+                                isExpanded: !collapsedGroupIDs.contains(group.id),
+                                onToggle: {
+                                    toggleGroup(group.id)
                                 }
-                            )
+                            ) {
+                                VStack(spacing: 4) {
+                                    ForEach(group.files) { lutFile in
+                                        LUTItemView(
+                                            name: lutFile.name,
+                                            summary: lutProfile(for: lutFile).summary,
+                                            isSelected: selectedLUT == lutFile.id,
+                                            onSelect: {
+                                                selectLUT(lutFile)
+                                            },
+                                            onDelete: {
+                                                deleteLUT(lutFile)
+                                            }
+                                        )
+                                    }
+                                }
+                                .padding(.leading, 12)
+                            }
                         }
                     }
                     .padding(.horizontal, 12)
@@ -122,6 +160,7 @@ struct LUTPanel: View, Equatable {
         }
         .onAppear {
             loadLUTColorProfiles()
+            loadLUTSourceGroups()
             loadLUTFiles()
             syncSelectedLUT()
         }
@@ -174,9 +213,25 @@ struct LUTPanel: View, Equatable {
     }
 
     private func selectLUT(_ lutFile: LUTFile) {
+        let previousSelectionExisted = selectedLUT != nil
+        let previousProfile = adjustments.lutColorProfile
+
         selectedLUT = lutFile.id
+        collapsedGroupIDs.remove(lutFile.sourceGroup.id)
         lutAlpha = 1.0
-        adjustments.lutColorProfile = lutProfiles[lutFile.url.path] ?? .default
+
+        let nextProfile: LUTColorProfile
+        if let savedProfile = lutProfiles[lutFile.url.path] {
+            nextProfile = savedProfile
+        } else if previousSelectionExisted {
+            nextProfile = previousProfile
+            lutProfiles[lutFile.url.path] = previousProfile
+            saveLUTColorProfiles()
+        } else {
+            nextProfile = .default
+        }
+
+        adjustments.lutColorProfile = nextProfile
         onLoadLUT(lutFile.url)
     }
 
@@ -216,10 +271,12 @@ struct LUTPanel: View, Equatable {
         let supportedExtensions = ["cube", "3dl", "lut"]
         var importedCount = 0
         let lutFolder = getLUTFolderURL()
+        var updatedSourceGroups = lutSourceGroups
 
         for url in urls {
             var isDirectory: ObjCBool = false
             FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
+            let sourceGroup = makeSourceGroup(for: url, isDirectory: isDirectory.boolValue)
 
             let lutURLs: [URL] = if isDirectory.boolValue {
                 scanLUTFiles(in: url, supportedExtensions: supportedExtensions)
@@ -249,8 +306,10 @@ struct LUTPanel: View, Equatable {
                         }
 
                         try FileManager.default.copyItem(at: lutURL, to: newDestURL)
+                        updatedSourceGroups[newDestURL.path] = sourceGroup
                     } else {
                         try FileManager.default.copyItem(at: lutURL, to: destURL)
+                        updatedSourceGroups[destURL.path] = sourceGroup
                     }
 
                     importedCount += 1
@@ -261,6 +320,8 @@ struct LUTPanel: View, Equatable {
         }
 
         await MainActor.run {
+            lutSourceGroups = updatedSourceGroups
+            saveLUTSourceGroups()
             loadLUTFiles()
             print("成功导入 \(importedCount) 个 LUT 文件")
         }
@@ -298,7 +359,9 @@ struct LUTPanel: View, Equatable {
         do {
             try FileManager.default.removeItem(at: lut.url)
             lutProfiles.removeValue(forKey: lut.url.path)
+            lutSourceGroups.removeValue(forKey: lut.url.path)
             saveLUTColorProfiles()
+            saveLUTSourceGroups()
             loadLUTFiles()
 
             if selectedLUT == lut.id {
@@ -326,15 +389,19 @@ struct LUTPanel: View, Equatable {
             )
 
             let supportedExtensions = ["cube", "3dl", "lut"]
-            lutFiles = urls
+            let resolvedFiles = urls
                 .filter { supportedExtensions.contains($0.pathExtension.lowercased()) }
                 .map { url in
                     LUTFile(
                         name: url.deletingPathExtension().lastPathComponent,
-                        url: url
+                        url: url,
+                        sourceGroup: lutSourceGroups[url.path] ?? .ungrouped
                     )
                 }
-                .sorted { $0.name < $1.name }
+                .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+
+            lutFiles = resolvedFiles
+            cleanupStoredMetadata(validPaths: Set(resolvedFiles.map(\.url.path)))
 
             syncSelectedLUT()
         } catch {
@@ -366,6 +433,8 @@ struct LUTPanel: View, Equatable {
                 lutImage: lutImage,
                 to: fileURL
             )
+            lutSourceGroups[fileURL.path] = .saved
+            saveLUTSourceGroups()
 
             loadLUTFiles()
             showingSaveLUTDialog = false
@@ -414,6 +483,66 @@ struct LUTPanel: View, Equatable {
     private func saveLUTColorProfiles() {
         if let encoded = try? JSONEncoder().encode(lutProfiles) {
             UserDefaults.standard.set(encoded, forKey: colorProfileStorageKey)
+        }
+    }
+
+    private func loadLUTSourceGroups() {
+        if let data = UserDefaults.standard.data(forKey: sourceGroupStorageKey),
+           let decoded = try? JSONDecoder().decode([String: LUTSourceGroup].self, from: data) {
+            lutSourceGroups = decoded
+        }
+    }
+
+    private func saveLUTSourceGroups() {
+        if let encoded = try? JSONEncoder().encode(lutSourceGroups) {
+            UserDefaults.standard.set(encoded, forKey: sourceGroupStorageKey)
+        }
+    }
+
+    private func cleanupStoredMetadata(validPaths: Set<String>) {
+        let filteredProfiles = lutProfiles.filter { validPaths.contains($0.key) }
+        if filteredProfiles.count != lutProfiles.count {
+            lutProfiles = filteredProfiles
+            saveLUTColorProfiles()
+        }
+
+        let filteredSourceGroups = lutSourceGroups.filter { validPaths.contains($0.key) }
+        if filteredSourceGroups.count != lutSourceGroups.count {
+            lutSourceGroups = filteredSourceGroups
+            saveLUTSourceGroups()
+        }
+    }
+
+    private func makeSourceGroup(for inputURL: URL, isDirectory: Bool) -> LUTSourceGroup {
+        let folderURL = isDirectory ? inputURL : inputURL.deletingLastPathComponent()
+        let folderName = folderURL.lastPathComponent.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !folderName.isEmpty else {
+            return .ungrouped
+        }
+
+        return LUTSourceGroup(
+            id: folderURL.standardizedFileURL.path,
+            name: folderName
+        )
+    }
+
+    private func toggleGroup(_ groupID: String) {
+        if collapsedGroupIDs.contains(groupID) {
+            collapsedGroupIDs.remove(groupID)
+        } else {
+            collapsedGroupIDs.insert(groupID)
+        }
+    }
+
+    private func groupSortKey(for group: LUTGroupSection) -> (Int, String) {
+        switch group.id {
+        case LUTSourceGroup.saved.id:
+            return (0, group.name)
+        case LUTSourceGroup.ungrouped.id:
+            return (2, group.name)
+        default:
+            return (1, group.name)
         }
     }
 }
@@ -470,6 +599,63 @@ struct LUTItemView: View {
         .contentShape(Rectangle())
         .onTapGesture {
             onSelect()
+        }
+    }
+}
+
+struct LUTGroupView<Content: View>: View {
+    let title: String
+    let itemCount: Int
+    let isExpanded: Bool
+    let onToggle: () -> Void
+    let content: Content
+
+    init(
+        title: String,
+        itemCount: Int,
+        isExpanded: Bool,
+        onToggle: @escaping () -> Void,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.title = title
+        self.itemCount = itemCount
+        self.isExpanded = isExpanded
+        self.onToggle = onToggle
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(spacing: 4) {
+            Button(action: onToggle) {
+                HStack(spacing: 8) {
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+
+                    Text(title)
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(.primary)
+
+                    Spacer()
+
+                    Text("\(itemCount)")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .monospacedDigit()
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .background(
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(Color(nsColor: .controlBackgroundColor))
+            )
+
+            if isExpanded {
+                content
+            }
         }
     }
 }
