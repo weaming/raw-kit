@@ -124,7 +124,7 @@ class ImageProcessor {
         }
     }
 
-    private static let lutKernelHelpers = """
+    private static let colorKernelHelpers = """
     float positive(float value) {
         return max(value, 0.0);
     }
@@ -334,13 +334,48 @@ class ImageProcessor {
             decodeTransferValue(color.b, mode)
         );
     }
+
+    float sceneLuminance(vec3 color) {
+        vec3 safeColor = max(color, vec3(0.0));
+        return dot(safeColor, vec3(0.2126, 0.7152, 0.0722));
+    }
+
+    float compressPerceptualLuminance(float value) {
+        float v = positive(value);
+        return v / (1.0 + v);
+    }
+
+    float expandPerceptualLuminance(float value) {
+        float v = clamp(value, 0.0, 0.99999);
+        return v / max(1.0 - v, 1e-5);
+    }
+
+    float logitValue(float value) {
+        float v = clamp(value, 1e-4, 0.9999);
+        return log(v / (1.0 - v));
+    }
+
+    float logisticValue(float value) {
+        return 1.0 / (1.0 + exp(-value));
+    }
+
+    float tonalWeight(float displayLuma, float pivot, float sigma) {
+        if (sigma <= 0.0) {
+            float lifted = smoothstep(0.03, 0.16, displayLuma);
+            float rolled = 1.0 - smoothstep(0.84, 0.97, displayLuma);
+            return 0.45 + 0.55 * lifted * rolled;
+        }
+
+        float delta = (displayLuma - pivot) / max(sigma, 1e-4);
+        return exp(-0.5 * delta * delta);
+    }
     """
 
-    private static let lutMetalKernelSource = """
+    private static let colorMetalKernelSource = """
     #include <CoreImage/CoreImage.h>
     using namespace metal;
     extern "C" namespace coreimage {
-    """ + lutKernelHelpers + """
+    """ + colorKernelHelpers + """
     [[ stitchable ]] float4 lutInputTransform(sample_t image, float3 row0, float3 row1, float3 row2, float transferMode) {
         float3 linearColor = applyMatrix(image.rgb, row0, row1, row2);
         float3 encodedColor = encodeTransfer(linearColor, transferMode);
@@ -352,26 +387,47 @@ class ImageProcessor {
         float3 workingColor = applyMatrix(linearColor, row0, row1, row2);
         return float4(workingColor, image.a);
     }
+
+    [[ stitchable ]] float4 perceptualLuminanceShift(sample_t image, float amount, float pivot, float focusSigma, float maxShift) {
+        float3 safeColor = max(image.rgb, float3(0.0));
+        float luminance = sceneLuminance(safeColor);
+
+        if (luminance <= 1e-6 || fabs(amount) <= 1e-6) {
+            return float4(safeColor, image.a);
+        }
+
+        float compressedLuma = compressPerceptualLuminance(luminance);
+        float displayLuma = encodeSRGBValue(compressedLuma);
+        float weight = tonalWeight(displayLuma, pivot, focusSigma);
+        float shiftedDisplayLuma = logisticValue(logitValue(displayLuma) + amount * maxShift * weight);
+        float shiftedCompressedLuma = decodeSRGBValue(shiftedDisplayLuma);
+        float shiftedLuminance = expandPerceptualLuminance(shiftedCompressedLuma);
+        float scale = shiftedLuminance / max(luminance, 1e-6);
+
+        return float4(safeColor * scale, image.a);
+    }
     }
     """
 
-    private static let lutColorKernels: [String: CIColorKernel] = {
+    private static let colorKernels: [String: CIColorKernel] = {
         do {
-            let kernels = try CIKernel.kernels(withMetalString: lutMetalKernelSource)
+            let kernels = try CIKernel.kernels(withMetalString: colorMetalKernelSource)
             return kernels.reduce(into: [String: CIColorKernel]()) { result, kernel in
                 if let colorKernel = kernel as? CIColorKernel {
                     result[colorKernel.name] = colorKernel
                 }
             }
         } catch {
-            print("ImageProcessor: ⚠️ LUT Metal kernel 编译失败: \(error)")
+            print("ImageProcessor: ⚠️ Metal kernel 编译失败: \(error)")
             return [:]
         }
     }()
 
-    private static let lutInputTransformKernel: CIColorKernel? = lutColorKernels["lutInputTransform"]
+    private static let lutInputTransformKernel: CIColorKernel? = colorKernels["lutInputTransform"]
 
-    private static let lutOutputTransformKernel: CIColorKernel? = lutColorKernels["lutOutputTransform"]
+    private static let lutOutputTransformKernel: CIColorKernel? = colorKernels["lutOutputTransform"]
+
+    private static let perceptualLuminanceShiftKernel: CIColorKernel? = colorKernels["perceptualLuminanceShift"]
 
     // 使用 CIContextManager 替代直接创建 context
     // CIContext 本身是线程安全的，通过 Manager 的 nonisolated getter 访问
@@ -1566,8 +1622,8 @@ class ImageProcessor {
             result = applyExposure(to: result, value: adjustments.exposure)
         }
 
-        if adjustments.brightness != 0.0 {
-            result = applyBrightness(to: result, value: adjustments.brightness)
+        if adjustments.perceptualExposure != 0.0 {
+            result = applyPerceptualExposure(to: result, value: adjustments.perceptualExposure)
         }
 
         if adjustments.contrast != 0.0 {
@@ -1584,10 +1640,6 @@ class ImageProcessor {
                 whites: adjustments.whites,
                 blacks: adjustments.blacks
             )
-        }
-
-        if adjustments.linearExposure != 0.0 {
-            result = applyLinearExposure(to: result, value: adjustments.linearExposure)
         }
 
         if adjustments.saturation != 1.0 {
@@ -1657,91 +1709,57 @@ class ImageProcessor {
         return result
     }
 
-    // 线性曝光调整 - 真实摄影曝光算法
+    // 摄影曝光调整 - 真实 EV 曝光
     // 基于 EV (Exposure Value) 光圈档位
     // 每增加 1 EV，亮度翻倍；每减少 1 EV，亮度减半
     // 公式：output = input * 2^EV
     // 范围：[-5, +5] EV，相当于 10 档光圈
-    private static func applyLinearExposure(to image: CIImage, value: Double) -> CIImage {
+    private static func applyExposure(to image: CIImage, value: Double) -> CIImage {
         if value == 0.0 { return image }
-
-        // 真实摄影曝光算法：
-        // 基于 EV (Exposure Value) 光圈档位
-        // 公式：亮度 = 原始亮度 × 2^EV
-        // EV +1 -> 2x 亮度
-        // EV +2 -> 4x 亮度
-        // EV -1 -> 0.5x 亮度
 
         guard let filter = CIFilter(name: "CIExposureAdjust") else { return image }
         filter.setValue(image, forKey: kCIInputImageKey)
 
-        // CIExposureAdjust 的 inputEV 参数就是 EV 值
-        // 它内部使用的就是 2^EV 的公式
         filter.setValue(value, forKey: kCIInputEVKey)
 
         return filter.outputImage ?? image
     }
 
-    // Capture One 风格的曝光调整
-    // C1 的曝光更加智能，不会让高光过曝或阴影死黑
-    // 使用渐进式曲线而不是简单的线性调整
-    private static func applyExposure(to image: CIImage, value: Double) -> CIImage {
+    // 感知曝光：在显示参考亮度上整体提亮/压暗，
+    // 同时通过 sigmoid 保护端点，并以亮度比例缩放 RGB 保持色相稳定。
+    private static func applyPerceptualExposure(to image: CIImage, value: Double) -> CIImage {
         if value == 0.0 { return image }
 
-        // C1 的曝光算法：使用参数化曲线实现智能曝光
-        // 在中间调应用更多调整，在高光和阴影应用较少调整
-        guard let filter = CIFilter(name: "CIToneCurve") else { return image }
-        filter.setValue(image, forKey: kCIInputImageKey)
-
-        // 计算曲线关键点
-        // value 范围 [-2, 2]
-        let strength = value * 0.5 // 降低强度，更温和
-
-        // 5个关键点：黑、暗、中、亮、白
-        let black = max(0, min(1, 0.0 + strength * 0.2)) // 黑点轻微调整
-        let shadow = max(0, min(1, 0.25 + strength * 0.4)) // 阴影较多调整
-        let mid = max(0, min(1, 0.5 + strength)) // 中间调最多调整
-        let highlight = max(0, min(1, 0.75 + strength * 0.4)) // 高光较多调整
-        let white = max(0, min(1, 1.0 + strength * 0.2)) // 白点轻微调整
-
-        filter.setValue(CIVector(x: 0, y: black), forKey: "inputPoint0")
-        filter.setValue(CIVector(x: 0.25, y: shadow), forKey: "inputPoint1")
-        filter.setValue(CIVector(x: 0.5, y: mid), forKey: "inputPoint2")
-        filter.setValue(CIVector(x: 0.75, y: highlight), forKey: "inputPoint3")
-        filter.setValue(CIVector(x: 1, y: white), forKey: "inputPoint4")
-
-        return filter.outputImage ?? image
+        return applyPerceptualLuminanceShift(
+            to: image,
+            value: value,
+            focusSigma: 0.0,
+            maxShift: 0.25
+        )
     }
 
-    // Capture One 风格的亮度调整
-    // C1 的亮度调整保留高光和阴影细节，主要影响中间调
-    // 使用 S 曲线的变体，避免端点过度
-    private static func applyBrightness(to image: CIImage, value: Double) -> CIImage {
-        if value == 0.0 { return image }
+    private static let perceptualMidGrayPivot: CGFloat = 0.425
 
-        // C1 的亮度算法：使用曲线实现智能亮度调整
-        // 中间调调整最多，两端调整较少
-        guard let filter = CIFilter(name: "CIToneCurve") else { return image }
-        filter.setValue(image, forKey: kCIInputImageKey)
+    private static func applyPerceptualLuminanceShift(
+        to image: CIImage,
+        value: Double,
+        focusSigma: CGFloat,
+        maxShift: CGFloat
+    ) -> CIImage {
+        guard let kernel = perceptualLuminanceShiftKernel else {
+            return image
+        }
 
-        // 计算曲线关键点
-        // value 范围 [-1, 1]
-        let strength = value * 0.3 // 更温和的调整
-
-        // 使用抛物线式调整：中间调整最多，两端调整最少
-        let black = max(0, min(1, 0.0 + strength * 0.1))
-        let shadow = max(0, min(1, 0.25 + strength * 0.7))
-        let mid = max(0, min(1, 0.5 + strength))
-        let highlight = max(0, min(1, 0.75 + strength * 0.7))
-        let white = max(0, min(1, 1.0 + strength * 0.1))
-
-        filter.setValue(CIVector(x: 0, y: black), forKey: "inputPoint0")
-        filter.setValue(CIVector(x: 0.25, y: shadow), forKey: "inputPoint1")
-        filter.setValue(CIVector(x: 0.5, y: mid), forKey: "inputPoint2")
-        filter.setValue(CIVector(x: 0.75, y: highlight), forKey: "inputPoint3")
-        filter.setValue(CIVector(x: 1, y: white), forKey: "inputPoint4")
-
-        return filter.outputImage ?? image
+        return kernel.apply(
+            extent: image.extent,
+            arguments: [
+                image,
+                CGFloat(value),
+                perceptualMidGrayPivot,
+                focusSigma,
+                maxShift,
+            ]
+        ) ?? image
     }
 
     // Photoshop 风格的对比度调整

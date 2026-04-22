@@ -1,11 +1,10 @@
 import Foundation
 
 struct ImageAdjustments: Equatable, Codable {
-    var brightness: Double = 0.0
     var contrast: Double = 0.0
     var saturation: Double = 1.0
     var exposure: Double = 0.0
-    var linearExposure: Double = 0.0
+    var perceptualExposure: Double = 0.0
     var highlights: Double = 1.0
     var shadows: Double = 0.0
     var whites: Double = 0.0
@@ -83,8 +82,7 @@ struct ImageAdjustments: Equatable, Codable {
     // 检查基础调整组是否有变化
     var hasBasicAdjustments: Bool {
         exposure != 0.0 ||
-            linearExposure != 0.0 ||
-            brightness != 0.0 ||
+            perceptualExposure != 0.0 ||
             contrast != 0.0 ||
             whites != 0.0 ||
             highlights != 1.0 ||
@@ -115,8 +113,7 @@ struct ImageAdjustments: Equatable, Codable {
     // 重置基础调整组
     mutating func resetBasic() {
         exposure = 0.0
-        linearExposure = 0.0
-        brightness = 0.0
+        perceptualExposure = 0.0
         contrast = 0.0
         whites = 0.0
         highlights = 1.0
@@ -146,11 +143,10 @@ struct ImageAdjustments: Equatable, Codable {
 }
 
 extension ImageAdjustments {
-    static let brightnessRange: ClosedRange<Double> = -1.0 ... 1.0
     static let contrastRange: ClosedRange<Double> = -1.0 ... 1.0
     static let saturationRange: ClosedRange<Double> = 0.0 ... 2.0
-    static let exposureRange: ClosedRange<Double> = -2.0 ... 2.0
-    static let linearExposureRange: ClosedRange<Double> = -5.0 ... 5.0
+    static let exposureRange: ClosedRange<Double> = -5.0 ... 5.0
+    static let perceptualExposureRange: ClosedRange<Double> = -2.0 ... 2.0
     static let highlightsRange: ClosedRange<Double> = 0.0 ... 2.0
     static let shadowsRange: ClosedRange<Double> = -1.0 ... 1.0
     static let whitesRange: ClosedRange<Double> = -1.0 ... 1.0

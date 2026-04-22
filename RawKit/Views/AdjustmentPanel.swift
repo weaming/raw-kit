@@ -453,8 +453,7 @@ struct BasicAdjustmentsView: View, Equatable {
     // 优化：只在基础调整变化时才重绘
     static func == (lhs: BasicAdjustmentsView, rhs: BasicAdjustmentsView) -> Bool {
         lhs.adjustments.exposure == rhs.adjustments.exposure &&
-        lhs.adjustments.linearExposure == rhs.adjustments.linearExposure &&
-        lhs.adjustments.brightness == rhs.adjustments.brightness &&
+        lhs.adjustments.perceptualExposure == rhs.adjustments.perceptualExposure &&
         lhs.adjustments.contrast == rhs.adjustments.contrast &&
         lhs.adjustments.highlights == rhs.adjustments.highlights &&
         lhs.adjustments.shadows == rhs.adjustments.shadows &&
@@ -468,20 +467,13 @@ struct BasicAdjustmentsView: View, Equatable {
                 title: "曝光",
                 value: $adjustments.exposure,
                 range: ImageAdjustments.exposureRange,
-                step: 0.01
-            )
-
-            SliderControl(
-                title: "线性曝光",
-                value: $adjustments.linearExposure,
-                range: ImageAdjustments.linearExposureRange,
                 step: 0.1
             )
 
             SliderControl(
-                title: "亮度",
-                value: $adjustments.brightness,
-                range: ImageAdjustments.brightnessRange,
+                title: "感知曝光",
+                value: $adjustments.perceptualExposure,
+                range: ImageAdjustments.perceptualExposureRange,
                 step: 0.01
             )
 
@@ -790,8 +782,7 @@ struct SliderControl: View, Equatable {
 
         switch title {
         case "曝光": return displayValue == defaultAdjustments.exposure
-        case "线性曝光": return displayValue == defaultAdjustments.linearExposure
-        case "亮度": return displayValue == defaultAdjustments.brightness
+        case "感知曝光": return displayValue == defaultAdjustments.perceptualExposure
         case "对比度": return displayValue == defaultAdjustments.contrast
         case "饱和度": return displayValue == defaultAdjustments.saturation
         case "高光": return displayValue == defaultAdjustments.highlights
@@ -828,8 +819,7 @@ struct SliderControl: View, Equatable {
         let resetValue: Double
         switch title {
         case "曝光": resetValue = defaultAdjustments.exposure
-        case "线性曝光": resetValue = defaultAdjustments.linearExposure
-        case "亮度": resetValue = defaultAdjustments.brightness
+        case "感知曝光": resetValue = defaultAdjustments.perceptualExposure
         case "对比度": resetValue = defaultAdjustments.contrast
         case "饱和度": resetValue = defaultAdjustments.saturation
         case "高光": resetValue = defaultAdjustments.highlights
