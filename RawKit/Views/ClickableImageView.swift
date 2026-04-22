@@ -120,10 +120,12 @@ enum PixelSampler {
     }
 
     private static func linearToGamma(_ linear: Double) -> Double {
-        if linear <= 0.0031308 {
-            linear * 12.92
+        let clamped = min(max(linear, 0.0), 1.0)
+
+        if clamped <= 0.0031308 {
+            return clamped * 12.92
         } else {
-            1.055 * pow(linear, 1.0 / 2.2) - 0.055
+            return 1.055 * pow(clamped, 1.0 / 2.4) - 0.055
         }
     }
 
@@ -300,7 +302,7 @@ struct ClickableImageView: View {
     let maxScale: CGFloat
     @Binding var currentPixelInfo: PixelInfo?
     let originalCIImage: CIImage?
-    let adjustedCIImage: CIImage?
+    let displayedCIImage: CIImage?
     let pickMode: CurveAdjustmentView.PickMode
     let onColorPick: ((CGPoint, CGSize) -> Void)?
     let onCancelPickMode: (() -> Void)?
@@ -380,12 +382,7 @@ struct ClickableImageView: View {
             return
         }
 
-        let samplingImage: CIImage?
-        if pickMode == .whiteBalance {
-            samplingImage = originalCIImage ?? adjustedCIImage
-        } else {
-            samplingImage = adjustedCIImage ?? originalCIImage
-        }
+        let samplingImage = displayedCIImage ?? originalCIImage
 
         guard let ciImage = samplingImage else {
             currentPixelInfo = nil
@@ -1100,14 +1097,14 @@ private struct WhiteBalanceLoupeOverlay: View {
                         )
 
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("RGB \(pixelInfo.map { formatRGB($0.gammaRGB) } ?? "---")")
+                        Text("RGB \(pixelInfo.map { formatRGB($0.displayRGB) } ?? "---")")
                             .font(.system(size: 10, weight: .medium, design: .monospaced))
                             .foregroundColor(.white.opacity(0.96))
                             .lineLimit(1)
                             .layoutPriority(1)
                             .frame(maxWidth: .infinity, alignment: .leading)
 
-                        Text("HEX \(pixelInfo.map { formatHex($0.gammaRGB) } ?? "---")")
+                        Text("HEX \(pixelInfo.map { formatHex($0.displayRGB) } ?? "---")")
                             .font(.system(size: 10, weight: .medium, design: .monospaced))
                             .foregroundColor(.white.opacity(0.72))
                             .lineLimit(1)
@@ -1160,10 +1157,11 @@ private struct WhiteBalanceLoupeOverlay: View {
             return Color.clear
         }
 
+        let displayRGB = pixelInfo.displayRGB
         return Color(
-            red: pixelInfo.gammaRGB.r,
-            green: pixelInfo.gammaRGB.g,
-            blue: pixelInfo.gammaRGB.b
+            red: displayRGB.r,
+            green: displayRGB.g,
+            blue: displayRGB.b
         )
     }
 

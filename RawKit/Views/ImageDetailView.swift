@@ -6,6 +6,18 @@ struct PixelInfo: Equatable {
     var linearRGB: (r: Double, g: Double, b: Double)
     var hsl: (h: Double, s: Double, l: Double)
 
+    var displayRGB: (r: Double, g: Double, b: Double) {
+        (
+            r: Self.clampDisplayComponent(gammaRGB.r),
+            g: Self.clampDisplayComponent(gammaRGB.g),
+            b: Self.clampDisplayComponent(gammaRGB.b)
+        )
+    }
+
+    private static func clampDisplayComponent(_ value: Double) -> Double {
+        min(max(value, 0.0), 1.0)
+    }
+
     static func == (lhs: PixelInfo, rhs: PixelInfo) -> Bool {
         lhs.gammaRGB == rhs.gammaRGB &&
             lhs.linearRGB == rhs.linearRGB &&
@@ -559,7 +571,7 @@ struct ImageDetailView: View {
                     maxScale: maxScale,
                     currentPixelInfo: $currentPixelInfo,
                     originalCIImage: originalCIImage,
-                    adjustedCIImage: adjustedCIImage,
+                    displayedCIImage: previewCIImage ?? adjustedCIImage ?? originalCIImage,
                     pickMode: whiteBalancePickMode,
                     onColorPick: whiteBalancePickMode != .none ? handleColorPick : nil,
                     onCancelPickMode: cancelWhiteBalancePickMode,
@@ -626,6 +638,10 @@ struct ImageDetailView: View {
 }
 
 struct ImageInfoBar: View {
+    private let infoBarHeight: CGFloat = 56
+    private let colorReadoutWidth: CGFloat = 210
+    private let hslReadoutWidth: CGFloat = 112
+
     let imageInfo: ImageInfo
     let scale: CGFloat
     @Binding var adjustments: ImageAdjustments
@@ -650,10 +666,11 @@ struct ImageInfoBar: View {
                 // 颜色预览方格 - 始终占位
                 Rectangle()
                     .fill(pixelInfo.map { info in
-                        Color(
-                            red: info.gammaRGB.r,
-                            green: info.gammaRGB.g,
-                            blue: info.gammaRGB.b
+                        let displayRGB = info.displayRGB
+                        return Color(
+                            red: displayRGB.r,
+                            green: displayRGB.g,
+                            blue: displayRGB.b
                         )
                     } ?? Color.clear)
                     .frame(width: 32, height: 32)
@@ -665,31 +682,40 @@ struct ImageInfoBar: View {
                     .opacity(pixelInfo == nil ? 0.3 : 1.0)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(pixelInfo.map { "RGB: \(formatRGB($0.gammaRGB))" } ?? "RGB: ---")
-                        .font(.caption)
+                    Text(pixelInfo.map { "RGB: \(formatRGB($0.displayRGB))" } ?? "RGB: ---")
+                        .font(.system(size: 11, design: .monospaced))
                         .foregroundColor(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .minimumScaleFactor(0.9)
                         .opacity(pixelInfo == nil ? 0.5 : 1.0)
-                    Text(pixelInfo.map { "原始: \(formatRGB($0.linearRGB))" } ?? "原始: ---")
-                        .font(.caption)
+                    Text(pixelInfo.map { "Linear: \(formatLinearRGB($0.linearRGB))" } ?? "Linear: ---")
+                        .font(.system(size: 11, design: .monospaced))
                         .foregroundColor(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .minimumScaleFactor(0.8)
                         .opacity(pixelInfo == nil ? 0.5 : 1.0)
                 }
-                .frame(minWidth: 120, alignment: .leading)
+                .frame(width: colorReadoutWidth, alignment: .leading)
+                .layoutPriority(1)
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(pixelInfo.map { "H:\(formatValue($0.hsl.h, decimals: 0))°" } ?? "H:---°")
-                        .font(.caption)
+                        .font(.system(size: 11, design: .monospaced))
                         .foregroundColor(.secondary)
+                        .lineLimit(1)
                         .opacity(pixelInfo == nil ? 0.5 : 1.0)
                     Text(pixelInfo
                         .map {
                             "S:\(formatValue($0.hsl.s, decimals: 0))% L:\(formatValue($0.hsl.l, decimals: 0))%"
                         } ?? "S:---% L:---%")
-                        .font(.caption)
+                        .font(.system(size: 11, design: .monospaced))
                         .foregroundColor(.secondary)
+                        .lineLimit(1)
                         .opacity(pixelInfo == nil ? 0.5 : 1.0)
                 }
-                .frame(minWidth: 100, alignment: .leading)
+                .frame(width: hslReadoutWidth, alignment: .leading)
             }
 
             Spacer()
@@ -839,14 +865,19 @@ struct ImageInfoBar: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
+        .frame(height: infoBarHeight)
         .background(Color(nsColor: .windowBackgroundColor))
     }
 
     private func formatRGB(_ rgb: (r: Double, g: Double, b: Double)) -> String {
-        let r = Int(rgb.r * 255)
-        let g = Int(rgb.g * 255)
-        let b = Int(rgb.b * 255)
+        let r = Int((rgb.r * 255).rounded())
+        let g = Int((rgb.g * 255).rounded())
+        let b = Int((rgb.b * 255).rounded())
         return "\(r), \(g), \(b)"
+    }
+
+    private func formatLinearRGB(_ rgb: (r: Double, g: Double, b: Double)) -> String {
+        String(format: "%.3f, %.3f, %.3f", rgb.r, rgb.g, rgb.b)
     }
 
     private func formatValue(_ value: Double, decimals: Int) -> String {
