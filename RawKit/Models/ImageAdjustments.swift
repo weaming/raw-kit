@@ -142,6 +142,24 @@ struct ImageAdjustments: Equatable, Codable {
     }
 }
 
+enum AdjustmentSyncGroup: String, CaseIterable, Hashable, Identifiable {
+    case lut
+    case basic
+    case color
+    case detail
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .lut: "LUT"
+        case .basic: "基础"
+        case .color: "色彩"
+        case .detail: "细节"
+        }
+    }
+}
+
 extension ImageAdjustments {
     static let contrastRange: ClosedRange<Double> = -1.0 ... 1.0
     static let saturationRange: ClosedRange<Double> = 0.0 ... 2.0
@@ -157,4 +175,51 @@ extension ImageAdjustments {
     static let tintRange: ClosedRange<Double> = -100.0 ... 100.0
     static let vibranceRange: ClosedRange<Double> = -1.0 ... 1.0
     static let sharpnessRange: ClosedRange<Double> = -1.0 ... 2.0
+
+    func synced(with source: ImageAdjustments, groups: Set<AdjustmentSyncGroup>) -> ImageAdjustments {
+        var result = self
+        result.applySyncGroups(groups, from: source)
+        return result
+    }
+
+    mutating func applySyncGroups(_ groups: Set<AdjustmentSyncGroup>, from source: ImageAdjustments) {
+        for group in AdjustmentSyncGroup.allCases where groups.contains(group) {
+            applySyncGroup(group, from: source)
+        }
+    }
+
+    private mutating func applySyncGroup(_ group: AdjustmentSyncGroup, from source: ImageAdjustments) {
+        switch group {
+        case .lut:
+            lutURL = source.lutURL
+            lutAlpha = source.lutAlpha
+            lutColorSpace = source.lutColorSpace
+            lutProfile = source.lutProfile
+
+        case .basic:
+            exposure = source.exposure
+            perceptualExposure = source.perceptualExposure
+            contrast = source.contrast
+            whites = source.whites
+            highlights = source.highlights
+            shadows = source.shadows
+            blacks = source.blacks
+
+        case .color:
+            saturation = source.saturation
+            vibrance = source.vibrance
+            temperature = source.temperature
+            tint = source.tint
+            rgbCurve = source.rgbCurve
+            redCurve = source.redCurve
+            greenCurve = source.greenCurve
+            blueCurve = source.blueCurve
+            luminanceCurve = source.luminanceCurve
+
+        case .detail:
+            sharpness = source.sharpness
+            clarity = source.clarity
+            dehaze = source.dehaze
+        }
+    }
 }

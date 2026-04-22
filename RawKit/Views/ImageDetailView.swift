@@ -40,6 +40,8 @@ struct ImageDetailView: View {
     @ObservedObject var editingState: ImageEditingState
     @ObservedObject private var history: AdjustmentHistory
     @Binding var sidebarWidth: CGFloat
+    let syncTargetCount: Int
+    let onSyncAdjustments: ((Set<AdjustmentSyncGroup>) -> Void)?
     let onFilesDrop: (([URL]) -> Void)?
 
     @State private var originalCIImage: CIImage?
@@ -57,6 +59,8 @@ struct ImageDetailView: View {
     @State private var viewportSize: CGSize = .zero
     @State private var showOriginal = false  // 是否显示原图（Before/After 切换）
     @State private var curvePickSamples = CurvePickSamples()
+    @State private var showingSyncDialog = false
+    @State private var selectedSyncGroups = Set(AdjustmentSyncGroup.allCases)
 
     // Before/After 缓存
     @State private var cachedAdjustedImage: NSImage?  // 缓存的调整后图像
@@ -78,6 +82,8 @@ struct ImageDetailView: View {
         session: ImageEditingSession,
         editingState: ImageEditingState,
         sidebarWidth: Binding<CGFloat>,
+        syncTargetCount: Int,
+        onSyncAdjustments: ((Set<AdjustmentSyncGroup>) -> Void)?,
         onFilesDrop: (([URL]) -> Void)?
     ) {
         self.imageInfo = imageInfo
@@ -85,6 +91,8 @@ struct ImageDetailView: View {
         self._editingState = ObservedObject(wrappedValue: editingState)
         self._history = ObservedObject(wrappedValue: session.history)
         self._sidebarWidth = sidebarWidth
+        self.syncTargetCount = syncTargetCount
+        self.onSyncAdjustments = onSyncAdjustments
         self.onFilesDrop = onFilesDrop
     }
 
@@ -112,13 +120,7 @@ struct ImageDetailView: View {
             }
         }
         .task(id: imageInfo.id) {
-            // 初始化渲染队列（maxFPS: 0 = 不限制，30 = 30fps，60 = 60fps）
-            if renderQueue == nil {
-                renderQueue = RenderQueue(maxFPS: 30) { request in
-                    await self.performRender(request)
-                }
-            }
-
+            ensureRenderQueue()
             await loadImageProgressively()
         }
         .onChange(of: editingState.adjustments) { _, newValue in
@@ -164,6 +166,14 @@ struct ImageDetailView: View {
             .disabled(whiteBalancePickMode != .whiteBalance)
             .hidden()
         )
+        .sheet(isPresented: $showingSyncDialog) {
+            AdjustmentSyncDialog(
+                targetCount: syncTargetCount,
+                selectedGroups: $selectedSyncGroups,
+                onSync: performSyncAdjustments,
+                onCancel: { showingSyncDialog = false }
+            )
+        }
         .onDisappear {
             session.flushPendingEdits()
         }
@@ -510,12 +520,21 @@ struct ImageDetailView: View {
 
     @MainActor
     private func enqueueRender(_ adjustments: ImageAdjustments) {
+        ensureRenderQueue()
         nextRenderRequestID += 1
         let request = RenderRequest(id: nextRenderRequestID, adjustments: adjustments)
         latestRenderRequestID = request.id
 
         Task {
             await renderQueue?.enqueue(request)
+        }
+    }
+
+    @MainActor
+    private func ensureRenderQueue() {
+        guard renderQueue == nil else { return }
+        renderQueue = RenderQueue(maxFPS: 30) { request in
+            await self.performRender(request)
         }
     }
 
@@ -582,7 +601,9 @@ struct ImageDetailView: View {
             curvePickSamples: $curvePickSamples,
             showAdjustmentPanel: $showAdjustmentPanel,
             showOriginal: $showOriginal,
-            pixelInfo: currentPixelInfo
+            pixelInfo: currentPixelInfo,
+            syncTargetCount: syncTargetCount,
+            onSync: syncTargetCount > 0 ? openSyncDialog : nil
         )
     }
 
@@ -590,6 +611,17 @@ struct ImageDetailView: View {
         guard whiteBalancePickMode == .whiteBalance else { return }
         whiteBalancePickMode = .none
         currentPixelInfo = nil
+    }
+
+    private func openSyncDialog() {
+        selectedSyncGroups = Set(AdjustmentSyncGroup.allCases)
+        showingSyncDialog = true
+    }
+
+    private func performSyncAdjustments() {
+        guard !selectedSyncGroups.isEmpty else { return }
+        onSyncAdjustments?(selectedSyncGroups)
+        showingSyncDialog = false
     }
 }
 
@@ -601,6 +633,8 @@ struct ImageInfoBar: View {
     @Binding var showAdjustmentPanel: Bool
     @Binding var showOriginal: Bool
     let pixelInfo: PixelInfo?
+    let syncTargetCount: Int
+    let onSync: (() -> Void)?
 
     var body: some View {
         HStack(spacing: 12) {
@@ -698,6 +732,15 @@ struct ImageInfoBar: View {
             .buttonStyle(.bordered)
             .help("重置所有调整")
             .disabled(!adjustments.hasAdjustments)
+
+            if let onSync, syncTargetCount > 0 {
+                Button(action: onSync) {
+                    Text("同步 \(syncTargetCount) 张")
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+                .help("将当前照片的所选设置同步到另外 \(syncTargetCount) 张照片")
+            }
 
             Spacer()
                 .frame(width: 16)
@@ -808,5 +851,66 @@ struct ImageInfoBar: View {
 
     private func formatValue(_ value: Double, decimals: Int) -> String {
         String(format: "%.\(decimals)f", value)
+    }
+}
+
+struct AdjustmentSyncDialog: View {
+    let targetCount: Int
+    @Binding var selectedGroups: Set<AdjustmentSyncGroup>
+    let onSync: () -> Void
+    let onCancel: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("同步设置")
+                .font(.headline)
+
+            Text("将当前照片的设置同步到另外 \(targetCount) 张照片")
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+
+            VStack(alignment: .leading, spacing: 10) {
+                ForEach(AdjustmentSyncGroup.allCases) { group in
+                    Toggle(group.title, isOn: binding(for: group))
+                        .toggleStyle(.checkbox)
+                }
+            }
+
+            HStack(spacing: 12) {
+                Button("全选") {
+                    selectedGroups = Set(AdjustmentSyncGroup.allCases)
+                }
+                .buttonStyle(.borderless)
+
+                Button("清空") {
+                    selectedGroups.removeAll()
+                }
+                .buttonStyle(.borderless)
+
+                Spacer()
+
+                Button("取消", action: onCancel)
+                    .keyboardShortcut(.escape)
+
+                Button("同步", action: onSync)
+                    .keyboardShortcut(.return)
+                    .disabled(selectedGroups.isEmpty || targetCount == 0)
+            }
+        }
+        .padding(24)
+        .frame(width: 320)
+    }
+
+    private func binding(for group: AdjustmentSyncGroup) -> Binding<Bool> {
+        Binding(
+            get: { selectedGroups.contains(group) },
+            set: { isSelected in
+                if isSelected {
+                    selectedGroups.insert(group)
+                } else {
+                    selectedGroups.remove(group)
+                }
+            }
+        )
     }
 }

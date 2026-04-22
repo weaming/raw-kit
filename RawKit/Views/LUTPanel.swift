@@ -9,6 +9,7 @@ struct LUTPanel: View, Equatable {
         let files: [LUTFile]
     }
 
+    let editingSessionID: UUID
     let onLoadLUT: (URL?) -> Void
     @Binding var lutAlpha: Double
     @Binding var currentLUTURL: URL?
@@ -28,7 +29,8 @@ struct LUTPanel: View, Equatable {
     private let sourceGroupStorageKey = "LUTSourceGroups"
 
     static func == (lhs: LUTPanel, rhs: LUTPanel) -> Bool {
-        lhs.lutAlpha == rhs.lutAlpha &&
+        lhs.editingSessionID == rhs.editingSessionID &&
+            lhs.lutAlpha == rhs.lutAlpha &&
             lhs.currentLUTURL == rhs.currentLUTURL &&
             lhs.adjustments.lutColorProfile == rhs.adjustments.lutColorProfile &&
             lhs.adjustments.hasAdjustments == rhs.adjustments.hasAdjustments

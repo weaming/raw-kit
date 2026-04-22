@@ -50,6 +50,7 @@ struct ContentView: View {
                         width: $leftSidebarWidth,
                         presetsExpanded: $presetsExpanded,
                         lutExpanded: $lutExpanded,
+                        editingSessionID: currentSession.id,
                         editingState: currentSession.state,
                         onLoadPreset: { preset in
                             currentSession.apply(preset)
@@ -70,6 +71,14 @@ struct ContentView: View {
                         session: session,
                         editingState: session.state,
                         sidebarWidth: $rightSidebarWidth,
+                        syncTargetCount: syncTargetIndices(for: index).count,
+                        onSyncAdjustments: { groups in
+                            syncCurrentAdjustments(
+                                from: index,
+                                to: syncTargetIndices(for: index),
+                                groups: groups
+                            )
+                        },
                         onFilesDrop: { urls in
                             imageManager.addImages(from: urls)
                         }
@@ -247,6 +256,42 @@ struct ContentView: View {
 
     private func adjustments(for imageID: UUID) -> ImageAdjustments {
         session(for: imageID)?.currentAdjustments ?? .default
+    }
+
+    private func syncTargetIndices(for sourceIndex: Int) -> [Int] {
+        selectedIndices
+            .filter { $0 != sourceIndex && $0 >= 0 && $0 < imageManager.images.count }
+            .sorted()
+    }
+
+    private func syncCurrentAdjustments(
+        from sourceIndex: Int,
+        to targetIndices: [Int],
+        groups: Set<AdjustmentSyncGroup>
+    ) {
+        guard !groups.isEmpty else { return }
+        guard sourceIndex >= 0,
+              sourceIndex < imageManager.images.count,
+              let sourceSession = session(for: imageManager.images[sourceIndex].id) else {
+            return
+        }
+
+        sourceSession.flushPendingEdits()
+        let sourceAdjustments = sourceSession.currentAdjustments
+
+        for targetIndex in targetIndices {
+            let imageInfo = imageManager.images[targetIndex]
+            guard let targetSession = session(for: imageInfo.id) else { continue }
+
+            targetSession.flushPendingEdits()
+            let updated = targetSession.currentAdjustments.synced(
+                with: sourceAdjustments,
+                groups: groups
+            )
+
+            guard updated != targetSession.currentAdjustments else { continue }
+            targetSession.apply(updated)
+        }
     }
 
     private func syncEditingSessions(for images: [ImageInfo]) {

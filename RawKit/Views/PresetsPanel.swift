@@ -2,6 +2,7 @@ import SwiftUI
 
 // 调整预设面板
 struct PresetsPanel: View, Equatable {
+    let editingSessionID: UUID
     let currentAdjustments: ImageAdjustments
     let onLoadPreset: (ImageAdjustments) -> Void
 
@@ -10,8 +11,8 @@ struct PresetsPanel: View, Equatable {
     @State private var newPresetName = ""
 
     static func == (lhs: PresetsPanel, rhs: PresetsPanel) -> Bool {
-        // 比较完整的 adjustments，确保保存预设时使用最新的值
-        lhs.currentAdjustments == rhs.currentAdjustments
+        lhs.editingSessionID == rhs.editingSessionID &&
+            lhs.currentAdjustments == rhs.currentAdjustments
     }
 
     var body: some View {

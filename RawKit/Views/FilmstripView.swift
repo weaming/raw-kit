@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 // Lightroom 风格的底部胶片栏
@@ -40,7 +41,7 @@ struct FilmstripView: View {
                 Divider()
 
                 // 水平滚动的缩略图列表
-                ScrollView(.horizontal, showsIndicators: false) {
+                HorizontalWheelScrollContainer {
                     HStack(spacing: 4) {
                         ForEach(Array(images.enumerated()), id: \.element.id) { index, imageInfo in
                             ThumbnailItemView(
@@ -99,6 +100,91 @@ struct FilmstripView: View {
             selectedIndices = [index]
             displayedIndex = index
         }
+    }
+}
+
+private struct HorizontalWheelScrollContainer<Content: View>: NSViewRepresentable {
+    let content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(rootView: AnyView(content))
+    }
+
+    func makeNSView(context: Context) -> HorizontalWheelScrollView {
+        let scrollView = HorizontalWheelScrollView()
+        let hostingView = context.coordinator.hostingView
+
+        scrollView.borderType = .noBorder
+        scrollView.drawsBackground = false
+        scrollView.hasVerticalScroller = false
+        scrollView.hasHorizontalScroller = false
+        scrollView.autohidesScrollers = true
+        scrollView.scrollerStyle = .overlay
+        scrollView.automaticallyAdjustsContentInsets = false
+        scrollView.horizontalScrollElasticity = .automatic
+        scrollView.verticalScrollElasticity = .none
+        scrollView.documentView = hostingView
+
+        NSLayoutConstraint.activate([
+            hostingView.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
+            hostingView.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
+            hostingView.bottomAnchor.constraint(equalTo: scrollView.contentView.bottomAnchor),
+            hostingView.heightAnchor.constraint(equalTo: scrollView.contentView.heightAnchor),
+            hostingView.widthAnchor.constraint(greaterThanOrEqualTo: scrollView.contentView.widthAnchor),
+        ])
+
+        return scrollView
+    }
+
+    func updateNSView(_ nsView: HorizontalWheelScrollView, context: Context) {
+        context.coordinator.hostingView.rootView = AnyView(content)
+        context.coordinator.hostingView.layoutSubtreeIfNeeded()
+        nsView.needsLayout = true
+        nsView.layoutSubtreeIfNeeded()
+    }
+
+    final class Coordinator {
+        let hostingView: NSHostingView<AnyView>
+
+        init(rootView: AnyView) {
+            hostingView = NSHostingView(rootView: rootView)
+            hostingView.translatesAutoresizingMaskIntoConstraints = false
+            if #available(macOS 13.0, *) {
+                hostingView.sizingOptions = [.intrinsicContentSize]
+            }
+        }
+    }
+}
+
+private final class HorizontalWheelScrollView: NSScrollView {
+    override func scrollWheel(with event: NSEvent) {
+        guard abs(event.scrollingDeltaY) > abs(event.scrollingDeltaX),
+              abs(event.scrollingDeltaY) > 0.01 else {
+            super.scrollWheel(with: event)
+            return
+        }
+
+        guard let documentView else {
+            super.scrollWheel(with: event)
+            return
+        }
+
+        let clipView = contentView
+        let maxOriginX = max(0, documentView.frame.width - clipView.bounds.width)
+        guard maxOriginX > 0 else { return }
+
+        let deltaScale: CGFloat = event.hasPreciseScrollingDeltas ? 1.0 : 12.0
+        let horizontalDelta = event.scrollingDeltaY * deltaScale
+
+        var newOrigin = clipView.bounds.origin
+        newOrigin.x = min(max(newOrigin.x - horizontalDelta, 0), maxOriginX)
+
+        clipView.scroll(to: newOrigin)
+        reflectScrolledClipView(clipView)
     }
 }
 

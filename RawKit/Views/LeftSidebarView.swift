@@ -5,6 +5,7 @@ struct LeftSidebarView: View {
     @Binding var width: CGFloat
     @Binding var presetsExpanded: Bool
     @Binding var lutExpanded: Bool
+    let editingSessionID: UUID
     @ObservedObject var editingState: ImageEditingState
     let onLoadPreset: (ImageAdjustments) -> Void
     let onLoadLUT: (URL?) -> Void
@@ -21,6 +22,7 @@ struct LeftSidebarView: View {
                         isExpanded: $presetsExpanded
                     ) {
                         PresetsPanel(
+                            editingSessionID: editingSessionID,
                             currentAdjustments: editingState.adjustments,
                             onLoadPreset: onLoadPreset
                         )
@@ -34,6 +36,7 @@ struct LeftSidebarView: View {
                         isExpanded: $lutExpanded
                     ) {
                         LUTPanel(
+                            editingSessionID: editingSessionID,
                             onLoadLUT: onLoadLUT,
                             lutAlpha: Binding(
                                 get: { editingState.adjustments.lutAlpha },
