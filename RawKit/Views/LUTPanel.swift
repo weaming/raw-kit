@@ -27,6 +27,7 @@ struct LUTPanel: View, Equatable {
     private let colorProfileStorageKey = "LUTColorProfiles"
     private let legacyColorSpaceStorageKey = "LUTColorSpaces"
     private let sourceGroupStorageKey = "LUTSourceGroups"
+    private let collapsedGroupStorageKey = "LUTCollapsedGroupIDs"
 
     static func == (lhs: LUTPanel, rhs: LUTPanel) -> Bool {
         lhs.editingSessionID == rhs.editingSessionID &&
@@ -163,6 +164,7 @@ struct LUTPanel: View, Equatable {
         .onAppear {
             loadLUTColorProfiles()
             loadLUTSourceGroups()
+            loadCollapsedGroupIDs()
             loadLUTFiles()
             syncSelectedLUT()
         }
@@ -219,7 +221,9 @@ struct LUTPanel: View, Equatable {
         let previousProfile = adjustments.lutColorProfile
 
         selectedLUT = lutFile.id
-        collapsedGroupIDs.remove(lutFile.sourceGroup.id)
+        if collapsedGroupIDs.remove(lutFile.sourceGroup.id) != nil {
+            saveCollapsedGroupIDs()
+        }
         lutAlpha = 1.0
 
         let nextProfile: LUTColorProfile
@@ -380,6 +384,7 @@ struct LUTPanel: View, Equatable {
 
         guard fileManager.fileExists(atPath: lutFolder.path) else {
             lutFiles = []
+            cleanupCollapsedGroups(validGroupIDs: [])
             return
         }
 
@@ -404,6 +409,7 @@ struct LUTPanel: View, Equatable {
 
             lutFiles = resolvedFiles
             cleanupStoredMetadata(validPaths: Set(resolvedFiles.map(\.url.path)))
+            cleanupCollapsedGroups(validGroupIDs: Set(resolvedFiles.map { $0.sourceGroup.id }))
 
             syncSelectedLUT()
         } catch {
@@ -501,6 +507,15 @@ struct LUTPanel: View, Equatable {
         }
     }
 
+    private func loadCollapsedGroupIDs() {
+        let storedGroupIDs = UserDefaults.standard.array(forKey: collapsedGroupStorageKey) as? [String] ?? []
+        collapsedGroupIDs = Set(storedGroupIDs)
+    }
+
+    private func saveCollapsedGroupIDs() {
+        UserDefaults.standard.set(Array(collapsedGroupIDs).sorted(), forKey: collapsedGroupStorageKey)
+    }
+
     private func cleanupStoredMetadata(validPaths: Set<String>) {
         let filteredProfiles = lutProfiles.filter { validPaths.contains($0.key) }
         if filteredProfiles.count != lutProfiles.count {
@@ -512,6 +527,14 @@ struct LUTPanel: View, Equatable {
         if filteredSourceGroups.count != lutSourceGroups.count {
             lutSourceGroups = filteredSourceGroups
             saveLUTSourceGroups()
+        }
+    }
+
+    private func cleanupCollapsedGroups(validGroupIDs: Set<String>) {
+        let filteredGroupIDs = collapsedGroupIDs.filter(validGroupIDs.contains)
+        if filteredGroupIDs.count != collapsedGroupIDs.count {
+            collapsedGroupIDs = filteredGroupIDs
+            saveCollapsedGroupIDs()
         }
     }
 
@@ -535,6 +558,8 @@ struct LUTPanel: View, Equatable {
         } else {
             collapsedGroupIDs.insert(groupID)
         }
+
+        saveCollapsedGroupIDs()
     }
 
     private func groupSortKey(for group: LUTGroupSection) -> (Int, String) {
