@@ -1,4 +1,23 @@
+import Foundation
 import SwiftUI
+
+private final class FileURLCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [URL] = []
+
+    func append(_ url: URL) {
+        lock.lock()
+        storage.append(url)
+        lock.unlock()
+    }
+
+    func values() -> [URL] {
+        lock.lock()
+        let result = storage
+        lock.unlock()
+        return result
+    }
+}
 
 struct ContentView: View {
     @StateObject private var imageManager = ImageManager()
@@ -232,7 +251,7 @@ struct ContentView: View {
 
     private func handleDrop(providers: [NSItemProvider]) {
         let group = DispatchGroup()
-        var urls: [URL] = []
+        let urls = FileURLCollector()
 
         for provider in providers {
             group.enter()
@@ -248,7 +267,7 @@ struct ContentView: View {
 
         group.notify(queue: .main) {
             let wasEmpty = imageManager.images.isEmpty
-            imageManager.addImages(from: urls)
+            imageManager.addImages(from: urls.values())
 
             if wasEmpty, !imageManager.images.isEmpty {
                 displayedIndex = 0
@@ -274,6 +293,7 @@ struct ContentView: View {
     private func handleUndo() {
         guard let imageInfo = getCurrentImageInfo() else { return }
         let history = getCurrentHistory()
+        history.flush()
 
         if let adjustments = history.undo() {
             adjustmentsCache[imageInfo.id] = adjustments
@@ -283,6 +303,7 @@ struct ContentView: View {
     private func handleRedo() {
         guard let imageInfo = getCurrentImageInfo() else { return }
         let history = getCurrentHistory()
+        history.flush()
 
         if let adjustments = history.redo() {
             adjustmentsCache[imageInfo.id] = adjustments

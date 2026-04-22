@@ -71,8 +71,8 @@ macOS RAW 图像预览和处理工具,支持 Sony A7R4、Sigma DPQ 等相机的 
 
 ## 技术栈
 
-- Swift 6.0
-- SwiftUI (macOS 14+)
+- Swift 5 language mode
+- SwiftUI (macOS 15.1+)
 - Core Image (实时图像处理)
 - CGImageSource (RAW 解码)
 - Actor 并发模型
@@ -90,6 +90,6 @@ macOS RAW 图像预览和处理工具,支持 Sony A7R4、Sigma DPQ 等相机的 
 
 ## 系统要求
 
-- macOS 14.0+
-- Xcode 15.0+ (用于开发和编译)
+- macOS 15.1+
+- Xcode 16.2+ (用于开发和编译)
 - 8GB+ RAM (推荐用于处理大型 RAW 文件)

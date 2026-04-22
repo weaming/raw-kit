@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ResizableAdjustmentPanel: View, Equatable {
     @Binding var adjustments: ImageAdjustments
+    @Binding var curvePickSamples: CurvePickSamples
     let originalCIImage: CIImage?
     let adjustedCIImage: CIImage?
     @Binding var width: CGFloat
@@ -14,6 +15,7 @@ struct ResizableAdjustmentPanel: View, Equatable {
         // adjustedCIImage 的变化不应该触发控制面板重绘
         // 但 originalCIImage 从 nil 变为有值时需要重绘（解锁自动白平衡按钮）
         lhs.adjustments == rhs.adjustments &&
+        lhs.curvePickSamples == rhs.curvePickSamples &&
         lhs.width == rhs.width &&
         lhs.whiteBalancePickMode == rhs.whiteBalancePickMode &&
         (lhs.originalCIImage != nil) == (rhs.originalCIImage != nil)
@@ -46,6 +48,7 @@ struct ResizableAdjustmentPanel: View, Equatable {
 
             AdjustmentPanel(
                 adjustments: $adjustments,
+                curvePickSamples: $curvePickSamples,
                 originalCIImage: originalCIImage,
                 adjustedCIImage: adjustedCIImage,
                 whiteBalancePickMode: $whiteBalancePickMode
@@ -57,6 +60,7 @@ struct ResizableAdjustmentPanel: View, Equatable {
 
 struct AdjustmentPanel: View {
     @Binding var adjustments: ImageAdjustments
+    @Binding var curvePickSamples: CurvePickSamples
     let originalCIImage: CIImage?
     let adjustedCIImage: CIImage?
     @Binding var whiteBalancePickMode: CurveAdjustmentView.PickMode
@@ -95,6 +99,7 @@ struct AdjustmentPanel: View {
                 if adjustments.hasAdjustments {
                     Button("重置") {
                         adjustments.reset()
+                        curvePickSamples.reset()
                     }
                     .buttonStyle(.borderless)
                     .padding(.trailing, 16)
@@ -120,10 +125,14 @@ struct AdjustmentPanel: View {
                         isExpanded: expandedSections.contains(.color),
                         hasChanges: adjustments.hasColorAdjustments,
                         onToggle: { toggleSection(.color) },
-                        onReset: { adjustments.resetColor() }
+                        onReset: {
+                            adjustments.resetColor()
+                            curvePickSamples.reset()
+                        }
                     ) {
                         ColorAdjustmentsView(
                             adjustments: $adjustments,
+                            curvePickSamples: $curvePickSamples,
                             originalCIImage: originalCIImage,
                             adjustedCIImage: adjustedCIImage,
                             whiteBalancePickMode: $whiteBalancePickMode
@@ -483,6 +492,7 @@ struct BasicAdjustmentsView: View, Equatable {
 
 struct ColorAdjustmentsView: View, Equatable {
     @Binding var adjustments: ImageAdjustments
+    @Binding var curvePickSamples: CurvePickSamples
     let originalCIImage: CIImage?
     let adjustedCIImage: CIImage?
     @Binding var whiteBalancePickMode: CurveAdjustmentView.PickMode
@@ -497,6 +507,7 @@ struct ColorAdjustmentsView: View, Equatable {
         lhs.adjustments.greenCurve == rhs.adjustments.greenCurve &&
         lhs.adjustments.blueCurve == rhs.adjustments.blueCurve &&
         lhs.adjustments.rgbCurve == rhs.adjustments.rgbCurve &&
+        lhs.curvePickSamples == rhs.curvePickSamples &&
         lhs.whiteBalancePickMode == rhs.whiteBalancePickMode &&
         (lhs.originalCIImage != nil) == (rhs.originalCIImage != nil)
     }
@@ -576,6 +587,7 @@ struct ColorAdjustmentsView: View, Equatable {
             // 曲线调整
             WhiteBalanceAndCurveView(
                 adjustments: $adjustments,
+                curvePickSamples: $curvePickSamples,
                 adjustedCIImage: adjustedCIImage,
                 pickMode: $whiteBalancePickMode
             )
@@ -606,6 +618,7 @@ struct ColorAdjustmentsView: View, Equatable {
 // 将 CurveAdjustmentView 嵌入到面板中
 struct WhiteBalanceAndCurveView: View {
     @Binding var adjustments: ImageAdjustments
+    @Binding var curvePickSamples: CurvePickSamples
     let adjustedCIImage: CIImage?
     @Binding var pickMode: CurveAdjustmentView.PickMode
 
@@ -613,7 +626,8 @@ struct WhiteBalanceAndCurveView: View {
         CurveAdjustmentView(
             adjustments: $adjustments,
             ciImage: adjustedCIImage,
-            pickMode: $pickMode
+            pickMode: $pickMode,
+            curvePickSamples: $curvePickSamples
         )
         .padding(0)
     }
@@ -695,7 +709,8 @@ struct SliderControl: View, Equatable {
                         }
                     ),
                     range: range,
-                    onDoubleTap: { resetToDefault() }
+                    onDoubleTap: { resetToDefault() },
+                    enableThrottle: true
                 )
 
                 Button(action: { resetToDefault() }) {

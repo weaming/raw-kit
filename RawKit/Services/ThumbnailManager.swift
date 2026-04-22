@@ -18,6 +18,9 @@ class ThumbnailManager: ObservableObject {
         let task = Task {
             guard !Task.isCancelled else { return }
 
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            guard !Task.isCancelled else { return }
+
             let thumbnail = await createAdjustedThumbnail(
                 from: imageInfo.url,
                 with: adjustments

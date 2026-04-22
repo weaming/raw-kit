@@ -4,11 +4,15 @@ import ImageIO
 import UniformTypeIdentifiers
 
 class ImageExporter {
+    private static var exportContext: CIContext {
+        CIContextManager.shared.getRenderContext()
+    }
+
     static func export(
         imageInfo: ImageInfo,
         adjustments: ImageAdjustments,
         config: ExportConfig,
-        progress: @escaping (Double) -> Void
+        progress: @escaping @Sendable (Double) -> Void
     ) async throws -> URL {
         progress(0.1)
 
@@ -100,7 +104,7 @@ class ImageExporter {
         colorSpace: ExportColorSpace,
         quality: Double
     ) throws {
-        let context = CIContext()
+        let context = exportContext
 
         // 获取色彩空间
         let cgColorSpace = getColorSpace(for: colorSpace)

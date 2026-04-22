@@ -2,6 +2,9 @@ import CoreImage
 import Foundation
 
 struct CurveAdjustment: Equatable, Codable {
+    nonisolated(unsafe) private static let colorCubeCache = NSCache<NSString, NSData>()
+    private static let colorCubeSize = 64
+
     enum Channel: String, Codable {
         case rgb
         case red
@@ -79,8 +82,10 @@ struct CurveAdjustment: Equatable, Codable {
         let curveValues = generateCurveValues()
 
         switch channel {
-        case .rgb, .luminance:
+        case .rgb:
             return applyToneCurve(to: image, values: curveValues)
+        case .luminance:
+            return applyLuminanceCurve(to: image, values: curveValues)
         case .red:
             return applyColorMatrixCurve(to: image, values: curveValues, channel: 0)
         case .green:
@@ -99,35 +104,36 @@ struct CurveAdjustment: Equatable, Codable {
 
         // 使用 CIColorCube 来同时应用曲线到 R、G、B 三个通道
         // 这是 Photoshop RGB 复合曲线的正确实现方式
-        let cubeSize = 64
-        var cubeData = [Float](repeating: 0, count: cubeSize * cubeSize * cubeSize * 4)
+        let cubeSize = Self.colorCubeSize
+        let data = cachedColorCubeData(prefix: "rgb") {
+            var cubeData = [Float](repeating: 0, count: cubeSize * cubeSize * cubeSize * 4)
 
-        for z in 0 ..< cubeSize {
-            for y in 0 ..< cubeSize {
-                for x in 0 ..< cubeSize {
-                    let r = Float(x) / Float(cubeSize - 1)
-                    let g = Float(y) / Float(cubeSize - 1)
-                    let b = Float(z) / Float(cubeSize - 1)
+            for z in 0 ..< cubeSize {
+                for y in 0 ..< cubeSize {
+                    for x in 0 ..< cubeSize {
+                        let r = Float(x) / Float(cubeSize - 1)
+                        let g = Float(y) / Float(cubeSize - 1)
+                        let b = Float(z) / Float(cubeSize - 1)
 
-                    // 对每个通道应用曲线
-                    let rIndex = Int(r * 255.0)
-                    let gIndex = Int(g * 255.0)
-                    let bIndex = Int(b * 255.0)
+                        // 对每个通道应用曲线
+                        let rIndex = Int(r * 255.0)
+                        let gIndex = Int(g * 255.0)
+                        let bIndex = Int(b * 255.0)
 
-                    let rOut = Float(curveValues[min(rIndex, 255)])
-                    let gOut = Float(curveValues[min(gIndex, 255)])
-                    let bOut = Float(curveValues[min(bIndex, 255)])
+                        let rOut = Float(curveValues[min(rIndex, 255)])
+                        let gOut = Float(curveValues[min(gIndex, 255)])
+                        let bOut = Float(curveValues[min(bIndex, 255)])
 
-                    let offset = (z * cubeSize * cubeSize + y * cubeSize + x) * 4
-                    cubeData[offset + 0] = rOut
-                    cubeData[offset + 1] = gOut
-                    cubeData[offset + 2] = bOut
-                    cubeData[offset + 3] = 1.0 // alpha
+                        let offset = (z * cubeSize * cubeSize + y * cubeSize + x) * 4
+                        cubeData[offset + 0] = rOut
+                        cubeData[offset + 1] = gOut
+                        cubeData[offset + 2] = bOut
+                        cubeData[offset + 3] = 1.0 // alpha
+                    }
                 }
             }
+            return cubeData
         }
-
-        let data = Data(bytes: cubeData, count: cubeData.count * MemoryLayout<Float>.size)
 
         guard let filter = CIFilter(name: "CIColorCube") else {
             return image
@@ -147,7 +153,8 @@ struct CurveAdjustment: Equatable, Codable {
 
         filter.setValue(image, forKey: kCIInputImageKey)
 
-        let points = stride(from: 0, to: values.count, by: values.count / 5).map { i in
+        let pointIndices = [0, values.count / 4, values.count / 2, (values.count * 3) / 4, values.count - 1]
+        let points = pointIndices.map { i in
             CIVector(x: CGFloat(i) / CGFloat(values.count - 1), y: values[i])
         }
 
@@ -160,53 +167,39 @@ struct CurveAdjustment: Equatable, Codable {
         return filter.outputImage ?? image
     }
 
-    // Photoshop 的单通道曲线实现
-    // 只调整指定通道的值，保持其他通道不变
-    private func applyColorMatrixCurve(
-        to image: CIImage,
-        values: [CGFloat],
-        channel: Int
-    ) -> CIImage {
-        // 使用 CIColorCube 来只调整指定通道
-        let cubeSize = 64
-        var cubeData = [Float](repeating: 0, count: cubeSize * cubeSize * cubeSize * 4)
+    private func applyLuminanceCurve(to image: CIImage, values: [CGFloat]) -> CIImage {
+        let cubeSize = Self.colorCubeSize
+        let data = cachedColorCubeData(prefix: "luminance") {
+            var cubeData = [Float](repeating: 0, count: cubeSize * cubeSize * cubeSize * 4)
 
-        for z in 0 ..< cubeSize {
-            for y in 0 ..< cubeSize {
-                for x in 0 ..< cubeSize {
-                    let r = Float(x) / Float(cubeSize - 1)
-                    let g = Float(y) / Float(cubeSize - 1)
-                    let b = Float(z) / Float(cubeSize - 1)
+            for z in 0 ..< cubeSize {
+                for y in 0 ..< cubeSize {
+                    for x in 0 ..< cubeSize {
+                        let r = Float(x) / Float(cubeSize - 1)
+                        let g = Float(y) / Float(cubeSize - 1)
+                        let b = Float(z) / Float(cubeSize - 1)
+                        let luminance = max(0, min(1, 0.2126 * r + 0.7152 * g + 0.0722 * b))
+                        let luminanceIndex = min(Int(luminance * 255.0), 255)
+                        let mappedLuminance = Float(values[luminanceIndex])
 
-                    var rOut = r
-                    var gOut = g
-                    var bOut = b
+                        let scale: Float
+                        if luminance > 0.000_01 {
+                            scale = mappedLuminance / luminance
+                        } else {
+                            scale = 0
+                        }
 
-                    // 只对指定通道应用曲线
-                    switch channel {
-                    case 0: // Red
-                        let rIndex = Int(r * 255.0)
-                        rOut = Float(values[min(rIndex, 255)])
-                    case 1: // Green
-                        let gIndex = Int(g * 255.0)
-                        gOut = Float(values[min(gIndex, 255)])
-                    case 2: // Blue
-                        let bIndex = Int(b * 255.0)
-                        bOut = Float(values[min(bIndex, 255)])
-                    default:
-                        break
+                        let offset = (z * cubeSize * cubeSize + y * cubeSize + x) * 4
+                        cubeData[offset + 0] = max(0, min(1, r * scale))
+                        cubeData[offset + 1] = max(0, min(1, g * scale))
+                        cubeData[offset + 2] = max(0, min(1, b * scale))
+                        cubeData[offset + 3] = 1.0
                     }
-
-                    let offset = (z * cubeSize * cubeSize + y * cubeSize + x) * 4
-                    cubeData[offset + 0] = rOut
-                    cubeData[offset + 1] = gOut
-                    cubeData[offset + 2] = bOut
-                    cubeData[offset + 3] = 1.0
                 }
             }
-        }
 
-        let data = Data(bytes: cubeData, count: cubeData.count * MemoryLayout<Float>.size)
+            return cubeData
+        }
 
         guard let filter = CIFilter(name: "CIColorCube") else {
             return image
@@ -217,6 +210,88 @@ struct CurveAdjustment: Equatable, Codable {
         filter.setValue(data, forKey: "inputCubeData")
 
         return filter.outputImage ?? image
+    }
+
+    // Photoshop 的单通道曲线实现
+    // 只调整指定通道的值，保持其他通道不变
+    private func applyColorMatrixCurve(
+        to image: CIImage,
+        values: [CGFloat],
+        channel: Int
+    ) -> CIImage {
+        // 使用 CIColorCube 来只调整指定通道
+        let cubeSize = Self.colorCubeSize
+        let data = cachedColorCubeData(prefix: "channel-\(channel)") {
+            var cubeData = [Float](repeating: 0, count: cubeSize * cubeSize * cubeSize * 4)
+
+            for z in 0 ..< cubeSize {
+                for y in 0 ..< cubeSize {
+                    for x in 0 ..< cubeSize {
+                        let r = Float(x) / Float(cubeSize - 1)
+                        let g = Float(y) / Float(cubeSize - 1)
+                        let b = Float(z) / Float(cubeSize - 1)
+
+                        var rOut = r
+                        var gOut = g
+                        var bOut = b
+
+                        // 只对指定通道应用曲线
+                        switch channel {
+                        case 0: // Red
+                            let rIndex = Int(r * 255.0)
+                            rOut = Float(values[min(rIndex, 255)])
+                        case 1: // Green
+                            let gIndex = Int(g * 255.0)
+                            gOut = Float(values[min(gIndex, 255)])
+                        case 2: // Blue
+                            let bIndex = Int(b * 255.0)
+                            bOut = Float(values[min(bIndex, 255)])
+                        default:
+                            break
+                        }
+
+                        let offset = (z * cubeSize * cubeSize + y * cubeSize + x) * 4
+                        cubeData[offset + 0] = rOut
+                        cubeData[offset + 1] = gOut
+                        cubeData[offset + 2] = bOut
+                        cubeData[offset + 3] = 1.0
+                    }
+                }
+            }
+            return cubeData
+        }
+
+        guard let filter = CIFilter(name: "CIColorCube") else {
+            return image
+        }
+
+        filter.setValue(image, forKey: kCIInputImageKey)
+        filter.setValue(cubeSize, forKey: "inputCubeDimension")
+        filter.setValue(data, forKey: "inputCubeData")
+
+        return filter.outputImage ?? image
+    }
+
+    private func cachedColorCubeData(prefix: String, build: () -> [Float]) -> Data {
+        let key = colorCubeCacheKey(prefix: prefix)
+
+        if let cached = Self.colorCubeCache.object(forKey: key) {
+            return cached as Data
+        }
+
+        let cubeData = build()
+        let data = Data(bytes: cubeData, count: cubeData.count * MemoryLayout<Float>.size)
+        Self.colorCubeCache.setObject(data as NSData, forKey: key)
+        return data
+    }
+
+    private func colorCubeCacheKey(prefix: String) -> NSString {
+        let pointKey = points
+            .sorted { $0.input < $1.input }
+            .map { String(format: "%.6f:%.6f", $0.input, $0.output) }
+            .joined(separator: "|")
+
+        return "\(prefix):\(Self.colorCubeSize):\(pointKey)" as NSString
     }
 
     private func generateCurveValues() -> [CGFloat] {

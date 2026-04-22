@@ -81,4 +81,4 @@ xattr -cr /Applications/RawKit.app
 - **构建配置：** Release
 - **代码签名：** 自动签名（本地使用）
 - **架构：** arm64（Apple Silicon）
-- **最低系统：** macOS 13.0+
+- **最低系统：** macOS 15.1+

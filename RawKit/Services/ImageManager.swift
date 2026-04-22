@@ -32,7 +32,16 @@ class ImageManager: ObservableObject {
             defer { isScanning = false }
 
             print("ImageManager: 扫描指定目录: \(directory.path)")
-            let foundImages = await scanDirectory(directory)
+            let supportedExtensions = self.supportedExtensions
+            let rawExtensions = self.rawExtensions
+            let foundURLs = await Task.detached(priority: .userInitiated) {
+                Self.scanDirectoryURLs(
+                    directory,
+                    supportedExtensions: supportedExtensions,
+                    rawExtensions: rawExtensions
+                )
+            }.value
+            let foundImages = foundURLs.map { ImageInfo(url: $0) }
             print("ImageManager: 找到 \(foundImages.count) 张图片")
             images = foundImages.sorted { $0.filename < $1.filename }
         }
@@ -53,7 +62,11 @@ class ImageManager: ObservableObject {
         images.remove(at: index)
     }
 
-    private func scanDirectory(_ directory: URL) async -> [ImageInfo] {
+    private nonisolated static func scanDirectoryURLs(
+        _ directory: URL,
+        supportedExtensions: [String],
+        rawExtensions: [String]
+    ) -> [URL] {
         print("ImageManager: 开始扫描目录: \(directory.path)")
 
         var isDirectory: ObjCBool = false
@@ -129,13 +142,16 @@ class ImageManager: ObservableObject {
 
         print("ImageManager: 过滤后剩余 \(filteredURLs.count) 个支持的图片文件")
 
-        let deduplicated = deduplicateRawAndJpeg(urls: filteredURLs)
+        let deduplicated = deduplicateRawAndJpeg(urls: filteredURLs, rawExtensions: rawExtensions)
         print("ImageManager: 去重后剩余 \(deduplicated.count) 张图片")
 
-        return deduplicated.map { ImageInfo(url: $0) }
+        return deduplicated
     }
 
-    private func deduplicateRawAndJpeg(urls: [URL]) -> [URL] {
+    private nonisolated static func deduplicateRawAndJpeg(
+        urls: [URL],
+        rawExtensions: [String]
+    ) -> [URL] {
         var filesByBaseName: [String: [URL]] = [:]
 
         for url in urls {

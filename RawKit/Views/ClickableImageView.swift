@@ -2,65 +2,27 @@ import AppKit
 import CoreImage
 import SwiftUI
 
-struct ClickableImageView: View {
-    let image: NSImage
-    @Binding var scale: CGFloat
-    let maxScale: CGFloat
-    @Binding var currentPixelInfo: PixelInfo?
-    let originalCIImage: CIImage?
-    let adjustedCIImage: CIImage?
-    let onColorPick: ((CGPoint, CGSize) -> Void)?
-
-    @State private var offset: CGSize = .zero
-    @State private var lastOffset: CGSize = .zero
-    @FocusState private var isFocused: Bool
-
-    var body: some View {
-        GeometryReader { geometry in
-            ClickableImageRepresentable(
-                image: image,
-                scale: $scale,
-                offset: $offset,
-                lastOffset: $lastOffset,
-                onScrollWheel: { deltaY, location in
-                    handleScrollWheel(deltaY: deltaY, location: location, geometry: geometry)
-                },
-                onColorPick: onColorPick,
-                onMouseMove: handleMouseMove
-            )
-        }
-        .focusable(false)
-        .focused($isFocused)
-        .onAppear {
-            isFocused = true
-        }
-        .onKeyPress(keys: ["+", "=", "-", "_"]) { keyPress in
-            handleKeyPress(keyPress)
-            return .handled
-        }
-        .focusedSceneValue(\.resetZoomAction, resetZoom)
+enum PixelSampler {
+    private static var context: CIContext {
+        CIContextManager.shared.getHistogramContext()
     }
 
-    private func handleMouseMove(point: CGPoint, imageSize: CGSize) {
-        // 检查是否在图片范围外
-        guard point.x >= 0, point.y >= 0 else {
-            currentPixelInfo = nil
-            return
+    static func samplePixelInfo(
+        from ciImage: CIImage,
+        point: CGPoint,
+        imageSize: CGSize,
+        sampleSize: CGFloat
+    ) -> PixelInfo? {
+        guard point.x >= 0, point.y >= 0, imageSize.width > 0, imageSize.height > 0 else {
+            return nil
         }
 
-        guard let ciImage = adjustedCIImage ?? originalCIImage else {
-            currentPixelInfo = nil
-            return
-        }
-
-        // 从 CIImage 采样颜色
         let extent = ciImage.extent
         let normalizedX = point.x / imageSize.width
         let normalizedY = point.y / imageSize.height
         let x = extent.origin.x + normalizedX * extent.width
         let y = extent.origin.y + (1.0 - normalizedY) * extent.height
 
-        let sampleSize: CGFloat = 3
         let sampleRect = CGRect(
             x: x - sampleSize / 2,
             y: y - sampleSize / 2,
@@ -70,8 +32,7 @@ struct ClickableImageView: View {
 
         let clampedRect = sampleRect.intersection(extent)
         guard !clampedRect.isEmpty else {
-            currentPixelInfo = nil
-            return
+            return nil
         }
 
         guard let averaged = ciImage.cropped(to: clampedRect)
@@ -80,12 +41,10 @@ struct ClickableImageView: View {
                 parameters: [kCIInputExtentKey: CIVector(cgRect: clampedRect)]
             ) as CIImage?
         else {
-            currentPixelInfo = nil
-            return
+            return nil
         }
 
         var bitmap = [UInt16](repeating: 0, count: 4)
-        let context = CIContext(options: [.workingColorSpace: NSNull()])
         context.render(
             averaged,
             toBitmap: &bitmap,
@@ -103,20 +62,64 @@ struct ClickableImageView: View {
         let gammaG = linearToGamma(linearG)
         let gammaB = linearToGamma(linearB)
 
-        let hsl = rgbToHSL(r: gammaR, g: gammaG, b: gammaB)
-
-        let newPixelInfo = PixelInfo(
+        return PixelInfo(
             gammaRGB: (r: gammaR, g: gammaG, b: gammaB),
             linearRGB: (r: linearR, g: linearG, b: linearB),
-            hsl: hsl
+            hsl: rgbToHSL(r: gammaR, g: gammaG, b: gammaB)
         )
-
-        if currentPixelInfo != newPixelInfo {
-            currentPixelInfo = newPixelInfo
-        }
     }
 
-    private func linearToGamma(_ linear: Double) -> Double {
+    static func sampleLoupeImage(
+        from ciImage: CIImage,
+        point: CGPoint,
+        imageSize: CGSize,
+        sampleSpan: CGFloat,
+        outputSize: CGFloat
+    ) -> NSImage? {
+        guard point.x >= 0, point.y >= 0, imageSize.width > 0, imageSize.height > 0 else {
+            return nil
+        }
+
+        let extent = ciImage.extent
+        let normalizedX = point.x / imageSize.width
+        let normalizedY = point.y / imageSize.height
+        let x = extent.origin.x + normalizedX * extent.width
+        let y = extent.origin.y + (1.0 - normalizedY) * extent.height
+
+        let sampleRect = CGRect(
+            x: x - sampleSpan / 2,
+            y: y - sampleSpan / 2,
+            width: sampleSpan,
+            height: sampleSpan
+        ).integral
+
+        let sampleImage = ciImage
+            .clampedToExtent()
+            .cropped(to: sampleRect)
+
+        guard let cgImage = context.createCGImage(sampleImage, from: sampleImage.extent) else {
+            return nil
+        }
+
+        let size = NSSize(width: outputSize, height: outputSize)
+        let loupeImage = NSImage(size: size)
+        loupeImage.lockFocus()
+        defer { loupeImage.unlockFocus() }
+
+        if let graphicsContext = NSGraphicsContext.current {
+            graphicsContext.imageInterpolation = .none
+        }
+
+        NSColor.clear.setFill()
+        NSBezierPath(rect: NSRect(origin: .zero, size: size)).fill()
+
+        let drawRect = NSRect(origin: .zero, size: size)
+        NSImage(cgImage: cgImage, size: drawRect.size).draw(in: drawRect)
+
+        return loupeImage
+    }
+
+    private static func linearToGamma(_ linear: Double) -> Double {
         if linear <= 0.0031308 {
             linear * 12.92
         } else {
@@ -124,7 +127,7 @@ struct ClickableImageView: View {
         }
     }
 
-    private func rgbToHSL(r: Double, g: Double, b: Double) -> (h: Double, s: Double, l: Double) {
+    private static func rgbToHSL(r: Double, g: Double, b: Double) -> (h: Double, s: Double, l: Double) {
         let maxC = max(r, g, b)
         let minC = min(r, g, b)
         let delta = maxC - minC
@@ -147,6 +150,172 @@ struct ClickableImageView: View {
         }
 
         return (h: h * 360.0, s: s * 100.0, l: l * 100.0)
+    }
+}
+
+struct ImageHoverSample {
+    let viewLocation: CGPoint
+    let pixelPoint: CGPoint
+    let imageSize: CGSize
+}
+
+struct ClickableImageView: View {
+    private struct LoupeOverlayState {
+        let viewLocation: CGPoint
+        let image: NSImage
+    }
+
+    let image: NSImage
+    @Binding var scale: CGFloat
+    let maxScale: CGFloat
+    @Binding var currentPixelInfo: PixelInfo?
+    let originalCIImage: CIImage?
+    let adjustedCIImage: CIImage?
+    let pickMode: CurveAdjustmentView.PickMode
+    let onColorPick: ((CGPoint, CGSize) -> Void)?
+
+    @State private var offset: CGSize = .zero
+    @State private var lastOffset: CGSize = .zero
+    @State private var lastPixelSampleTime: TimeInterval = 0
+    @State private var loupeState: LoupeOverlayState?
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        GeometryReader { geometry in
+            ClickableImageRepresentable(
+                image: image,
+                scale: $scale,
+                offset: $offset,
+                lastOffset: $lastOffset,
+                onScrollWheel: { deltaY, location in
+                    handleScrollWheel(deltaY: deltaY, location: location, geometry: geometry)
+                },
+                pickMode: pickMode,
+                onColorPick: onColorPick,
+                onMouseMove: { sample in
+                    handleMouseMove(sample: sample, geometrySize: geometry.size)
+                }
+            )
+            .overlay(alignment: .topLeading) {
+                if pickMode == .whiteBalance,
+                   let loupeState
+                {
+                    WhiteBalanceLoupeOverlay(
+                        image: loupeState.image,
+                        pixelInfo: currentPixelInfo
+                    )
+                    .position(loupePosition(for: loupeState.viewLocation, in: geometry.size))
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
+                }
+            }
+        }
+        .focusable(false)
+        .focused($isFocused)
+        .onAppear {
+            isFocused = true
+        }
+        .onChange(of: pickMode) { _, newValue in
+            if newValue != .whiteBalance {
+                loupeState = nil
+            }
+        }
+        .onKeyPress(keys: ["+", "=", "-", "_"]) { keyPress in
+            handleKeyPress(keyPress)
+            return .handled
+        }
+        .focusedSceneValue(\.resetZoomAction, resetZoom)
+    }
+
+    private func handleMouseMove(sample: ImageHoverSample?, geometrySize: CGSize) {
+        guard let sample else {
+            currentPixelInfo = nil
+            loupeState = nil
+            return
+        }
+
+        guard let ciImage = adjustedCIImage ?? originalCIImage else {
+            currentPixelInfo = nil
+            loupeState = nil
+            return
+        }
+
+        if pickMode == .whiteBalance {
+            loupeState = buildLoupeState(from: sample, using: ciImage, geometrySize: geometrySize)
+        } else {
+            loupeState = nil
+        }
+
+        let now = CACurrentMediaTime()
+        guard now - lastPixelSampleTime >= 1.0 / 30.0 else {
+            return
+        }
+        lastPixelSampleTime = now
+
+        guard let newPixelInfo = PixelSampler.samplePixelInfo(
+            from: ciImage,
+            point: sample.pixelPoint,
+            imageSize: sample.imageSize,
+            sampleSize: 3
+        ) else {
+            currentPixelInfo = nil
+            return
+        }
+
+        if currentPixelInfo != newPixelInfo {
+            currentPixelInfo = newPixelInfo
+        }
+    }
+
+    private func buildLoupeState(
+        from sample: ImageHoverSample,
+        using ciImage: CIImage,
+        geometrySize: CGSize
+    ) -> LoupeOverlayState? {
+        guard let loupeImage = PixelSampler.sampleLoupeImage(
+            from: ciImage,
+            point: sample.pixelPoint,
+            imageSize: sample.imageSize,
+            sampleSpan: 17,
+            outputSize: 92
+        ) else {
+            return nil
+        }
+
+        return LoupeOverlayState(
+            viewLocation: CGPoint(
+                x: sample.viewLocation.x,
+                y: geometrySize.height - sample.viewLocation.y
+            ),
+            image: loupeImage
+        )
+    }
+
+    private func loupePosition(for viewLocation: CGPoint, in geometrySize: CGSize) -> CGPoint {
+        let panelSize = CGSize(width: 128, height: 142)
+        let margin: CGFloat = 18
+        let cursorOffset = CGSize(width: 30, height: 34)
+
+        var x = viewLocation.x + cursorOffset.width + panelSize.width / 2
+        var y = viewLocation.y + cursorOffset.height + panelSize.height / 2
+
+        let maxX = geometrySize.width - margin - panelSize.width / 2
+        let maxY = geometrySize.height - margin - panelSize.height / 2
+        let minX = margin + panelSize.width / 2
+        let minY = margin + panelSize.height / 2
+
+        if x > maxX {
+            x = viewLocation.x - cursorOffset.width - panelSize.width / 2
+        }
+
+        if y > maxY {
+            y = viewLocation.y - cursorOffset.height - panelSize.height / 2
+        }
+
+        return CGPoint(
+            x: min(max(x, minX), maxX),
+            y: min(max(y, minY), maxY)
+        )
     }
 
     private func handleKeyPress(_ keyPress: KeyPress) {
@@ -241,14 +410,16 @@ struct ClickableImageRepresentable: NSViewRepresentable {
     @Binding var offset: CGSize
     @Binding var lastOffset: CGSize
     let onScrollWheel: (CGFloat, CGPoint) -> Void
+    let pickMode: CurveAdjustmentView.PickMode
     let onColorPick: ((CGPoint, CGSize) -> Void)?
-    let onMouseMove: ((CGPoint, CGSize) -> Void)?
+    let onMouseMove: ((ImageHoverSample?) -> Void)?
 
     func makeNSView(context _: Context) -> ClickableNSImageView {
         let view = ClickableNSImageView()
         view.imageView.image = image
         view.currentScale = scale
         view.onScrollWheel = onScrollWheel
+        view.pickMode = pickMode
         view.onColorPick = onColorPick
         view.onMouseMove = onMouseMove
         view.onDragChanged = { translation, currentScale in
@@ -270,6 +441,7 @@ struct ClickableImageRepresentable: NSViewRepresentable {
 
         // 回调函数总是更新
         nsView.onScrollWheel = onScrollWheel
+        nsView.pickMode = pickMode
         nsView.onColorPick = onColorPick
         nsView.onMouseMove = onMouseMove
 
@@ -297,12 +469,113 @@ struct ClickableImageRepresentable: NSViewRepresentable {
 }
 
 class ClickableNSImageView: NSView {
+    private enum CursorFactory {
+        static let whiteBalance = makeEyedropperCursor()
+
+        static func pointPicker(for mode: CurveAdjustmentView.PickMode) -> NSCursor {
+            switch mode {
+            case .black:
+                return makePointCursor(fillColor: .black, strokeColor: .white)
+            case .gray:
+                return makePointCursor(fillColor: NSColor(calibratedWhite: 0.65, alpha: 1), strokeColor: .white)
+            case .white:
+                return makePointCursor(fillColor: .white, strokeColor: NSColor(calibratedWhite: 0.2, alpha: 1))
+            case .whiteBalance:
+                return whiteBalance
+            case .none:
+                return .arrow
+            }
+        }
+
+        private static func makeEyedropperCursor() -> NSCursor {
+            let size = NSSize(width: 28, height: 28)
+            let image = NSImage(size: size, flipped: false) { rect in
+                NSColor.clear.setFill()
+                rect.fill()
+
+                let badgeRect = NSRect(x: 3, y: 3, width: 22, height: 22)
+                NSColor(calibratedWhite: 0.08, alpha: 0.9).setFill()
+                NSBezierPath(ovalIn: badgeRect).fill()
+
+                if
+                    let symbol = NSImage(
+                        systemSymbolName: "eyedropper",
+                        accessibilityDescription: "White balance picker"
+                    )?
+                    .withSymbolConfiguration(.init(pointSize: 15, weight: .semibold))
+                {
+                    symbol.isTemplate = false
+                    let symbolRect = NSRect(x: 6, y: 5, width: 16, height: 16)
+                    NSColor.white.set()
+                    symbol.draw(in: symbolRect)
+                } else {
+                    let path = NSBezierPath()
+                    path.move(to: CGPoint(x: 9, y: 9))
+                    path.line(to: CGPoint(x: 20, y: 20))
+                    path.lineWidth = 2.4
+                    NSColor.white.setStroke()
+                    path.stroke()
+                }
+
+                let focusRect = NSRect(x: 18, y: 4, width: 6, height: 6)
+                NSColor(calibratedRed: 0.38, green: 0.72, blue: 1.0, alpha: 1).setFill()
+                NSBezierPath(ovalIn: focusRect).fill()
+
+                return true
+            }
+
+            return NSCursor(image: image, hotSpot: NSPoint(x: 6, y: 22))
+        }
+
+        private static func makePointCursor(fillColor: NSColor, strokeColor: NSColor) -> NSCursor {
+            let size = NSSize(width: 24, height: 24)
+            let image = NSImage(size: size, flipped: false) { rect in
+                NSColor.clear.setFill()
+                rect.fill()
+
+                let center = CGPoint(x: rect.midX, y: rect.midY)
+                let ringPath = NSBezierPath()
+                ringPath.lineWidth = 1.25
+
+                ringPath.move(to: CGPoint(x: center.x, y: 2))
+                ringPath.line(to: CGPoint(x: center.x, y: 8))
+                ringPath.move(to: CGPoint(x: center.x, y: rect.maxY - 2))
+                ringPath.line(to: CGPoint(x: center.x, y: rect.maxY - 8))
+                ringPath.move(to: CGPoint(x: 2, y: center.y))
+                ringPath.line(to: CGPoint(x: 8, y: center.y))
+                ringPath.move(to: CGPoint(x: rect.maxX - 2, y: center.y))
+                ringPath.line(to: CGPoint(x: rect.maxX - 8, y: center.y))
+                strokeColor.setStroke()
+                ringPath.stroke()
+
+                let outer = NSBezierPath(ovalIn: NSRect(x: 6, y: 6, width: 12, height: 12))
+                outer.lineWidth = 1.5
+                strokeColor.setStroke()
+                outer.stroke()
+
+                let inner = NSBezierPath(ovalIn: NSRect(x: 9, y: 9, width: 6, height: 6))
+                fillColor.setFill()
+                inner.fill()
+
+                return true
+            }
+
+            return NSCursor(image: image, hotSpot: NSPoint(x: 12, y: 12))
+        }
+    }
+
     let imageView = NSImageView()
     var onScrollWheel: ((CGFloat, CGPoint) -> Void)?
     var onDragChanged: ((CGSize, CGFloat) -> Void)?
     var onDragEnded: (() -> Void)?
     var onColorPick: ((CGPoint, CGSize) -> Void)?
-    var onMouseMove: ((CGPoint, CGSize) -> Void)?
+    var onMouseMove: ((ImageHoverSample?) -> Void)?
+    var pickMode: CurveAdjustmentView.PickMode = .none {
+        didSet {
+            guard pickMode != oldValue else { return }
+            refreshCursor()
+        }
+    }
 
     var currentScale: CGFloat = 1.0
     var currentOffset: CGSize = .zero
@@ -310,7 +583,10 @@ class ClickableNSImageView: NSView {
     private var isDragging = false
     private var dragStartPoint: NSPoint = .zero
     private var isSpaceKeyPressed = false
+    private var isMouseInside = false
+    private var isHoveringImageContent = false
     private var trackingArea: NSTrackingArea?
+    private var eventMonitors: [Any] = []
 
     // 将视图坐标转换为图片像素坐标
     // 新方法：直接使用逆 transform
@@ -371,6 +647,14 @@ class ClickableNSImageView: NSView {
         setupView()
     }
 
+    deinit {
+        MainActor.assumeIsolated {
+            for monitor in eventMonitors {
+                NSEvent.removeMonitor(monitor)
+            }
+        }
+    }
+
     private func setupView() {
         wantsLayer = true
 
@@ -381,23 +665,34 @@ class ClickableNSImageView: NSView {
         addSubview(imageView)
 
         // 监听全局键盘事件
-        NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+        let flagsMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
             self?.handleFlagsChanged(event)
             return event
         }
+        if let flagsMonitor {
+            eventMonitors.append(flagsMonitor)
+        }
 
-        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+        let keyDownMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             if event.keyCode == 49 { // 空格键
                 self?.isSpaceKeyPressed = true
+                self?.refreshCursor()
             }
             return event
         }
+        if let keyDownMonitor {
+            eventMonitors.append(keyDownMonitor)
+        }
 
-        NSEvent.addLocalMonitorForEvents(matching: .keyUp) { [weak self] event in
+        let keyUpMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyUp) { [weak self] event in
             if event.keyCode == 49 { // 空格键
                 self?.isSpaceKeyPressed = false
+                self?.refreshCursor()
             }
             return event
+        }
+        if let keyUpMonitor {
+            eventMonitors.append(keyUpMonitor)
         }
     }
 
@@ -416,11 +711,29 @@ class ClickableNSImageView: NSView {
         if let trackingArea {
             removeTrackingArea(trackingArea)
         }
-        let options: NSTrackingArea.Options = [.mouseMoved, .activeInKeyWindow, .inVisibleRect]
+        let options: NSTrackingArea.Options = [
+            .mouseMoved,
+            .mouseEnteredAndExited,
+            .cursorUpdate,
+            .activeInKeyWindow,
+            .inVisibleRect,
+        ]
         trackingArea = NSTrackingArea(rect: bounds, options: options, owner: self, userInfo: nil)
         if let trackingArea {
             addTrackingArea(trackingArea)
         }
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isMouseInside = true
+        refreshCursor()
+        super.mouseEntered(with: event)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isMouseInside = false
+        isHoveringImageContent = false
+        super.mouseExited(with: event)
     }
 
     override func mouseMoved(with event: NSEvent) {
@@ -429,9 +742,23 @@ class ClickableNSImageView: NSView {
         let locationInView = convert(event.locationInWindow, from: nil)
 
         if let pixelPoint = viewPointToImagePixel(locationInView) {
-            onMouseMove?(pixelPoint, image.size)
+            if !isHoveringImageContent {
+                isHoveringImageContent = true
+                refreshCursor()
+            }
+            onMouseMove?(
+                ImageHoverSample(
+                    viewLocation: locationInView,
+                    pixelPoint: pixelPoint,
+                    imageSize: image.size
+                )
+            )
         } else {
-            onMouseMove?(CGPoint(x: -1, y: -1), image.size)
+            if isHoveringImageContent {
+                isHoveringImageContent = false
+                refreshCursor()
+            }
+            onMouseMove?(nil)
         }
     }
 
@@ -449,7 +776,7 @@ class ClickableNSImageView: NSView {
             print("  空格键被按住，进入拖拽模式")
             isDragging = true
             dragStartPoint = convert(event.locationInWindow, from: nil)
-            NSCursor.closedHand.push()
+            NSCursor.closedHand.set()
             return
         }
 
@@ -472,6 +799,7 @@ class ClickableNSImageView: NSView {
         print("  没有 onColorPick，进入拖拽模式")
         isDragging = true
         dragStartPoint = convert(event.locationInWindow, from: nil)
+        NSCursor.closedHand.set()
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -492,22 +820,138 @@ class ClickableNSImageView: NSView {
             onDragEnded?()
             dragStartPoint = .zero
 
-            // 恢复光标
-            if isSpaceKeyPressed {
-                NSCursor.pop()
-            }
+            refreshCursor()
         }
     }
 
     override func cursorUpdate(with event: NSEvent) {
-        if isSpaceKeyPressed {
-            NSCursor.openHand.set()
-        } else {
-            super.cursorUpdate(with: event)
-        }
+        super.cursorUpdate(with: event)
+        currentCursor().set()
     }
 
     override func resetCursorRects() {
-        addCursorRect(bounds, cursor: isSpaceKeyPressed ? .openHand : .arrow)
+        addCursorRect(bounds, cursor: currentCursor())
+    }
+
+    private func currentCursor() -> NSCursor {
+        if isDragging {
+            return .closedHand
+        }
+
+        if isSpaceKeyPressed {
+            return .openHand
+        }
+
+        guard onColorPick != nil else {
+            return .arrow
+        }
+
+        guard isHoveringImageContent else {
+            return .arrow
+        }
+
+        return CursorFactory.pointPicker(for: pickMode)
+    }
+
+    private func refreshCursor() {
+        guard window != nil else { return }
+        window?.invalidateCursorRects(for: self)
+        if isMouseInside {
+            currentCursor().set()
+        }
+    }
+}
+
+private struct WhiteBalanceLoupeOverlay: View {
+    let image: NSImage
+    let pixelInfo: PixelInfo?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "eyedropper")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(.white)
+
+                Text("白平衡")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(.white)
+            }
+
+            ZStack {
+                Image(nsImage: image)
+                    .resizable()
+                    .interpolation(.none)
+                    .frame(width: 92, height: 92)
+                    .clipped()
+
+                Rectangle()
+                    .stroke(Color.white.opacity(0.9), lineWidth: 1.5)
+                    .frame(width: 14, height: 14)
+
+                Path { path in
+                    path.move(to: CGPoint(x: 46, y: 0))
+                    path.addLine(to: CGPoint(x: 46, y: 39))
+                    path.move(to: CGPoint(x: 46, y: 53))
+                    path.addLine(to: CGPoint(x: 46, y: 92))
+                    path.move(to: CGPoint(x: 0, y: 46))
+                    path.addLine(to: CGPoint(x: 39, y: 46))
+                    path.move(to: CGPoint(x: 53, y: 46))
+                    path.addLine(to: CGPoint(x: 92, y: 46))
+                }
+                .stroke(Color.white.opacity(0.8), lineWidth: 1)
+            }
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(Color.white.opacity(0.18), lineWidth: 1)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+
+            HStack(spacing: 6) {
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(sampleColor)
+                    .frame(width: 18, height: 18)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 4)
+                            .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                    )
+
+                Text(pixelInfo.map { "RGB \(formatRGB($0.gammaRGB))" } ?? "RGB ---")
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .foregroundColor(.white.opacity(0.92))
+                    .lineLimit(1)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .frame(width: 128, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color.black.opacity(0.82))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(Color.white.opacity(0.14), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.28), radius: 14, y: 6)
+    }
+
+    private var sampleColor: Color {
+        guard let pixelInfo else {
+            return Color.clear
+        }
+
+        return Color(
+            red: pixelInfo.gammaRGB.r,
+            green: pixelInfo.gammaRGB.g,
+            blue: pixelInfo.gammaRGB.b
+        )
+    }
+
+    private func formatRGB(_ value: (r: Double, g: Double, b: Double)) -> String {
+        let r = Int((value.r * 255).rounded())
+        let g = Int((value.g * 255).rounded())
+        let b = Int((value.b * 255).rounded())
+        return "\(r),\(g),\(b)"
     }
 }

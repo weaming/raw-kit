@@ -9,11 +9,11 @@ actor CIContextManager {
 
     // 主渲染 Context - 用于图像处理和渲染
     // CIContext 本身是线程安全的，可以安全地跨隔离域访问
-    nonisolated(unsafe) private let renderContext: CIContext
+    private let renderContext: CIContext
 
     // 直方图计算 Context - 低优先级，无缓存
     // CIContext 本身是线程安全的，可以安全地跨隔离域访问
-    nonisolated(unsafe) private let histogramContext: CIContext
+    private let histogramContext: CIContext
 
     private init() {
         // 创建主渲染 Context

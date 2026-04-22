@@ -10,6 +10,16 @@ class ImageProcessor {
         qos: .userInteractive
     )
 
+    private struct LUTCacheKey: Hashable {
+        let path: String
+        let modificationTime: TimeInterval
+        let fileSize: Int64
+    }
+
+    private static var lutCache: [LUTCacheKey: (data: Data, size: Int)] = [:]
+    private static var lutCacheOrder: [LUTCacheKey] = []
+    private static let lutCacheLimit = 16
+
     // 使用 CIContextManager 替代直接创建 context
     // CIContext 本身是线程安全的，通过 Manager 的 nonisolated getter 访问
     nonisolated private static var ciContext: CIContext {
@@ -403,25 +413,13 @@ class ImageProcessor {
         }
 
         // OpenCV Gray World 算法（简单直接，不迭代）
-        guard let pixelData = extractPixelData(from: scaledImage) else {
+        guard let averageRGB = calculateAreaAverageRGB(from: scaledImage) else {
             return nil
         }
 
-        // 1. 计算每个通道的平均值
-        var rSum: Double = 0
-        var gSum: Double = 0
-        var bSum: Double = 0
-
-        for pixel in pixelData {
-            rSum += pixel.r
-            gSum += pixel.g
-            bSum += pixel.b
-        }
-
-        let count = Double(pixelData.count)
-        let avgR = rSum / count
-        let avgG = gSum / count
-        let avgB = bSum / count
+        let avgR = averageRGB.red
+        let avgG = averageRGB.green
+        let avgB = averageRGB.blue
 
         // 2. 计算灰色目标（所有通道的平均）
         let gray = (avgR + avgG + avgB) / 3.0
@@ -450,13 +448,49 @@ class ImageProcessor {
         let greenOffset = kg - 1.0
         let tint = -greenOffset * 100
 
-        let finalTemperature = max(2000, min(25000, temperature))
-        let finalTint = max(-150, min(150, tint))
+        let finalTemperature = max(
+            ImageAdjustments.temperatureRange.lowerBound,
+            min(ImageAdjustments.temperatureRange.upperBound, temperature)
+        )
+        let finalTint = max(
+            ImageAdjustments.tintRange.lowerBound,
+            min(ImageAdjustments.tintRange.upperBound, tint)
+        )
 
         print("  归一化增益=(R:\(String(format: "%.4f", normalizedRedGain)), G:1.0000, B:\(String(format: "%.4f", normalizedBlueGain)))")
         print("最终结果: 色温=\(Int(finalTemperature)), 色调=\(Int(finalTint))")
 
         return (finalTemperature, finalTint)
+    }
+
+    private static func calculateAreaAverageRGB(from ciImage: CIImage) -> (red: Double, green: Double, blue: Double)? {
+        let extent = ciImage.extent
+        guard !extent.isEmpty else {
+            return nil
+        }
+
+        guard let averaged = ciImage.applyingFilter(
+            "CIAreaAverage",
+            parameters: [kCIInputExtentKey: CIVector(cgRect: extent)]
+        ) as CIImage? else {
+            return nil
+        }
+
+        var bitmap = [Float](repeating: 0, count: 4)
+        ciContext.render(
+            averaged,
+            toBitmap: &bitmap,
+            rowBytes: 4 * MemoryLayout<Float>.size,
+            bounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+            format: .RGBAf,
+            colorSpace: nil
+        )
+
+        return (
+            red: Double(bitmap[0]),
+            green: Double(bitmap[1]),
+            blue: Double(bitmap[2])
+        )
     }
 
     private static func applyRGBGains(to image: CIImage, r: Double, g: Double, b: Double) -> CIImage {
@@ -648,12 +682,18 @@ class ImageProcessor {
         try? FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
 
         let baseFilename = x3fURL.deletingPathExtension().lastPathComponent
-        let cachedURL = cacheDir.appendingPathComponent("\(baseFilename)_linear.dng")
+        let pathHash = stablePathHash(for: x3fURL)
+        let cachedURL = cacheDir.appendingPathComponent("\(baseFilename)_\(pathHash)_linear.dng")
 
         // 检查缓存
         if FileManager.default.fileExists(atPath: cachedURL.path) {
-            print("ImageProcessor: 使用缓存的线性 sRGB DNG: \(cachedURL.lastPathComponent)")
-            return cachedURL
+            if isConvertedCacheFresh(cacheURL: cachedURL, sourceURL: x3fURL) {
+                print("ImageProcessor: 使用缓存的线性 sRGB DNG: \(cachedURL.lastPathComponent)")
+                return cachedURL
+            } else {
+                try? FileManager.default.removeItem(at: cachedURL)
+                print("ImageProcessor: 缓存已过期，重新转换 X3F")
+            }
         }
 
         print("ImageProcessor: 转换 X3F 为线性 sRGB DNG...")
@@ -725,6 +765,32 @@ class ImageProcessor {
         }
 
         return nil
+    }
+
+    private static func stablePathHash(for url: URL) -> String {
+        var hash: UInt64 = 1_469_598_103_934_665_603
+        for byte in url.standardizedFileURL.path.utf8 {
+            hash ^= UInt64(byte)
+            hash &*= 1_099_511_628_211
+        }
+        return String(hash, radix: 16)
+    }
+
+    private static func isConvertedCacheFresh(cacheURL: URL, sourceURL: URL) -> Bool {
+        guard
+            let cacheValues = try? cacheURL.resourceValues(forKeys: [
+                .contentModificationDateKey,
+                .fileSizeKey,
+            ]),
+            let sourceValues = try? sourceURL.resourceValues(forKeys: [.contentModificationDateKey]),
+            let cacheDate = cacheValues.contentModificationDate,
+            let sourceDate = sourceValues.contentModificationDate,
+            (cacheValues.fileSize ?? 0) > 0
+        else {
+            return false
+        }
+
+        return cacheDate >= sourceDate
     }
 
     private static func loadRawWithFilter(from url: URL) -> CIImage? {
@@ -931,52 +997,28 @@ class ImageProcessor {
             )
         }
 
-        // 优化：将多个色调曲线调整合并为一个 CIToneCurve（减少 GPU 调用）
-        // 检查有多少个基于曲线的调整需要应用
-        let needsExposure = adjustments.exposure != 0.0
-        let needsBrightness = adjustments.brightness != 0.0
-        let needsContrast = adjustments.contrast != 0.0
-        let needsHighlightsShadows = adjustments.highlights != 1.0 || adjustments.shadows != 0.0 ||
+        if adjustments.exposure != 0.0 {
+            result = applyExposure(to: result, value: adjustments.exposure)
+        }
+
+        if adjustments.brightness != 0.0 {
+            result = applyBrightness(to: result, value: adjustments.brightness)
+        }
+
+        if adjustments.contrast != 0.0 {
+            result = applyContrast(to: result, value: adjustments.contrast)
+        }
+
+        if adjustments.highlights != 1.0 || adjustments.shadows != 0.0 ||
             adjustments.whites != 0.0 || adjustments.blacks != 0.0
-
-        let toneCurveAdjustmentsCount = [needsExposure, needsBrightness, needsContrast, needsHighlightsShadows]
-            .filter { $0 }.count
-
-        // 如果有 2 个或更多色调曲线调整，使用合并的曲线（性能优化）
-        if toneCurveAdjustmentsCount >= 2 {
-            result = applyCombinedToneCurve(
+        {
+            result = applyHighlightsShadows(
                 to: result,
-                exposure: adjustments.exposure,
-                brightness: adjustments.brightness,
-                contrast: adjustments.contrast,
                 highlights: adjustments.highlights,
                 shadows: adjustments.shadows,
                 whites: adjustments.whites,
                 blacks: adjustments.blacks
             )
-        } else {
-            // 否则分别应用（保持代码路径简单）
-            if needsExposure {
-                result = applyExposure(to: result, value: adjustments.exposure)
-            }
-
-            if needsBrightness {
-                result = applyBrightness(to: result, value: adjustments.brightness)
-            }
-
-            if needsContrast {
-                result = applyContrast(to: result, value: adjustments.contrast)
-            }
-
-            if needsHighlightsShadows {
-                result = applyHighlightsShadows(
-                    to: result,
-                    highlights: adjustments.highlights,
-                    shadows: adjustments.shadows,
-                    whites: adjustments.whites,
-                    blacks: adjustments.blacks
-                )
-            }
         }
 
         if adjustments.linearExposure != 0.0 {
@@ -1256,177 +1298,6 @@ class ImageProcessor {
         return filter.outputImage ?? image
     }
 
-    // 合并多个色调曲线调整为一个 CIToneCurve（性能优化）
-    // 通过对标准控制点依次应用每个变换，创建一个组合曲线
-    private static func applyCombinedToneCurve(
-        to image: CIImage,
-        exposure: Double,
-        brightness: Double,
-        contrast: Double,
-        highlights: Double,
-        shadows: Double,
-        whites: Double,
-        blacks: Double
-    ) -> CIImage {
-        // 对 5 个标准控制点 (0, 0.25, 0.5, 0.75, 1.0) 依次应用所有变换
-        let controlPoints: [Double] = [0.0, 0.25, 0.5, 0.75, 1.0]
-        var transformedPoints: [Double] = controlPoints
-
-        // 1. 应用 Exposure 变换
-        if exposure != 0.0 {
-            transformedPoints = transformedPoints.map { y in
-                applyExposureCurve(value: y, strength: exposure * 0.5)
-            }
-        }
-
-        // 2. 应用 Brightness 变换
-        if brightness != 0.0 {
-            transformedPoints = transformedPoints.map { y in
-                applyBrightnessCurve(value: y, strength: brightness * 0.3)
-            }
-        }
-
-        // 3. 应用 Contrast 变换
-        if contrast != 0.0 {
-            transformedPoints = transformedPoints.map { y in
-                applyContrastCurve(value: y, strength: contrast)
-            }
-        }
-
-        // 4. 应用 Highlights/Shadows/Whites/Blacks 变换
-        if highlights != 1.0 || shadows != 0.0 || whites != 0.0 || blacks != 0.0 {
-            transformedPoints = transformedPoints.enumerated().map { index, y in
-                let x = controlPoints[index]
-                return applyHighlightsShadowsCurve(
-                    x: x,
-                    y: y,
-                    highlights: highlights,
-                    shadows: shadows,
-                    whites: whites,
-                    blacks: blacks
-                )
-            }
-        }
-
-        // 创建合并后的 CIToneCurve
-        guard let filter = CIFilter(name: "CIToneCurve") else { return image }
-        filter.setValue(image, forKey: kCIInputImageKey)
-
-        // 设置变换后的控制点，确保在 [0, 1] 范围内
-        for (index, y) in transformedPoints.enumerated() {
-            let x = controlPoints[index]
-            let clampedY = max(0, min(1, y))
-            filter.setValue(CIVector(x: x, y: clampedY), forKey: "inputPoint\(index)")
-        }
-
-        return filter.outputImage ?? image
-    }
-
-    // 辅助函数：应用 Exposure 曲线变换
-    private static func applyExposureCurve(value: Double, strength: Double) -> Double {
-        // 使用与 applyExposure 相同的算法
-        let black = 0.0 + strength * 0.2
-        let shadow = 0.25 + strength * 0.4
-        let mid = 0.5 + strength * 0.6
-        let highlight = 0.75 + strength * 0.4
-        let white = 1.0 + strength * 0.2
-
-        // 三次贝塞尔插值
-        return cubicInterpolate(
-            value: value,
-            points: [(0, black), (0.25, shadow), (0.5, mid), (0.75, highlight), (1.0, white)]
-        )
-    }
-
-    // 辅助函数：应用 Brightness 曲线变换
-    private static func applyBrightnessCurve(value: Double, strength: Double) -> Double {
-        // 使用与 applyBrightness 相同的算法
-        let black = 0.0 + strength * 0.1
-        let shadow = 0.25 + strength * 0.7
-        let mid = 0.5 + strength
-        let highlight = 0.75 + strength * 0.7
-        let white = 1.0 + strength * 0.1
-
-        return cubicInterpolate(
-            value: value,
-            points: [(0, black), (0.25, shadow), (0.5, mid), (0.75, highlight), (1.0, white)]
-        )
-    }
-
-    // 辅助函数：应用 Contrast 曲线变换
-    private static func applyContrastCurve(value: Double, strength: Double) -> Double {
-        // 使用与 applyContrast 相同的算法
-        let darkPoint: Double
-        let lightPoint: Double
-
-        if strength > 0 {
-            let offset = strength * 0.125
-            darkPoint = 0.25 - offset
-            lightPoint = 0.75 + offset
-        } else {
-            let offset = abs(strength) * 0.125
-            darkPoint = 0.25 + offset
-            lightPoint = 0.75 - offset
-        }
-
-        return cubicInterpolate(
-            value: value,
-            points: [(0, 0), (0.25, darkPoint), (0.5, 0.5), (0.75, lightPoint), (1.0, 1.0)]
-        )
-    }
-
-    // 辅助函数：应用 Highlights/Shadows/Whites/Blacks 曲线变换
-    private static func applyHighlightsShadowsCurve(
-        x: Double,
-        y: Double,
-        highlights: Double,
-        shadows: Double,
-        whites: Double,
-        blacks: Double
-    ) -> Double {
-        // 对于这个变换，我们需要知道原始的 x 位置
-        // 因为 Highlights/Shadows 是基于输入位置的加权调整
-
-        // 计算原始曲线的控制点
-        let blackPoint = blacks * 0.12
-        let shadowPoint = 0.25 + shadows * 0.2 + blacks * 0.08
-        let midPoint = 0.5 + (shadows * 0.06) + (highlights - 1.0) * 0.06
-        let highlightPoint = 0.75 + (highlights - 1.0) * 0.18 + whites * 0.12
-        let whitePoint = 1.0 + whites * 0.15
-
-        // 我们的输入是 y（已经过前面变换）
-        // 简化：假设单调性，使用 y 作为近似输入
-        let adjustedY = cubicInterpolate(
-            value: y,
-            points: [(0, blackPoint), (0.25, shadowPoint), (0.5, midPoint), (0.75, highlightPoint), (1.0, whitePoint)]
-        )
-
-        return adjustedY
-    }
-
-    // 三次贝塞尔插值（近似 CIToneCurve 的行为）
-    private static func cubicInterpolate(value: Double, points: [(x: Double, y: Double)]) -> Double {
-        // 简化实现：线性分段插值
-        // 找到 value 所在的区间
-        for i in 0 ..< points.count - 1 {
-            let (x1, y1) = points[i]
-            let (x2, y2) = points[i + 1]
-
-            if value >= x1 && value <= x2 {
-                // 线性插值
-                let t = (value - x1) / (x2 - x1)
-                return y1 + t * (y2 - y1)
-            }
-        }
-
-        // 超出范围，返回边界值
-        if value < points.first!.x {
-            return points.first!.y
-        } else {
-            return points.last!.y
-        }
-    }
-
     private static func applyWhiteBalance(
         to image: CIImage,
         temperature: Double,
@@ -1555,53 +1426,27 @@ class ImageProcessor {
         alpha: Double,
         lutColorSpace: String
     ) -> CIImage {
-        let fileExtension = lutURL.pathExtension.lowercased()
-
-        let cubeData: (data: Data, size: Int)? = switch fileExtension {
-        case "cube":
-            parseCubeLUT(from: lutURL)
-        case "3dl":
-            parse3DLLUT(from: lutURL)
-        case "lut":
-            parseBinaryLUT(from: lutURL)
-        default:
-            parseCubeLUT(from: lutURL)
-        }
-
-        guard let (data, size) = cubeData else {
+        guard let (data, size) = cachedLUTData(from: lutURL) else {
             return image
         }
 
-        // 如果是 sRGB 色彩空间，直接应用 LUT，无需转换
-        if lutColorSpace == "sRGB" {
-            guard let filter = CIFilter(name: "CIColorCube") else {
-                return image
-            }
-            filter.setValue(image, forKey: kCIInputImageKey)
-            filter.setValue(size, forKey: "inputCubeDimension")
-            filter.setValue(data, forKey: "inputCubeData")
-            guard let lutApplied = filter.outputImage else {
-                return image
-            }
-            return applyLUTAlpha(original: image, lutApplied: lutApplied, alpha: alpha)
+        guard let lutInputColorSpace = getLUTColorSpace(from: lutColorSpace) else {
+            print("ImageProcessor: ⚠️ 未知 LUT 输入色彩空间: \(lutColorSpace)，跳过 LUT")
+            return image
         }
 
-        // 对于非 sRGB 色彩空间，需要进行转换
-        guard let targetColorSpace = getLUTColorSpace(from: lutColorSpace) else {
-            guard let filter = CIFilter(name: "CIColorCube") else {
-                return image
-            }
-            filter.setValue(image, forKey: kCIInputImageKey)
-            filter.setValue(size, forKey: "inputCubeDimension")
-            filter.setValue(data, forKey: "inputCubeData")
-            guard let lutApplied = filter.outputImage else {
-                return image
-            }
-            return applyLUTAlpha(original: image, lutApplied: lutApplied, alpha: alpha)
+        guard let workingColorSpace = lutWorkingColorSpace() else {
+            print("ImageProcessor: ⚠️ 无法获取 LUT 工作色彩空间，跳过 LUT")
+            return image
         }
 
-        // 转换到 LUT 色彩空间
-        let imageInLUTSpace = convertColorSpace(image, to: targetColorSpace)
+        // 统一的数据流：
+        // 当前渲染工作空间 -> LUT 标注输入空间 -> 当前渲染工作空间
+        let imageInLUTSpace = convertColorSpace(
+            image,
+            from: workingColorSpace,
+            to: lutInputColorSpace
+        )
 
         guard let filter = CIFilter(name: "CIColorCube") else {
             return image
@@ -1615,13 +1460,65 @@ class ImageProcessor {
             return image
         }
 
-        // 转换回 sRGB 工作空间
-        guard let sRGBColorSpace = CGColorSpace(name: CGColorSpace.sRGB) else {
-            return lutAppliedInLUTSpace
-        }
-        let lutApplied = convertColorSpace(lutAppliedInLUTSpace, to: sRGBColorSpace)
+        let lutApplied = convertColorSpace(
+            lutAppliedInLUTSpace,
+            from: lutInputColorSpace,
+            to: workingColorSpace
+        )
 
         return applyLUTAlpha(original: image, lutApplied: lutApplied, alpha: alpha)
+    }
+
+    private static func cachedLUTData(from url: URL) -> (data: Data, size: Int)? {
+        guard let key = lutCacheKey(for: url) else {
+            return parseLUTData(from: url)
+        }
+
+        if let cached = lutCache[key] {
+            return cached
+        }
+
+        guard let parsed = parseLUTData(from: url) else {
+            return nil
+        }
+
+        lutCache[key] = parsed
+        lutCacheOrder.append(key)
+
+        while lutCacheOrder.count > lutCacheLimit {
+            let oldestKey = lutCacheOrder.removeFirst()
+            lutCache.removeValue(forKey: oldestKey)
+        }
+
+        return parsed
+    }
+
+    private static func lutCacheKey(for url: URL) -> LUTCacheKey? {
+        let resourceValues = try? url.resourceValues(forKeys: [
+            .contentModificationDateKey,
+            .fileSizeKey,
+        ])
+
+        return LUTCacheKey(
+            path: url.standardizedFileURL.path,
+            modificationTime: resourceValues?.contentModificationDate?.timeIntervalSince1970 ?? 0,
+            fileSize: Int64(resourceValues?.fileSize ?? 0)
+        )
+    }
+
+    private static func parseLUTData(from url: URL) -> (data: Data, size: Int)? {
+        let fileExtension = url.pathExtension.lowercased()
+
+        return switch fileExtension {
+        case "cube":
+            parseCubeLUT(from: url)
+        case "3dl":
+            parse3DLLUT(from: url)
+        case "lut":
+            parseBinaryLUT(from: url)
+        default:
+            parseCubeLUT(from: url)
+        }
     }
 
     // 应用LUT的alpha混合
@@ -1717,7 +1614,7 @@ class ImageProcessor {
         }
 
         let lines = lutString.components(separatedBy: .newlines)
-        var floatData: [Float] = []
+        var rawTriples: [(Float, Float, Float)] = []
         var meshSize: Int?
 
         // 查找 Mesh 行
@@ -1742,15 +1639,24 @@ class ImageProcessor {
 
             let values = trimmed.components(separatedBy: .whitespaces).compactMap { Float($0) }
             if values.count == 3 {
-                // .3dl 格式值范围是 0-1023 或 0-4095，需要归一化
-                let maxValue: Float = values.max() ?? 1.0
-                let scale = maxValue > 10.0 ? maxValue : 1.0
-
-                floatData.append(values[0] / scale)
-                floatData.append(values[1] / scale)
-                floatData.append(values[2] / scale)
-                floatData.append(1.0)
+                rawTriples.append((values[0], values[1], values[2]))
             }
+        }
+
+        // .3dl 格式值范围常见为 0-1023 或 0-4095。必须用全局范围归一化，
+        // 不能按每一行单独归一化，否则会破坏 LUT 的色彩关系。
+        let maxValue = rawTriples
+            .map { max($0.0, max($0.1, $0.2)) }
+            .max() ?? 1.0
+        let scale = maxValue > 1.0 ? maxValue : 1.0
+
+        var floatData: [Float] = []
+        floatData.reserveCapacity(rawTriples.count * 4)
+        for values in rawTriples {
+            floatData.append(values.0 / scale)
+            floatData.append(values.1 / scale)
+            floatData.append(values.2 / scale)
+            floatData.append(1.0)
         }
 
         let expectedCount = size * size * size * 4
@@ -1869,20 +1775,36 @@ class ImageProcessor {
         case "Rec.2020":
             CGColorSpace(name: CGColorSpace.itur_2020)
         default:
-            CGColorSpace(name: CGColorSpace.sRGB)
+            nil
         }
     }
 
-    // 将图像转换到目标色彩空间
+    private static func lutWorkingColorSpace() -> CGColorSpace? {
+        if let extendedLinearSRGB = CGColorSpace(name: CGColorSpace.extendedLinearSRGB) {
+            return extendedLinearSRGB
+        }
+
+        if let linearSRGB = CGColorSpace(name: CGColorSpace.linearSRGB) {
+            return linearSRGB
+        }
+
+        return CGColorSpace(name: CGColorSpace.sRGB)
+    }
+
+    // 将图像从源色彩空间显式转换到目标色彩空间
     private static func convertColorSpace(
         _ image: CIImage,
+        from sourceColorSpace: CGColorSpace,
         to targetColorSpace: CGColorSpace
     ) -> CIImage {
-        // 使用 matchedToWorkingSpace 进行色彩空间匹配
-        // 这个方法会保持原始精度，不会强制渲染到8位
+        if sourceColorSpace.name == targetColorSpace.name {
+            return image
+        }
+
+        // 使用 matchedToWorkingSpace 保持高精度，
+        // 显式声明 LUT handoff 的源/目标空间，避免隐式按 sRGB 猜测。
         let convertedImage = image
-            .matchedToWorkingSpace(from: image
-                .colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB)!)!
+            .matchedToWorkingSpace(from: sourceColorSpace)!
             .matchedFromWorkingSpace(to: targetColorSpace)!
 
         return convertedImage
