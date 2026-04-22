@@ -1,5 +1,12 @@
 import SwiftUI
 
+private struct HistogramData: Sendable {
+    let red: [Int]
+    let green: [Int]
+    let blue: [Int]
+    let luminance: [Int]
+}
+
 struct ResizableAdjustmentPanel: View, Equatable {
     @Binding var adjustments: ImageAdjustments
     @Binding var curvePickSamples: CurvePickSamples
@@ -73,7 +80,7 @@ struct AdjustmentPanel: View {
     let previewRevision: Int
     @Binding var whiteBalancePickMode: CurveAdjustmentView.PickMode
     @State private var expandedSections: Set<AdjustmentSection> = [.basic, .color, .detail]
-    @State private var histogram: (red: [Int], green: [Int], blue: [Int])?
+    @State private var histogram: HistogramData?
     @State private var histogramTask: Task<Void, Never>?
 
     var body: some View {
@@ -213,35 +220,22 @@ struct AdjustmentPanel: View {
         CIContextManager.shared.getHistogramContext()
     }
 
-    private nonisolated static func prepareHistogramImage(_ image: CIImage) -> CIImage {
-        image.applyingFilter(
-            "CIColorClamp",
-            parameters: [
-                "inputMinComponents": CIVector(x: 0, y: 0, z: 0, w: 0),
-                "inputMaxComponents": CIVector(x: 1, y: 1, z: 1, w: 1),
-            ]
-        )
+    private nonisolated static func prepareDisplayHistogramImage(_ image: CIImage) -> CIImage {
+        image
+            .applyingFilter("CILinearToSRGBToneCurve")
+            .applyingFilter(
+                "CIColorClamp",
+                parameters: [
+                    "inputMinComponents": CIVector(x: 0, y: 0, z: 0, w: 0),
+                    "inputMaxComponents": CIVector(x: 1, y: 1, z: 1, w: 1),
+                ]
+            )
     }
 
-    private nonisolated static func calculateHistogram(from ciImage: CIImage) -> (
+    private nonisolated static func renderHistogram(from histogramImage: CIImage) -> (
         red: [Int], green: [Int], blue: [Int]
     )? {
-        let extent = ciImage.extent
         let bins = 256
-
-        // 优化：采样尺寸从 2048 降低到 1024（速度提升 4 倍，精度足够）
-        let maxDimension: CGFloat = 1024
-        let scale = min(1.0, maxDimension / max(extent.width, extent.height))
-
-        let scaledImage: CIImage
-        if scale < 1.0 {
-            scaledImage = ciImage.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-            print("直方图计算：图像缩小到 \(String(format: "%.1f", scale * 100))%")
-        } else {
-            scaledImage = ciImage
-        }
-
-        let histogramImage = Self.prepareHistogramImage(scaledImage)
         let scaledExtent = histogramImage.extent
 
         // 创建直方图计算滤镜
@@ -287,6 +281,40 @@ struct AdjustmentPanel: View {
         print("直方图计算完成: R前5个值=\(Array(red.prefix(5))), max=\(red.max() ?? 0)")
 
         return (red: red, green: green, blue: blue)
+    }
+
+    private nonisolated static func calculateHistogram(from ciImage: CIImage) -> HistogramData? {
+        let extent = ciImage.extent
+
+        // 优化：采样尺寸从 2048 降低到 1024（速度提升 4 倍，精度足够）
+        let maxDimension: CGFloat = 1024
+        let scale = min(1.0, maxDimension / max(extent.width, extent.height))
+
+        let scaledImage: CIImage
+        if scale < 1.0 {
+            scaledImage = ciImage.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+            print("直方图计算：图像缩小到 \(String(format: "%.1f", scale * 100))%")
+        } else {
+            scaledImage = ciImage
+        }
+
+        let displayImage = Self.prepareDisplayHistogramImage(scaledImage)
+        let luminanceImage = displayImage.applyingFilter(
+            "CIColorControls",
+            parameters: [kCIInputSaturationKey: 0.0]
+        )
+
+        guard let rgbHistogram = Self.renderHistogram(from: displayImage),
+              let luminanceHistogram = Self.renderHistogram(from: luminanceImage) else {
+            return nil
+        }
+
+        return HistogramData(
+            red: rgbHistogram.red,
+            green: rgbHistogram.green,
+            blue: rgbHistogram.blue,
+            luminance: luminanceHistogram.red
+        )
     }
 }
 
@@ -872,19 +900,16 @@ struct SliderWithDoubleTap: NSViewRepresentable {
 }
 
 // 直方图视图组件
-struct HistogramView: View {
-    let histogram: (red: [Int], green: [Int], blue: [Int])
+private struct HistogramView: View {
+    let histogram: HistogramData
 
     var body: some View {
         GeometryReader { geometry in
             let size = geometry.size
 
-            // 计算综合亮度直方图（使用感知亮度公式）
-            let luminanceHistogram = calculateLuminanceHistogram()
-
             // 找到最大值用于归一化
             let maxValue = max(
-                luminanceHistogram.max() ?? 1,
+                histogram.luminance.max() ?? 1,
                 histogram.red.max() ?? 1,
                 histogram.green.max() ?? 1,
                 histogram.blue.max() ?? 1
@@ -893,7 +918,7 @@ struct HistogramView: View {
             ZStack {
                 // 绘制综合亮度直方图（灰色）
                 drawHistogramBars(
-                    histogram: luminanceHistogram,
+                    histogram: histogram.luminance,
                     maxValue: maxValue,
                     color: Color.white.opacity(0.5),
                     size: size
@@ -920,21 +945,6 @@ struct HistogramView: View {
                 )
             }
         }
-    }
-
-    // 计算亮度直方图
-    private func calculateLuminanceHistogram() -> [Int] {
-        var luminanceHistogram = [Int](repeating: 0, count: 256)
-        for i in 0 ..< 256 {
-            let r = histogram.red[i]
-            let g = histogram.green[i]
-            let b = histogram.blue[i]
-            // 使用感知亮度公式的权重
-            luminanceHistogram[i] = Int(
-                Double(r) * 0.299 + Double(g) * 0.587 + Double(b) * 0.114
-            )
-        }
-        return luminanceHistogram
     }
 
     // 绘制单个通道的直方图柱状图

@@ -524,37 +524,63 @@ struct CurveAdjustmentView: View {
     private func calculateHistogram(from ciImage: CIImage) -> (
         red: [Int], green: [Int], blue: [Int]
     )? {
-        let extent = ciImage.extent
-        let bins = 256
+        let displayImage = prepareDisplayHistogramImage(from: ciImage)
+        return renderHistogram(from: displayImage)
+    }
 
-        // 为了避免内存问题，将大图像缩小到合理尺寸再计算直方图
+    private static var histogramContext: CIContext {
+        CIContextManager.shared.getHistogramContext()
+    }
+
+    private func calculateLuminanceHistogram(from ciImage: CIImage) -> [Int]? {
+        let luminanceImage = prepareDisplayHistogramImage(from: ciImage).applyingFilter(
+            "CIColorControls",
+            parameters: [kCIInputSaturationKey: 0.0]
+        )
+
+        guard let histogram = renderHistogram(from: luminanceImage) else {
+            return nil
+        }
+
+        return histogram.red
+    }
+
+    private func prepareDisplayHistogramImage(from image: CIImage) -> CIImage {
+        let extent = image.extent
         let maxDimension: CGFloat = 2048
         let scale = min(1.0, maxDimension / max(extent.width, extent.height))
 
         let scaledImage: CIImage
         if scale < 1.0 {
-            scaledImage = ciImage.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+            scaledImage = image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
             print("直方图计算：图像缩小到 \(String(format: "%.1f", scale * 100))%")
         } else {
-            scaledImage = ciImage
+            scaledImage = image
         }
 
-        let histogramImage = scaledImage.applyingFilter(
-            "CIColorClamp",
-            parameters: [
-                "inputMinComponents": CIVector(x: 0, y: 0, z: 0, w: 0),
-                "inputMaxComponents": CIVector(x: 1, y: 1, z: 1, w: 1),
-            ]
-        )
-        let scaledExtent = histogramImage.extent
+        return scaledImage
+            .applyingFilter("CILinearToSRGBToneCurve")
+            .applyingFilter(
+                "CIColorClamp",
+                parameters: [
+                    "inputMinComponents": CIVector(x: 0, y: 0, z: 0, w: 0),
+                    "inputMaxComponents": CIVector(x: 1, y: 1, z: 1, w: 1),
+                ]
+            )
+    }
 
-        // 创建直方图计算滤镜
+    private func renderHistogram(from histogramImage: CIImage) -> (
+        red: [Int], green: [Int], blue: [Int]
+    )? {
+        let bins = 256
+        let extent = histogramImage.extent
+
         guard
             let filter = CIFilter(
                 name: "CIAreaHistogram",
                 parameters: [
                     kCIInputImageKey: histogramImage,
-                    kCIInputExtentKey: CIVector(cgRect: scaledExtent),
+                    kCIInputExtentKey: CIVector(cgRect: extent),
                     "inputCount": bins,
                     "inputScale": 1.0,
                 ]
@@ -565,7 +591,6 @@ struct CurveAdjustmentView: View {
             return nil
         }
 
-        // 渲染直方图数据 - CIAreaHistogram 输出的是 256x1 的图像，每个像素是 RGBA 格式
         var bitmap = [Float](repeating: 0, count: bins * 4)
         Self.histogramContext.render(
             outputImage,
@@ -576,13 +601,12 @@ struct CurveAdjustmentView: View {
             colorSpace: nil
         )
 
-        // 提取各通道数据并转换为整数
         var red = [Int](repeating: 0, count: bins)
         var green = [Int](repeating: 0, count: bins)
         var blue = [Int](repeating: 0, count: bins)
 
         for i in 0 ..< bins {
-            red[i] = Int(bitmap[i * 4] * 1000) // 乘以系数以获得可见的数值
+            red[i] = Int(bitmap[i * 4] * 1000)
             green[i] = Int(bitmap[i * 4 + 1] * 1000)
             blue[i] = Int(bitmap[i * 4 + 2] * 1000)
         }
@@ -590,23 +614,6 @@ struct CurveAdjustmentView: View {
         print("直方图计算完成: R前5个值=\(Array(red.prefix(5))), max=\(red.max() ?? 0)")
 
         return (red: red, green: green, blue: blue)
-    }
-
-    private static var histogramContext: CIContext {
-        CIContextManager.shared.getHistogramContext()
-    }
-
-    private func calculateLuminanceHistogram(from ciImage: CIImage) -> [Int]? {
-        guard let histogram = calculateHistogram(
-            from: ciImage.applyingFilter(
-                "CIColorControls",
-                parameters: [kCIInputSaturationKey: 0.0]
-            )
-        ) else {
-            return nil
-        }
-
-        return histogram.red
     }
 
     private func applyAutoStretch(
@@ -624,24 +631,112 @@ struct CurveAdjustmentView: View {
         let whitePoint = min(significantRange.white, percentileWhite)
         let range = whitePoint - blackPoint
 
-        guard range >= 0.08 else { return }
+        guard range >= 0.04 else { return }
 
         curve.reset()
-        _ = curve.addPoint(input: blackPoint, output: 0.0)
+        let outputBlack = 0.01
+        let outputWhite = 0.99
 
-        let shoulderWidth = min(0.12, max(0.04, range * 0.22))
-        let shadowInput = min(blackPoint + shoulderWidth, whitePoint - 0.05)
-        let highlightInput = max(whitePoint - shoulderWidth, shadowInput + 0.05)
-        let midInput = (blackPoint + whitePoint) * 0.5
+        let sampleInputs = deduplicateSamplePoints(
+            [
+                blackPoint * 0.5,
+                blackPoint,
+                blackPoint + range * 0.25,
+                blackPoint + range * 0.5,
+                blackPoint + range * 0.75,
+                whitePoint,
+                whitePoint + (1.0 - whitePoint) * 0.5,
+            ]
+        )
 
-        _ = curve.addPoint(input: shadowInput, output: 0.18)
-        _ = curve.addPoint(input: midInput, output: 0.5)
-        _ = curve.addPoint(input: highlightInput, output: 0.82)
-        _ = curve.addPoint(input: whitePoint, output: 1.0)
+        for displayInput in sampleInputs {
+            let displayOutput = mapAutoStretchDisplayValue(
+                displayInput,
+                blackPoint: blackPoint,
+                whitePoint: whitePoint,
+                outputBlack: outputBlack,
+                outputWhite: outputWhite
+            )
+            _ = curve.addPoint(
+                input: decodeSRGB(displayInput),
+                output: decodeSRGB(displayOutput)
+            )
+        }
 
         print(
-            "自动色阶 [\(curve.channel.rawValue)] (裁剪 \(String(format: "%.3f", clipPercent * 100))%): 有效范围 \(String(format: "%.3f", significantRange.black))-\(String(format: "%.3f", significantRange.white)), 黑点 \(String(format: "%.3f", blackPoint)), 白点 \(String(format: "%.3f", whitePoint))"
+            "自动色阶 [\(curve.channel.rawValue)] (裁剪 \(String(format: "%.3f", clipPercent * 100))%): 显示域范围 \(String(format: "%.3f", blackPoint))-\(String(format: "%.3f", whitePoint)), 输出余量 \(String(format: "%.3f", outputBlack))-\(String(format: "%.3f", outputWhite))"
         )
+    }
+
+    private func deduplicateSamplePoints(_ values: [Double]) -> [Double] {
+        let sorted = values
+            .map { max(0.001, min(0.999, $0)) }
+            .sorted()
+
+        var result: [Double] = []
+        for value in sorted {
+            guard result.last.map({ abs($0 - value) < 0.02 }) != true else { continue }
+            result.append(value)
+        }
+        return result
+    }
+
+    private func mapAutoStretchDisplayValue(
+        _ value: Double,
+        blackPoint: Double,
+        whitePoint: Double,
+        outputBlack: Double,
+        outputWhite: Double
+    ) -> Double {
+        if value <= blackPoint, blackPoint > 0.000_001 {
+            return remap(
+                value,
+                inputStart: 0.0,
+                inputEnd: blackPoint,
+                outputStart: 0.0,
+                outputEnd: outputBlack
+            )
+        }
+
+        if value >= whitePoint, whitePoint < 0.999_999 {
+            return remap(
+                value,
+                inputStart: whitePoint,
+                inputEnd: 1.0,
+                outputStart: outputWhite,
+                outputEnd: 1.0
+            )
+        }
+
+        return remap(
+            value,
+            inputStart: blackPoint,
+            inputEnd: whitePoint,
+            outputStart: outputBlack,
+            outputEnd: outputWhite
+        )
+    }
+
+    private func remap(
+        _ value: Double,
+        inputStart: Double,
+        inputEnd: Double,
+        outputStart: Double,
+        outputEnd: Double
+    ) -> Double {
+        let inputRange = inputEnd - inputStart
+        guard abs(inputRange) > 0.000_001 else { return outputStart }
+
+        let t = (value - inputStart) / inputRange
+        return max(0.0, min(1.0, outputStart + t * (outputEnd - outputStart)))
+    }
+
+    private func decodeSRGB(_ value: Double) -> Double {
+        let clamped = max(0.0, min(1.0, value))
+        if clamped <= 0.04045 {
+            return clamped / 12.92
+        }
+        return pow((clamped + 0.055) / 1.055, 2.4)
     }
 
     private func smoothHistogram(_ histogram: [Int], radius: Int) -> [Int] {
