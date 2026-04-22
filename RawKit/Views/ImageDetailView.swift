@@ -468,57 +468,27 @@ struct ImageDetailView: View {
     }
 
     // 白平衡算法（幂等实现）
-    // 使用 gamma RGB 进行白平衡计算
+    // 基于当前白平衡增益模型反解色温/色调，确保取样点尽可能回到中性灰
     private func adjustWhiteBalance(with pixelInfo: PixelInfo) {
-        let r = pixelInfo.gammaRGB.r
-        let g = pixelInfo.gammaRGB.g
-        let b = pixelInfo.gammaRGB.b
+        let linear = pixelInfo.linearRGB
+        let gamma = pixelInfo.gammaRGB
+        let luminance = 0.2126 * linear.r + 0.7152 * linear.g + 0.0722 * linear.b
 
-        // 计算亮度（使用感知亮度公式）
-        let luminance = 0.299 * r + 0.587 * g + 0.114 * b
-
-        // 如果采样点太暗或太亮，不适合做白平衡
-        if luminance < 0.05 || luminance > 0.95 {
-            print("⚠️ 采样点太暗或太亮，亮度: \(String(format: "%.3f", luminance))")
+        guard let whiteBalance = ImageProcessor.whiteBalanceFromNeutralSample(linearRGB: linear) else {
+            print(
+                "⚠️ 白平衡取色失败，采样点不适合校正: linearRGB=(\(String(format: "%.3f", linear.r)), \(String(format: "%.3f", linear.g)), \(String(format: "%.3f", linear.b)))"
+            )
             return
         }
 
-        // 计算采样点的色温特征（基于 R/B 比例）
-        let rbRatio = r / max(b, 0.001)
-
-        // 将 R/B 比例映射到色温（反向校正）
-        // rbRatio > 1.0（偏红/偏黄）-> 降低色温让画面变冷
-        // rbRatio < 1.0（偏蓝）-> 升高色温让画面变暖
-        let baseTemp = AppConfig.defaultWhitePoint
-        let tempSensitivity = 2000.0
-
-        let logRatio = log(rbRatio)
-        let neutralTemp = baseTemp - (logRatio * tempSensitivity)
-
-        // 计算采样点的色调特征（基于绿色偏差）
-        let expectedGreen = (r + b) / 2.0
-        let greenDiff = g - expectedGreen
-
-        // 将绿色偏差映射到色调（反向校正）
-        // greenDiff > 0（偏绿）-> 添加品红中和（正tint值）
-        // greenDiff < 0（偏品红）-> 添加绿色中和（负tint值）
-        let tintSensitivity = 150.0
-        let neutralTint = (greenDiff / max(luminance, 0.001)) * tintSensitivity
-
         // 设置绝对值（幂等操作）
         var updatedAdjustments = editingState.adjustments
-        updatedAdjustments.temperature = max(2000, min(10000, neutralTemp))
-        updatedAdjustments.tint = max(-100, min(100, neutralTint))
+        updatedAdjustments.temperature = whiteBalance.temperature
+        updatedAdjustments.tint = whiteBalance.tint
         editingState.adjustments = updatedAdjustments
 
         print(
-            "✅ 白平衡取色: GammaRGB(\(String(format: "%.3f", r)), \(String(format: "%.3f", g)), \(String(format: "%.3f", b))) 亮度: \(String(format: "%.3f", luminance))"
-        )
-        print(
-            "  R/B比例: \(String(format: "%.3f", rbRatio)), 对数比例: \(String(format: "%.3f", logRatio))"
-        )
-        print(
-            "  绿色偏差: \(String(format: "%.3f", greenDiff)), 期望绿色: \(String(format: "%.3f", expectedGreen))"
+            "✅ 白平衡取色: gammaRGB(\(String(format: "%.3f", gamma.r)), \(String(format: "%.3f", gamma.g)), \(String(format: "%.3f", gamma.b))) linearRGB(\(String(format: "%.3f", linear.r)), \(String(format: "%.3f", linear.g)), \(String(format: "%.3f", linear.b))) 亮度: \(String(format: "%.3f", luminance))"
         )
         print(
             "  Neutral色温: \(Int(updatedAdjustments.temperature))K, Neutral色调: \(String(format: "%.1f", updatedAdjustments.tint))"
@@ -573,6 +543,7 @@ struct ImageDetailView: View {
                     adjustedCIImage: adjustedCIImage,
                     pickMode: whiteBalancePickMode,
                     onColorPick: whiteBalancePickMode != .none ? handleColorPick : nil,
+                    onCancelPickMode: cancelWhiteBalancePickMode,
                     onFilesDrop: onFilesDrop
                 )
                 .clipped()

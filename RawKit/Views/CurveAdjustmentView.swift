@@ -232,7 +232,7 @@ struct CurveAdjustmentView: View {
     @Binding var pickMode: PickMode
     @Binding var curvePickSamples: CurvePickSamples
     @State private var selectedChannel: CurveAdjustment.Channel = .rgb
-    @State private var autoLevelClipPercent: Double = 0.001
+    @State private var autoLevelClipPercent: Double = 0.05
     @State private var isEditingClipPercent: Bool = false
     @FocusState private var isClipPercentFocused: Bool
 
@@ -614,17 +614,67 @@ struct CurveAdjustmentView: View {
         histogram: [Int],
         clipPercent: Double
     ) {
-        let blackPoint = findBlackPoint(histogram: histogram, clipPercent: clipPercent)
-        let whitePoint = findWhitePoint(histogram: histogram, clipPercent: clipPercent)
+        let smoothedHistogram = smoothHistogram(histogram, radius: 2)
+        guard let significantRange = findSignificantRange(histogram: smoothedHistogram) else { return }
 
-        guard whitePoint - blackPoint >= 0.02 else { return }
+        let percentileBlack = findBlackPoint(histogram: smoothedHistogram, clipPercent: clipPercent)
+        let percentileWhite = findWhitePoint(histogram: smoothedHistogram, clipPercent: clipPercent)
+
+        let blackPoint = max(significantRange.black, percentileBlack)
+        let whitePoint = min(significantRange.white, percentileWhite)
+        let range = whitePoint - blackPoint
+
+        guard range >= 0.08 else { return }
 
         curve.reset()
         _ = curve.addPoint(input: blackPoint, output: 0.0)
+
+        let shoulderWidth = min(0.12, max(0.04, range * 0.22))
+        let shadowInput = min(blackPoint + shoulderWidth, whitePoint - 0.05)
+        let highlightInput = max(whitePoint - shoulderWidth, shadowInput + 0.05)
+        let midInput = (blackPoint + whitePoint) * 0.5
+
+        _ = curve.addPoint(input: shadowInput, output: 0.18)
+        _ = curve.addPoint(input: midInput, output: 0.5)
+        _ = curve.addPoint(input: highlightInput, output: 0.82)
         _ = curve.addPoint(input: whitePoint, output: 1.0)
 
         print(
-            "自动色阶 [\(curve.channel.rawValue)] (裁剪 \(String(format: "%.3f", clipPercent * 100))%): 黑点 \(String(format: "%.3f", blackPoint)), 白点 \(String(format: "%.3f", whitePoint))"
+            "自动色阶 [\(curve.channel.rawValue)] (裁剪 \(String(format: "%.3f", clipPercent * 100))%): 有效范围 \(String(format: "%.3f", significantRange.black))-\(String(format: "%.3f", significantRange.white)), 黑点 \(String(format: "%.3f", blackPoint)), 白点 \(String(format: "%.3f", whitePoint))"
+        )
+    }
+
+    private func smoothHistogram(_ histogram: [Int], radius: Int) -> [Int] {
+        guard radius > 0, histogram.count > 2 else { return histogram }
+
+        return histogram.indices.map { index in
+            let start = max(0, index - radius)
+            let end = min(histogram.count - 1, index + radius)
+            let slice = histogram[start ... end]
+            return slice.reduce(0, +) / slice.count
+        }
+    }
+
+    private func findSignificantRange(histogram: [Int]) -> (black: Double, white: Double)? {
+        let total = histogram.reduce(0, +)
+        let peak = histogram.max() ?? 0
+        guard total > 0, peak > 0 else { return nil }
+
+        let noiseFloor = max(
+            2,
+            Int(Double(total) * 0.0001),
+            Int(Double(peak) * 0.003)
+        )
+
+        guard let leftIndex = histogram.firstIndex(where: { $0 >= noiseFloor }),
+              let rightIndex = histogram.lastIndex(where: { $0 >= noiseFloor }),
+              rightIndex > leftIndex else {
+            return nil
+        }
+
+        return (
+            black: Double(leftIndex) / Double(histogram.count - 1),
+            white: Double(rightIndex) / Double(histogram.count - 1)
         )
     }
 

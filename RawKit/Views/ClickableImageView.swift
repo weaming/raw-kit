@@ -173,6 +173,7 @@ struct ClickableImageView: View {
     let adjustedCIImage: CIImage?
     let pickMode: CurveAdjustmentView.PickMode
     let onColorPick: ((CGPoint, CGSize) -> Void)?
+    let onCancelPickMode: (() -> Void)?
     let onFilesDrop: (([URL]) -> Void)?
 
     @State private var offset: CGSize = .zero
@@ -193,6 +194,7 @@ struct ClickableImageView: View {
                 },
                 pickMode: pickMode,
                 onColorPick: onColorPick,
+                onCancelPickMode: onCancelPickMode,
                 onFilesDrop: onFilesDrop,
                 onMouseMove: { sample in
                     handleMouseMove(sample: sample, geometrySize: geometry.size)
@@ -236,7 +238,14 @@ struct ClickableImageView: View {
             return
         }
 
-        guard let ciImage = adjustedCIImage ?? originalCIImage else {
+        let samplingImage: CIImage?
+        if pickMode == .whiteBalance {
+            samplingImage = originalCIImage ?? adjustedCIImage
+        } else {
+            samplingImage = adjustedCIImage ?? originalCIImage
+        }
+
+        guard let ciImage = samplingImage else {
             currentPixelInfo = nil
             loupeState = nil
             return
@@ -279,7 +288,7 @@ struct ClickableImageView: View {
             point: sample.pixelPoint,
             imageSize: sample.imageSize,
             sampleSpan: 17,
-            outputSize: 104
+            outputSize: WhiteBalanceLoupeOverlay.loupeDisplaySize
         ) else {
             return nil
         }
@@ -294,7 +303,7 @@ struct ClickableImageView: View {
     }
 
     private func loupePosition(for viewLocation: CGPoint, in geometrySize: CGSize) -> CGPoint {
-        let panelSize = CGSize(width: 120, height: 120)
+        let panelSize = WhiteBalanceLoupeOverlay.overlaySize
         let margin: CGFloat = 16
         let cursorOffset = CGSize(width: 22, height: 24)
 
@@ -414,6 +423,7 @@ struct ClickableImageRepresentable: NSViewRepresentable {
     let onScrollWheel: (CGFloat, CGPoint) -> Void
     let pickMode: CurveAdjustmentView.PickMode
     let onColorPick: ((CGPoint, CGSize) -> Void)?
+    let onCancelPickMode: (() -> Void)?
     let onFilesDrop: (([URL]) -> Void)?
     let onMouseMove: ((ImageHoverSample?) -> Void)?
 
@@ -424,6 +434,7 @@ struct ClickableImageRepresentable: NSViewRepresentable {
         view.onScrollWheel = onScrollWheel
         view.pickMode = pickMode
         view.onColorPick = onColorPick
+        view.onCancelPickMode = onCancelPickMode
         view.onFilesDrop = onFilesDrop
         view.onMouseMove = onMouseMove
         view.onDragChanged = { translation, currentScale in
@@ -447,6 +458,7 @@ struct ClickableImageRepresentable: NSViewRepresentable {
         nsView.onScrollWheel = onScrollWheel
         nsView.pickMode = pickMode
         nsView.onColorPick = onColorPick
+        nsView.onCancelPickMode = onCancelPickMode
         nsView.onFilesDrop = onFilesDrop
         nsView.onMouseMove = onMouseMove
 
@@ -574,6 +586,7 @@ class ClickableNSImageView: NSView {
     var onDragChanged: ((CGSize, CGFloat) -> Void)?
     var onDragEnded: (() -> Void)?
     var onColorPick: ((CGPoint, CGSize) -> Void)?
+    var onCancelPickMode: (() -> Void)?
     var onFilesDrop: (([URL]) -> Void)?
     var onMouseMove: ((ImageHoverSample?) -> Void)?
     var pickMode: CurveAdjustmentView.PickMode = .none {
@@ -681,6 +694,10 @@ class ClickableNSImageView: NSView {
         }
 
         let keyDownMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            if event.keyCode == 53, self?.pickMode == .whiteBalance {
+                self?.onCancelPickMode?()
+                return nil
+            }
             if event.keyCode == 49 { // 空格键
                 self?.isSpaceKeyPressed = true
                 self?.refreshCursor()
@@ -894,8 +911,20 @@ class ClickableNSImageView: NSView {
 private struct WhiteBalanceLoupeOverlay: View {
     let image: NSImage
     let pixelInfo: PixelInfo?
-    private let panelSize: CGFloat = 120
-    private let loupeSize: CGFloat = 104
+    static let loupeDisplaySize: CGFloat = 134
+    private static let horizontalInset: CGFloat = 8
+    private static let verticalInset: CGFloat = 6
+    private static let contentSpacing: CGFloat = 4
+    private static let infoHeight: CGFloat = 26
+    static let overlaySize = CGSize(
+        width: loupeDisplaySize + (horizontalInset * 2),
+        height: loupeDisplaySize + infoHeight + contentSpacing + (verticalInset * 2)
+    )
+
+    private let panelWidth: CGFloat = WhiteBalanceLoupeOverlay.overlaySize.width
+    private let panelHeight: CGFloat = WhiteBalanceLoupeOverlay.overlaySize.height
+    private let loupeSize: CGFloat = WhiteBalanceLoupeOverlay.loupeDisplaySize
+    private let infoHeight: CGFloat = WhiteBalanceLoupeOverlay.infoHeight
     private let focusBoxSize: CGFloat = 12
     private let focusBoxLineWidth: CGFloat = 1.25
     private let crosshairLineWidth: CGFloat = 1
@@ -904,63 +933,99 @@ private struct WhiteBalanceLoupeOverlay: View {
 
     var body: some View {
         ZStack(alignment: .topLeading) {
-            ZStack {
-                Image(nsImage: image)
-                    .resizable()
-                    .interpolation(.none)
+            VStack(spacing: WhiteBalanceLoupeOverlay.contentSpacing) {
+                ZStack {
+                    Image(nsImage: image)
+                        .resizable()
+                        .interpolation(.none)
+                        .frame(width: loupeSize, height: loupeSize)
+                        .clipped()
+
+                    Canvas { context, size in
+                        let center = CGPoint(x: size.width / 2, y: size.height / 2)
+                        let boxRect = CGRect(
+                            x: center.x - focusBoxSize / 2,
+                            y: center.y - focusBoxSize / 2,
+                            width: focusBoxSize,
+                            height: focusBoxSize
+                        )
+
+                        var crosshairPath = Path()
+                        crosshairPath.move(to: CGPoint(x: center.x, y: crosshairEdgeInset))
+                        crosshairPath.addLine(
+                            to: CGPoint(x: center.x, y: center.y - crosshairInnerGap)
+                        )
+                        crosshairPath.move(
+                            to: CGPoint(x: center.x, y: center.y + crosshairInnerGap)
+                        )
+                        crosshairPath.addLine(
+                            to: CGPoint(x: center.x, y: size.height - crosshairEdgeInset)
+                        )
+                        crosshairPath.move(to: CGPoint(x: crosshairEdgeInset, y: center.y))
+                        crosshairPath.addLine(
+                            to: CGPoint(x: center.x - crosshairInnerGap, y: center.y)
+                        )
+                        crosshairPath.move(
+                            to: CGPoint(x: center.x + crosshairInnerGap, y: center.y)
+                        )
+                        crosshairPath.addLine(
+                            to: CGPoint(x: size.width - crosshairEdgeInset, y: center.y)
+                        )
+
+                        context.stroke(
+                            crosshairPath,
+                            with: .color(Color.white.opacity(0.8)),
+                            lineWidth: crosshairLineWidth
+                        )
+                        context.stroke(
+                            Path(boxRect),
+                            with: .color(Color.white.opacity(0.9)),
+                            lineWidth: focusBoxLineWidth
+                        )
+                    }
                     .frame(width: loupeSize, height: loupeSize)
-                    .clipped()
-
-                Canvas { context, size in
-                    let center = CGPoint(x: size.width / 2, y: size.height / 2)
-                    let boxRect = CGRect(
-                        x: center.x - focusBoxSize / 2,
-                        y: center.y - focusBoxSize / 2,
-                        width: focusBoxSize,
-                        height: focusBoxSize
-                    )
-
-                    var crosshairPath = Path()
-                    crosshairPath.move(to: CGPoint(x: center.x, y: crosshairEdgeInset))
-                    crosshairPath.addLine(
-                        to: CGPoint(x: center.x, y: center.y - crosshairInnerGap)
-                    )
-                    crosshairPath.move(
-                        to: CGPoint(x: center.x, y: center.y + crosshairInnerGap)
-                    )
-                    crosshairPath.addLine(
-                        to: CGPoint(x: center.x, y: size.height - crosshairEdgeInset)
-                    )
-                    crosshairPath.move(to: CGPoint(x: crosshairEdgeInset, y: center.y))
-                    crosshairPath.addLine(
-                        to: CGPoint(x: center.x - crosshairInnerGap, y: center.y)
-                    )
-                    crosshairPath.move(
-                        to: CGPoint(x: center.x + crosshairInnerGap, y: center.y)
-                    )
-                    crosshairPath.addLine(
-                        to: CGPoint(x: size.width - crosshairEdgeInset, y: center.y)
-                    )
-
-                    context.stroke(
-                        crosshairPath,
-                        with: .color(Color.white.opacity(0.8)),
-                        lineWidth: crosshairLineWidth
-                    )
-                    context.stroke(
-                        Path(boxRect),
-                        with: .color(Color.white.opacity(0.9)),
-                        lineWidth: focusBoxLineWidth
-                    )
                 }
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 8))
                 .frame(width: loupeSize, height: loupeSize)
+
+                HStack(alignment: .center, spacing: 8) {
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(sampleColor)
+                        .frame(width: 16, height: 16)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 4)
+                                .stroke(Color.white.opacity(0.22), lineWidth: 1)
+                        )
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("RGB \(pixelInfo.map { formatRGB($0.gammaRGB) } ?? "---")")
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                            .foregroundColor(.white.opacity(0.96))
+                            .lineLimit(1)
+                            .layoutPriority(1)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+
+                        Text("HEX \(pixelInfo.map { formatHex($0.gammaRGB) } ?? "---")")
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                            .foregroundColor(.white.opacity(0.72))
+                            .lineLimit(1)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                .padding(.horizontal, WhiteBalanceLoupeOverlay.horizontalInset)
+                .frame(
+                    width: panelWidth - (WhiteBalanceLoupeOverlay.horizontalInset * 2),
+                    height: infoHeight,
+                    alignment: .leading
+                )
             }
-            .overlay(
-                RoundedRectangle(cornerRadius: 8)
-                    .stroke(Color.white.opacity(0.18), lineWidth: 1)
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-            .frame(width: panelSize, height: panelSize)
+            .padding(.top, WhiteBalanceLoupeOverlay.verticalInset)
+            .padding(.bottom, WhiteBalanceLoupeOverlay.verticalInset)
+            .frame(width: panelWidth, height: panelHeight)
 
             HStack(spacing: 4) {
                 Image(systemName: "eyedropper")
@@ -979,40 +1044,8 @@ private struct WhiteBalanceLoupeOverlay: View {
             )
             .padding(.top, 8)
             .padding(.leading, 8)
-
-            VStack {
-                Spacer()
-
-                HStack(spacing: 6) {
-                    RoundedRectangle(cornerRadius: 4)
-                        .fill(sampleColor)
-                        .frame(width: 14, height: 14)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 4)
-                                .stroke(Color.white.opacity(0.22), lineWidth: 1)
-                        )
-
-                    Image(systemName: "eyedropper")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundColor(.white.opacity(0.92))
-
-                    Text(pixelInfo.map { formatRGB($0.gammaRGB) } ?? "---")
-                        .font(.system(size: 10, weight: .medium, design: .monospaced))
-                        .foregroundColor(.white.opacity(0.96))
-                        .lineLimit(1)
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 7)
-                .frame(width: panelSize - 12, alignment: .leading)
-                .background(
-                    RoundedRectangle(cornerRadius: 10)
-                        .fill(Color.black.opacity(0.70))
-                )
-                .padding(.bottom, 6)
-            }
-            .frame(width: panelSize, height: panelSize)
         }
-        .frame(width: panelSize, height: panelSize)
+        .frame(width: panelWidth, height: panelHeight)
         .background(
             RoundedRectangle(cornerRadius: 12)
                 .fill(Color.black.opacity(0.82))
@@ -1041,5 +1074,12 @@ private struct WhiteBalanceLoupeOverlay: View {
         let g = Int((value.g * 255).rounded())
         let b = Int((value.b * 255).rounded())
         return "\(r),\(g),\(b)"
+    }
+
+    private func formatHex(_ value: (r: Double, g: Double, b: Double)) -> String {
+        let r = Int((value.r * 255).rounded())
+        let g = Int((value.g * 255).rounded())
+        let b = Int((value.b * 255).rounded())
+        return String(format: "#%02X%02X%02X", r, g, b)
     }
 }

@@ -717,7 +717,7 @@ struct SliderControl: View, Equatable {
                     .font(.body)
                     .foregroundColor(.secondary)
                     .monospacedDigit()
-                    .frame(minWidth: 50, alignment: .trailing)
+                    .frame(minWidth: 60, alignment: .trailing)
             }
 
             HStack(spacing: 8) {

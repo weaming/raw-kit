@@ -63,6 +63,22 @@ class ImageProcessor {
         }
     }
 
+    private struct AutoWhiteBalanceSample {
+        let r: Double
+        let g: Double
+        let b: Double
+        let luminance: Double
+        let maxComponent: Double
+        let chroma: Double
+    }
+
+    private struct AutoWhiteBalanceEstimate {
+        let sample: (r: Double, g: Double, b: Double)
+        let candidateCount: Int
+        let luminanceRange: (lower: Double, upper: Double)
+        let chromaCutoff: Double
+    }
+
     private enum LUTTransferMode: Int {
         case linear = 0
         case sRGB = 1
@@ -737,11 +753,40 @@ class ImageProcessor {
     }
 
     static func calculateAutoWhiteBalance(from ciImage: CIImage) -> (temperature: Double, tint: Double)? {
+        guard let samples = extractAutoWhiteBalanceSamples(from: ciImage, maxDimension: 256),
+              samples.count >= 64 else {
+            return nil
+        }
+
+        let estimate = estimateAutoWhiteBalanceNeutralSample(from: samples)
+            ?? fallbackAutoWhiteBalanceEstimate(from: samples)
+
+        guard let estimate,
+              let whiteBalance = whiteBalanceFromNeutralSample(linearRGB: estimate.sample) else {
+            return nil
+        }
+
+        print(
+            "自动白平衡: 线性域候选 \(estimate.candidateCount)/\(samples.count), 亮度范围 \(String(format: "%.3f", estimate.luminanceRange.lower))-\(String(format: "%.3f", estimate.luminanceRange.upper)), 色差阈值 \(String(format: "%.3f", estimate.chromaCutoff))"
+        )
+        print(
+            "  估计中性色样本=(\(String(format: "%.4f", estimate.sample.r)), \(String(format: "%.4f", estimate.sample.g)), \(String(format: "%.4f", estimate.sample.b)))"
+        )
+        print("  最终结果: 色温=\(Int(whiteBalance.temperature)), 色调=\(String(format: "%.1f", whiteBalance.tint))")
+
+        return whiteBalance
+    }
+
+    private static func extractAutoWhiteBalanceSamples(
+        from ciImage: CIImage,
+        maxDimension: CGFloat
+    ) -> [AutoWhiteBalanceSample]? {
         let extent = ciImage.extent
+        guard !extent.isEmpty else {
+            return nil
+        }
 
-        let maxDimension: CGFloat = 512
         let scale = min(1.0, maxDimension / max(extent.width, extent.height))
-
         let scaledImage: CIImage
         if scale < 1.0 {
             scaledImage = ciImage.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
@@ -749,85 +794,268 @@ class ImageProcessor {
             scaledImage = ciImage
         }
 
-        // OpenCV Gray World 算法（简单直接，不迭代）
-        guard let averageRGB = calculateAreaAverageRGB(from: scaledImage) else {
-            return nil
-        }
+        let scaledExtent = scaledImage.extent.integral
+        let width = max(Int(scaledExtent.width), 1)
+        let height = max(Int(scaledExtent.height), 1)
+        let bytesPerPixel = 4
+        let rowBytes = width * bytesPerPixel * MemoryLayout<Float>.size
+        let totalFloats = width * height * bytesPerPixel
 
-        let avgR = averageRGB.red
-        let avgG = averageRGB.green
-        let avgB = averageRGB.blue
-
-        // 2. 计算灰色目标（所有通道的平均）
-        let gray = (avgR + avgG + avgB) / 3.0
-
-        // 3. 计算增益
-        let kr = gray / max(avgR, 0.001)
-        let kg = gray / max(avgG, 0.001)
-        let kb = gray / max(avgB, 0.001)
-
-        print("OpenCV Gray World: RGB平均=(\(String(format: "%.4f", avgR)), \(String(format: "%.4f", avgG)), \(String(format: "%.4f", avgB)))")
-        print("  灰色目标=\(String(format: "%.4f", gray))")
-        print("  RGB增益=(R:\(String(format: "%.4f", kr)), G:\(String(format: "%.4f", kg)), B:\(String(format: "%.4f", kb)))")
-
-        // 4. 归一化到绿色通道（标准做法）
-        let normalizedRedGain = kr / kg
-        let normalizedBlueGain = kb / kg
-
-        // 5. 转换为色温和色调
-        // 使用蓝/红比例计算色温
-        let colorRatio = normalizedBlueGain / normalizedRedGain
-
-        // 色温映射（经验公式）
-        let temperature = AppConfig.defaultWhitePoint * pow(colorRatio, -0.8)
-
-        // 色调基于绿色通道偏移
-        let greenOffset = kg - 1.0
-        let tint = -greenOffset * 100
-
-        let finalTemperature = max(
-            ImageAdjustments.temperatureRange.lowerBound,
-            min(ImageAdjustments.temperatureRange.upperBound, temperature)
-        )
-        let finalTint = max(
-            ImageAdjustments.tintRange.lowerBound,
-            min(ImageAdjustments.tintRange.upperBound, tint)
+        var pixelData = [Float](repeating: 0, count: totalFloats)
+        let translatedImage = scaledImage.transformed(
+            by: CGAffineTransform(
+                translationX: -scaledExtent.origin.x,
+                y: -scaledExtent.origin.y
+            )
         )
 
-        print("  归一化增益=(R:\(String(format: "%.4f", normalizedRedGain)), G:1.0000, B:\(String(format: "%.4f", normalizedBlueGain)))")
-        print("最终结果: 色温=\(Int(finalTemperature)), 色调=\(Int(finalTint))")
-
-        return (finalTemperature, finalTint)
-    }
-
-    private static func calculateAreaAverageRGB(from ciImage: CIImage) -> (red: Double, green: Double, blue: Double)? {
-        let extent = ciImage.extent
-        guard !extent.isEmpty else {
-            return nil
-        }
-
-        guard let averaged = ciImage.applyingFilter(
-            "CIAreaAverage",
-            parameters: [kCIInputExtentKey: CIVector(cgRect: extent)]
-        ) as CIImage? else {
-            return nil
-        }
-
-        var bitmap = [Float](repeating: 0, count: 4)
         ciContext.render(
-            averaged,
-            toBitmap: &bitmap,
-            rowBytes: 4 * MemoryLayout<Float>.size,
-            bounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+            translatedImage,
+            toBitmap: &pixelData,
+            rowBytes: rowBytes,
+            bounds: CGRect(x: 0, y: 0, width: width, height: height),
             format: .RGBAf,
             colorSpace: nil
         )
 
-        return (
-            red: Double(bitmap[0]),
-            green: Double(bitmap[1]),
-            blue: Double(bitmap[2])
+        var samples: [AutoWhiteBalanceSample] = []
+        samples.reserveCapacity(width * height)
+
+        for pixelIndex in 0 ..< (width * height) {
+            let offset = pixelIndex * bytesPerPixel
+            let alpha = Double(pixelData[offset + 3])
+            guard alpha > 0.01 else { continue }
+
+            let r = max(Double(pixelData[offset]), 0.0)
+            let g = max(Double(pixelData[offset + 1]), 0.0)
+            let b = max(Double(pixelData[offset + 2]), 0.0)
+
+            guard r.isFinite, g.isFinite, b.isFinite else { continue }
+
+            let maxComponent = max(r, max(g, b))
+            guard maxComponent > 0.0005 else { continue }
+
+            let minComponent = min(r, min(g, b))
+            let luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
+            guard luminance.isFinite, luminance > 0.001 else { continue }
+
+            let chroma = (maxComponent - minComponent) / max(maxComponent, 0.000_01)
+            guard chroma.isFinite else { continue }
+
+            samples.append(
+                AutoWhiteBalanceSample(
+                    r: r,
+                    g: g,
+                    b: b,
+                    luminance: luminance,
+                    maxComponent: maxComponent,
+                    chroma: chroma
+                )
+            )
+        }
+
+        return samples.isEmpty ? nil : samples
+    }
+
+    private static func estimateAutoWhiteBalanceNeutralSample(
+        from samples: [AutoWhiteBalanceSample]
+    ) -> AutoWhiteBalanceEstimate? {
+        let sortedLuminance = samples.map(\.luminance).sorted()
+        let sortedHighlights = samples.map(\.maxComponent).sorted()
+
+        let luminanceLower = percentile(sortedLuminance, fraction: 0.12)
+        let luminanceUpper = percentile(sortedLuminance, fraction: 0.98)
+        let highlightLimit = percentile(sortedHighlights, fraction: 0.995)
+
+        let exposureFiltered = samples.filter { sample in
+            sample.luminance >= luminanceLower &&
+                sample.luminance <= luminanceUpper &&
+                sample.maxComponent <= highlightLimit
+        }
+
+        guard exposureFiltered.count >= 32 else {
+            return nil
+        }
+
+        let sortedChroma = exposureFiltered.map(\.chroma).sorted()
+        let strictChromaCutoff = min(
+            0.35,
+            max(0.03, percentile(sortedChroma, fraction: 0.35) * 1.25)
         )
+        let relaxedChromaCutoff = min(
+            0.45,
+            max(strictChromaCutoff, percentile(sortedChroma, fraction: 0.55) * 1.2)
+        )
+
+        var candidateSamples = exposureFiltered.filter { $0.chroma <= strictChromaCutoff }
+        var chromaCutoff = strictChromaCutoff
+
+        let minimumCandidateCount = max(64, exposureFiltered.count / 20)
+        if candidateSamples.count < minimumCandidateCount {
+            chromaCutoff = relaxedChromaCutoff
+            candidateSamples = exposureFiltered.filter { $0.chroma <= relaxedChromaCutoff }
+        }
+
+        if candidateSamples.count < minimumCandidateCount {
+            let targetCount = min(max(minimumCandidateCount, exposureFiltered.count / 6), exposureFiltered.count)
+            candidateSamples = Array(
+                exposureFiltered.sorted { lhs, rhs in
+                    if abs(lhs.chroma - rhs.chroma) > 0.000_01 {
+                        return lhs.chroma < rhs.chroma
+                    }
+                    return lhs.luminance > rhs.luminance
+                }
+                .prefix(targetCount)
+            )
+            chromaCutoff = candidateSamples.last?.chroma ?? chromaCutoff
+        }
+
+        guard let neutralSample = weightedNeutralSample(
+            from: candidateSamples,
+            luminanceRange: (lower: luminanceLower, upper: luminanceUpper),
+            chromaCutoff: chromaCutoff,
+            favorNeutrality: true
+        ) else {
+            return nil
+        }
+
+        return AutoWhiteBalanceEstimate(
+            sample: neutralSample,
+            candidateCount: candidateSamples.count,
+            luminanceRange: (lower: luminanceLower, upper: luminanceUpper),
+            chromaCutoff: chromaCutoff
+        )
+    }
+
+    private static func fallbackAutoWhiteBalanceEstimate(
+        from samples: [AutoWhiteBalanceSample]
+    ) -> AutoWhiteBalanceEstimate? {
+        let sortedLuminance = samples.map(\.luminance).sorted()
+        let luminanceLower = percentile(sortedLuminance, fraction: 0.08)
+        let luminanceUpper = percentile(sortedLuminance, fraction: 0.97)
+
+        let filteredSamples = samples.filter { sample in
+            sample.luminance >= luminanceLower && sample.luminance <= luminanceUpper
+        }
+
+        guard let neutralSample = weightedNeutralSample(
+            from: filteredSamples,
+            luminanceRange: (lower: luminanceLower, upper: luminanceUpper),
+            chromaCutoff: 1.0,
+            favorNeutrality: false
+        ) else {
+            return nil
+        }
+
+        return AutoWhiteBalanceEstimate(
+            sample: neutralSample,
+            candidateCount: filteredSamples.count,
+            luminanceRange: (lower: luminanceLower, upper: luminanceUpper),
+            chromaCutoff: 1.0
+        )
+    }
+
+    private static func weightedNeutralSample(
+        from samples: [AutoWhiteBalanceSample],
+        luminanceRange: (lower: Double, upper: Double),
+        chromaCutoff: Double,
+        favorNeutrality: Bool
+    ) -> (r: Double, g: Double, b: Double)? {
+        guard !samples.isEmpty else {
+            return nil
+        }
+
+        let luminanceSpan = max(luminanceRange.upper - luminanceRange.lower, 0.000_01)
+        let effectiveChromaCutoff = max(chromaCutoff, 0.000_01)
+        var weightedLogR = 0.0
+        var weightedLogG = 0.0
+        var weightedLogB = 0.0
+        var totalWeight = 0.0
+
+        for sample in samples {
+            let normalizedLuminance = min(
+                max((sample.luminance - luminanceRange.lower) / luminanceSpan, 0.0),
+                1.0
+            )
+            let luminanceWeight = 0.35 + (0.65 * sqrt(normalizedLuminance))
+
+            let neutralityWeight: Double
+            if favorNeutrality {
+                let neutrality = max(0.0, 1.0 - (sample.chroma / effectiveChromaCutoff))
+                neutralityWeight = 0.2 + (0.8 * neutrality * neutrality)
+            } else {
+                neutralityWeight = 1.0
+            }
+
+            let weight = luminanceWeight * neutralityWeight
+            guard weight.isFinite, weight > 0 else { continue }
+
+            weightedLogR += weight * log(max(sample.r, 0.000_01))
+            weightedLogG += weight * log(max(sample.g, 0.000_01))
+            weightedLogB += weight * log(max(sample.b, 0.000_01))
+            totalWeight += weight
+        }
+
+        guard totalWeight > 0 else {
+            return nil
+        }
+
+        let rgb = (
+            r: exp(weightedLogR / totalWeight),
+            g: exp(weightedLogG / totalWeight),
+            b: exp(weightedLogB / totalWeight)
+        )
+
+        return normalizedWhiteBalanceSample(from: rgb)
+    }
+
+    private static func normalizedWhiteBalanceSample(
+        from rgb: (r: Double, g: Double, b: Double)
+    ) -> (r: Double, g: Double, b: Double)? {
+        let luminance = 0.2126 * rgb.r + 0.7152 * rgb.g + 0.0722 * rgb.b
+        let maxComponent = max(rgb.r, max(rgb.g, rgb.b))
+        guard luminance.isFinite, luminance > 0, maxComponent.isFinite, maxComponent > 0 else {
+            return nil
+        }
+
+        let targetLuminance = 0.25
+        var scale = targetLuminance / luminance
+        if maxComponent * scale > 0.9 {
+            scale = 0.9 / maxComponent
+        }
+
+        guard scale.isFinite, scale > 0 else {
+            return nil
+        }
+
+        return (
+            r: rgb.r * scale,
+            g: rgb.g * scale,
+            b: rgb.b * scale
+        )
+    }
+
+    private static func percentile(_ sortedValues: [Double], fraction: Double) -> Double {
+        guard let first = sortedValues.first else {
+            return 0.0
+        }
+
+        guard sortedValues.count > 1 else {
+            return first
+        }
+
+        let clampedFraction = min(max(fraction, 0.0), 1.0)
+        let position = clampedFraction * Double(sortedValues.count - 1)
+        let lowerIndex = Int(position.rounded(.down))
+        let upperIndex = Int(position.rounded(.up))
+
+        guard lowerIndex != upperIndex else {
+            return sortedValues[lowerIndex]
+        }
+
+        let interpolation = position - Double(lowerIndex)
+        return sortedValues[lowerIndex] * (1.0 - interpolation) +
+            sortedValues[upperIndex] * interpolation
     }
 
     private static func applyRGBGains(to image: CIImage, r: Double, g: Double, b: Double) -> CIImage {
@@ -1655,6 +1883,49 @@ class ImageProcessor {
         filter.setValue(CIVector(x: 0, y: 0, z: 0, w: 0), forKey: "inputBiasVector")
 
         return filter.outputImage ?? image
+    }
+
+    static func whiteBalanceFromNeutralSample(
+        linearRGB: (r: Double, g: Double, b: Double)
+    ) -> (temperature: Double, tint: Double)? {
+        let r = max(linearRGB.r, 0.000_01)
+        let g = max(linearRGB.g, 0.000_01)
+        let b = max(linearRGB.b, 0.000_01)
+
+        let luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
+        guard luminance > 0.02, max(r, max(g, b)) < 0.99 else {
+            return nil
+        }
+
+        let inverseGains = (r: 1.0 / r, g: 1.0 / g, b: 1.0 / b)
+        let maxGain = max(inverseGains.r, max(inverseGains.g, inverseGains.b))
+        guard maxGain > 0 else { return nil }
+
+        let normalizedGains = (
+            r: inverseGains.r / maxGain,
+            g: inverseGains.g / maxGain,
+            b: inverseGains.b / maxGain
+        )
+
+        let rbRatio = normalizedGains.r / max(normalizedGains.b, 0.000_01)
+        let unclampedTemperature = AppConfig.defaultWhitePoint * pow(rbRatio, 1.0 / 0.6)
+        let temperature = max(
+            ImageAdjustments.temperatureRange.lowerBound,
+            min(ImageAdjustments.temperatureRange.upperBound, unclampedTemperature)
+        )
+
+        let tempRatio = temperature / AppConfig.defaultWhitePoint
+        let tempPower = pow(tempRatio, 0.6)
+        let redBase = tempRatio <= 1.0 ? 1.0 : tempPower
+
+        let greenBase = (normalizedGains.g / max(normalizedGains.r, 0.000_01)) * redBase
+        let unclampedTint = ((1.0 - greenBase) / 0.3) * 100.0
+        let tint = max(
+            ImageAdjustments.tintRange.lowerBound,
+            min(ImageAdjustments.tintRange.upperBound, unclampedTint)
+        )
+
+        return (temperature, tint)
     }
 
     private static func calculateWhiteBalanceGains(

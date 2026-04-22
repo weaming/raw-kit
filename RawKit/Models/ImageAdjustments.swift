@@ -157,7 +157,7 @@ extension ImageAdjustments {
     static let blacksRange: ClosedRange<Double> = -1.0 ... 1.0
     static let clarityRange: ClosedRange<Double> = -1.0 ... 1.0
     static let dehazeRange: ClosedRange<Double> = -1.0 ... 1.0
-    static let temperatureRange: ClosedRange<Double> = 2000.0 ... 10000.0
+    static let temperatureRange: ClosedRange<Double> = 2000.0 ... 25000.0
     static let tintRange: ClosedRange<Double> = -100.0 ... 100.0
     static let vibranceRange: ClosedRange<Double> = -1.0 ... 1.0
     static let sharpnessRange: ClosedRange<Double> = -1.0 ... 2.0
