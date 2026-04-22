@@ -1,7 +1,7 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-// LUT 列表面板
+// LUT list panel
 struct LUTPanel: View, Equatable {
     let onLoadLUT: (URL?) -> Void
     @Binding var lutAlpha: Double
@@ -13,21 +13,24 @@ struct LUTPanel: View, Equatable {
     @State private var showingSaveLUTDialog = false
     @State private var newLUTName = ""
     @State private var isSavingLUT = false
-    @State private var lutColorSpaces: [String: LUTColorSpace] = [:]
+    @State private var lutProfiles: [String: LUTColorProfile] = [:]
 
-    private let colorSpaceStorageKey = "LUTColorSpaces"
+    private let colorProfileStorageKey = "LUTColorProfiles"
+    private let legacyColorSpaceStorageKey = "LUTColorSpaces"
 
     static func == (lhs: LUTPanel, rhs: LUTPanel) -> Bool {
-        // 只在 LUT 相关字段变化时才重绘
         lhs.lutAlpha == rhs.lutAlpha &&
-        lhs.currentLUTURL == rhs.currentLUTURL &&
-        lhs.adjustments.lutColorSpace == rhs.adjustments.lutColorSpace &&
-        lhs.adjustments.hasAdjustments == rhs.adjustments.hasAdjustments
+            lhs.currentLUTURL == rhs.currentLUTURL &&
+            lhs.adjustments.lutColorProfile == rhs.adjustments.lutColorProfile &&
+            lhs.adjustments.hasAdjustments == rhs.adjustments.hasAdjustments
+    }
+
+    private var selectedLUTFile: LUTFile? {
+        lutFiles.first { $0.id == selectedLUT }
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            // 导入 LUT 按钮
             Button(action: importLUT) {
                 HStack {
                     Image(systemName: "square.and.arrow.down")
@@ -39,7 +42,6 @@ struct LUTPanel: View, Equatable {
             .buttonStyle(.bordered)
             .padding(.horizontal, 12)
 
-            // 保存为 LUT 按钮
             Button(action: {
                 showingSaveLUTDialog = true
             }) {
@@ -54,23 +56,26 @@ struct LUTPanel: View, Equatable {
             .padding(.horizontal, 12)
             .disabled(!adjustments.hasAdjustments)
 
-            // LUT 强度滑块（节流由 ImageDetailView 的渲染队列处理）
-            if selectedLUT != nil {
+            if let selectedLUTFile {
                 SimpleSlider(
                     title: "强度",
                     value: $lutAlpha,
-                    range: 0.0...1.0,
+                    range: 0.0 ... 1.0,
                     step: 0.01,
                     valueFormatter: { "\(Int($0 * 100))%" }
                 )
                 .padding(.horizontal, 12)
                 .padding(.vertical, 4)
+
+                LUTProfileEditor(
+                    profile: selectedLUTProfileBinding(for: selectedLUTFile)
+                )
+                .padding(.horizontal, 12)
             }
 
             Divider()
                 .padding(.horizontal, 12)
 
-            // LUT 列表
             if lutFiles.isEmpty {
                 VStack(spacing: 8) {
                     Text("暂无 LUT")
@@ -83,15 +88,13 @@ struct LUTPanel: View, Equatable {
                 }
                 .frame(maxWidth: .infinity, alignment: .center)
                 .padding(.vertical, 20)
-
             } else {
                 ScrollView {
                     VStack(spacing: 4) {
-                        // 无 LUT 选项
                         LUTItemView(
                             name: "无 LUT",
+                            summary: nil,
                             isSelected: selectedLUT == nil,
-                            colorSpace: .constant(.sRGB),
                             onSelect: {
                                 selectedLUT = nil
                                 onLoadLUT(nil)
@@ -102,36 +105,10 @@ struct LUTPanel: View, Equatable {
                         ForEach(lutFiles) { lutFile in
                             LUTItemView(
                                 name: lutFile.name,
+                                summary: lutProfile(for: lutFile).summary,
                                 isSelected: selectedLUT == lutFile.id,
-                                colorSpace: Binding(
-                                    get: {
-                                        // 如果当前选中该LUT，从adjustments读取
-                                        if selectedLUT == lutFile.id {
-                                            return LUTColorSpace(rawValue: adjustments
-                                                .lutColorSpace) ?? .sRGB
-                                        }
-                                        // 否则从保存的配置读取
-                                        return lutColorSpaces[lutFile.url.path] ?? .sRGB
-                                    },
-                                    set: { newColorSpace in
-                                        // 保存配置
-                                        lutColorSpaces[lutFile.url.path] = newColorSpace
-                                        saveLUTColorSpaces()
-
-                                        // 如果当前选中该LUT，直接修改adjustments
-                                        if selectedLUT == lutFile.id {
-                                            adjustments.lutColorSpace = newColorSpace.rawValue
-                                        }
-                                    }
-                                ),
                                 onSelect: {
-                                    selectedLUT = lutFile.id
-                                    lutAlpha = 1.0
-                                    // 设置LUT的色彩空间
-                                    adjustments
-                                        .lutColorSpace = (lutColorSpaces[lutFile.url.path] ?? .sRGB)
-                                        .rawValue
-                                    onLoadLUT(lutFile.url)
+                                    selectLUT(lutFile)
                                 },
                                 onDelete: {
                                     deleteLUT(lutFile)
@@ -144,7 +121,7 @@ struct LUTPanel: View, Equatable {
             }
         }
         .onAppear {
-            loadLUTColorSpaces()
+            loadLUTColorProfiles()
             loadLUTFiles()
             syncSelectedLUT()
         }
@@ -168,9 +145,43 @@ struct LUTPanel: View, Equatable {
         }
     }
 
+    private func lutProfile(for lutFile: LUTFile) -> LUTColorProfile {
+        if selectedLUT == lutFile.id {
+            return adjustments.lutColorProfile
+        }
+
+        return lutProfiles[lutFile.url.path] ?? .default
+    }
+
+    private func selectedLUTProfileBinding(for lutFile: LUTFile) -> Binding<LUTColorProfile> {
+        Binding(
+            get: {
+                lutProfile(for: lutFile)
+            },
+            set: { newProfile in
+                setLUTProfile(newProfile, for: lutFile)
+            }
+        )
+    }
+
+    private func setLUTProfile(_ profile: LUTColorProfile, for lutFile: LUTFile) {
+        lutProfiles[lutFile.url.path] = profile
+        saveLUTColorProfiles()
+
+        if selectedLUT == lutFile.id {
+            adjustments.lutColorProfile = profile
+        }
+    }
+
+    private func selectLUT(_ lutFile: LUTFile) {
+        selectedLUT = lutFile.id
+        lutAlpha = 1.0
+        adjustments.lutColorProfile = lutProfiles[lutFile.url.path] ?? .default
+        onLoadLUT(lutFile.url)
+    }
+
     private func syncSelectedLUT() {
         if let currentURL = currentLUTURL {
-            // 查找匹配的 LUT 文件
             if let matchedFile = lutFiles.first(where: { $0.url == currentURL }) {
                 selectedLUT = matchedFile.id
             } else {
@@ -286,6 +297,8 @@ struct LUTPanel: View, Equatable {
     private func deleteLUT(_ lut: LUTFile) {
         do {
             try FileManager.default.removeItem(at: lut.url)
+            lutProfiles.removeValue(forKey: lut.url.path)
+            saveLUTColorProfiles()
             loadLUTFiles()
 
             if selectedLUT == lut.id {
@@ -323,7 +336,6 @@ struct LUTPanel: View, Equatable {
                 }
                 .sorted { $0.name < $1.name }
 
-            // 加载完成后同步选择状态
             syncSelectedLUT()
         } catch {
             print("加载 LUT 列表失败: \(error)")
@@ -336,7 +348,6 @@ struct LUTPanel: View, Equatable {
 
         isSavingLUT = true
 
-        // 生成LUT（包含所有调整，包括当前应用的LUT）
         guard let lutImage = await LUTGenerator.generateLUT(
             from: adjustments,
             sourceImage: nil
@@ -346,7 +357,6 @@ struct LUTPanel: View, Equatable {
             return
         }
 
-        // 保存LUT文件
         let lutFolder = getLUTFolderURL()
         let fileName = "\(newLUTName).cube"
         let fileURL = lutFolder.appendingPathComponent(fileName)
@@ -357,10 +367,7 @@ struct LUTPanel: View, Equatable {
                 to: fileURL
             )
 
-            // 重新加载LUT列表
             loadLUTFiles()
-
-            // 关闭对话框
             showingSaveLUTDialog = false
             newLUTName = ""
 
@@ -390,75 +397,68 @@ struct LUTPanel: View, Equatable {
         return lutFolder
     }
 
-    private func loadLUTColorSpaces() {
-        if let data = UserDefaults.standard.data(forKey: colorSpaceStorageKey),
+    private func loadLUTColorProfiles() {
+        if let data = UserDefaults.standard.data(forKey: colorProfileStorageKey),
+           let decoded = try? JSONDecoder().decode([String: LUTColorProfile].self, from: data) {
+            lutProfiles = decoded
+            return
+        }
+
+        if let data = UserDefaults.standard.data(forKey: legacyColorSpaceStorageKey),
            let decoded = try? JSONDecoder().decode([String: LUTColorSpace].self, from: data) {
-            lutColorSpaces = decoded
+            lutProfiles = decoded.mapValues { LUTColorProfile.legacy(from: $0.rawValue) }
+            saveLUTColorProfiles()
         }
     }
 
-    private func saveLUTColorSpaces() {
-        if let encoded = try? JSONEncoder().encode(lutColorSpaces) {
-            UserDefaults.standard.set(encoded, forKey: colorSpaceStorageKey)
+    private func saveLUTColorProfiles() {
+        if let encoded = try? JSONEncoder().encode(lutProfiles) {
+            UserDefaults.standard.set(encoded, forKey: colorProfileStorageKey)
         }
     }
 }
 
-// LUT 项视图
 struct LUTItemView: View {
     let name: String
+    let summary: String?
     let isSelected: Bool
-    @Binding var colorSpace: LUTColorSpace
     let onSelect: () -> Void
     let onDelete: (() -> Void)?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                HStack(spacing: 8) {
+        HStack(alignment: .top, spacing: 8) {
+            Circle()
+                .fill(isSelected ? Color.blue : Color.clear)
+                .frame(width: 8, height: 8)
+                .overlay(
                     Circle()
-                        .fill(isSelected ? Color.blue : Color.clear)
-                        .frame(width: 8, height: 8)
-                        .overlay(
-                            Circle()
-                                .stroke(Color.gray.opacity(0.3), lineWidth: 1)
-                        )
+                        .stroke(Color.gray.opacity(0.3), lineWidth: 1)
+                )
+                .padding(.top, 4)
 
-                    Text(name)
-                        .font(.caption)
-                        .foregroundColor(isSelected ? .primary : .secondary)
-                }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(name)
+                    .font(.caption)
+                    .foregroundColor(isSelected ? .primary : .secondary)
 
-                Spacer()
-
-                if let onDelete {
-                    Button(action: onDelete) {
-                        Image(systemName: "trash")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    .buttonStyle(.borderless)
-                    .help("删除 LUT")
+                if let summary, !summary.isEmpty {
+                    Text(summary)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
                 }
             }
 
-            if onDelete != nil {
-                HStack(spacing: 4) {
-                    Text("色彩空间:")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
+            Spacer()
 
-                    Picker("", selection: $colorSpace) {
-                        ForEach(LUTColorSpace.allCases, id: \.self) { space in
-                            Text(space.displayName).tag(space)
-                        }
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.menu)
-                    .font(.caption2)
-                    .frame(width: 100)
+            if let onDelete {
+                Button(action: onDelete) {
+                    Image(systemName: "trash")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
-                .padding(.leading, 16)
+                .buttonStyle(.borderless)
+                .help("删除 LUT")
             }
         }
         .padding(.vertical, 6)
@@ -474,7 +474,68 @@ struct LUTItemView: View {
     }
 }
 
-// 保存LUT对话框
+struct LUTProfileEditor: View {
+    @Binding var profile: LUTColorProfile
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("LUT 变换")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+
+            LUTOptionRow(
+                title: "输入色域",
+                selection: $profile.inputGamut,
+                label: \.displayName
+            )
+            LUTOptionRow(
+                title: "输入曲线",
+                selection: $profile.inputTransfer,
+                label: \.displayName
+            )
+            LUTOptionRow(
+                title: "输出色域",
+                selection: $profile.outputGamut,
+                label: \.displayName
+            )
+            LUTOptionRow(
+                title: "输出曲线",
+                selection: $profile.outputTransfer,
+                label: \.displayName
+            )
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color(nsColor: .controlBackgroundColor))
+        )
+    }
+}
+
+struct LUTOptionRow<Option>: View where Option: Hashable & CaseIterable {
+    let title: String
+    @Binding var selection: Option
+    let label: KeyPath<Option, String>
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(title)
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .frame(width: 56, alignment: .leading)
+
+            Picker("", selection: $selection) {
+                ForEach(Array(Option.allCases), id: \.self) { option in
+                    Text(option[keyPath: label]).tag(option)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
 struct SaveLUTDialog: View {
     @Binding var lutName: String
     @Binding var isSaving: Bool

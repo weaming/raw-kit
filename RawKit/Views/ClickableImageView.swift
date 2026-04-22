@@ -277,7 +277,7 @@ struct ClickableImageView: View {
             point: sample.pixelPoint,
             imageSize: sample.imageSize,
             sampleSpan: 17,
-            outputSize: 92
+            outputSize: 76
         ) else {
             return nil
         }
@@ -292,9 +292,9 @@ struct ClickableImageView: View {
     }
 
     private func loupePosition(for viewLocation: CGPoint, in geometrySize: CGSize) -> CGPoint {
-        let panelSize = CGSize(width: 128, height: 142)
-        let margin: CGFloat = 18
-        let cursorOffset = CGSize(width: 30, height: 34)
+        let panelSize = CGSize(width: 200, height: 94)
+        let margin: CGFloat = 16
+        let cursorOffset = CGSize(width: 26, height: 28)
 
         var x = viewLocation.x + cursorOffset.width + panelSize.width / 2
         var y = viewLocation.y + cursorOffset.height + panelSize.height / 2
@@ -865,39 +865,34 @@ class ClickableNSImageView: NSView {
 private struct WhiteBalanceLoupeOverlay: View {
     let image: NSImage
     let pixelInfo: PixelInfo?
+    private let loupeSize: CGFloat = 76
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
-                Image(systemName: "eyedropper")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(.white)
-
-                Text("白平衡")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(.white)
-            }
-
+        HStack(alignment: .top, spacing: 10) {
             ZStack {
                 Image(nsImage: image)
                     .resizable()
                     .interpolation(.none)
-                    .frame(width: 92, height: 92)
+                    .frame(width: loupeSize, height: loupeSize)
                     .clipped()
 
                 Rectangle()
-                    .stroke(Color.white.opacity(0.9), lineWidth: 1.5)
-                    .frame(width: 14, height: 14)
+                    .stroke(Color.white.opacity(0.9), lineWidth: 1.25)
+                    .frame(width: 12, height: 12)
 
                 Path { path in
-                    path.move(to: CGPoint(x: 46, y: 0))
-                    path.addLine(to: CGPoint(x: 46, y: 39))
-                    path.move(to: CGPoint(x: 46, y: 53))
-                    path.addLine(to: CGPoint(x: 46, y: 92))
-                    path.move(to: CGPoint(x: 0, y: 46))
-                    path.addLine(to: CGPoint(x: 39, y: 46))
-                    path.move(to: CGPoint(x: 53, y: 46))
-                    path.addLine(to: CGPoint(x: 92, y: 46))
+                    let mid = loupeSize / 2
+                    let innerGap: CGFloat = 8
+                    let edgeInset: CGFloat = 6
+
+                    path.move(to: CGPoint(x: mid, y: edgeInset))
+                    path.addLine(to: CGPoint(x: mid, y: mid - innerGap))
+                    path.move(to: CGPoint(x: mid, y: mid + innerGap))
+                    path.addLine(to: CGPoint(x: mid, y: loupeSize - edgeInset))
+                    path.move(to: CGPoint(x: edgeInset, y: mid))
+                    path.addLine(to: CGPoint(x: mid - innerGap, y: mid))
+                    path.move(to: CGPoint(x: mid + innerGap, y: mid))
+                    path.addLine(to: CGPoint(x: loupeSize - edgeInset, y: mid))
                 }
                 .stroke(Color.white.opacity(0.8), lineWidth: 1)
             }
@@ -907,24 +902,46 @@ private struct WhiteBalanceLoupeOverlay: View {
             )
             .clipShape(RoundedRectangle(cornerRadius: 8))
 
-            HStack(spacing: 6) {
-                RoundedRectangle(cornerRadius: 4)
-                    .fill(sampleColor)
-                    .frame(width: 18, height: 18)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 4)
-                            .stroke(Color.white.opacity(0.18), lineWidth: 1)
-                    )
+            VStack(alignment: .leading, spacing: 7) {
+                HStack(spacing: 5) {
+                    Image(systemName: "eyedropper")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.white)
 
-                Text(pixelInfo.map { "RGB \(formatRGB($0.gammaRGB))" } ?? "RGB ---")
-                    .font(.system(size: 11, weight: .medium, design: .monospaced))
-                    .foregroundColor(.white.opacity(0.92))
-                    .lineLimit(1)
+                    Text("白平衡")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.white)
+                }
+
+                HStack(spacing: 6) {
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(sampleColor)
+                        .frame(width: 16, height: 16)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 4)
+                                .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                        )
+
+                    Text(pixelInfo.map { "RGB \(formatRGB($0.gammaRGB))" } ?? "RGB ---")
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundColor(.white.opacity(0.92))
+                        .lineLimit(1)
+                }
+                .frame(height: 16)
+
+                if let pixelInfo {
+                    Text("H \(formatHue(pixelInfo.hsl.h))°  S \(formatPercent(pixelInfo.hsl.s))%")
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundColor(.white.opacity(0.72))
+                        .lineLimit(1)
+                }
             }
+            .frame(width: 94, alignment: .leading)
+            .padding(.top, 2)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .frame(width: 128, alignment: .leading)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 9)
+        .frame(width: 200, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 12)
                 .fill(Color.black.opacity(0.82))
@@ -953,5 +970,13 @@ private struct WhiteBalanceLoupeOverlay: View {
         let g = Int((value.g * 255).rounded())
         let b = Int((value.b * 255).rounded())
         return "\(r),\(g),\(b)"
+    }
+
+    private func formatHue(_ value: Double) -> String {
+        String(Int(value.rounded()))
+    }
+
+    private func formatPercent(_ value: Double) -> String {
+        String(Int(value.rounded()))
     }
 }

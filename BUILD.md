@@ -4,14 +4,18 @@
 
 ```bash
 ./build-release.fish
+./build-release.fish --no-clean
+./build-release.fish --verbose
 ```
 
 **功能：**
-- 清理之前的构建
+- 默认清理之前的构建产物和 DerivedData
+- 支持 `--no-clean` 走增量 Release 构建
+- 支持 `--verbose` 输出完整 `xcodebuild` 日志
 - 使用 Archive 方式构建 Release 版本
 - 自动导出应用程序
 - 生成 .dSYM 调试符号文件（用于崩溃分析）
-- 显示详细的构建信息
+- 保留完整构建日志到 `build/Release/build.log`
 - 输出应用的版本号、构建号和大小
 
 **输出位置：**

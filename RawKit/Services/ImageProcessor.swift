@@ -2,6 +2,7 @@ import AppKit
 import CoreImage
 import Foundation
 import UniformTypeIdentifiers
+import simd
 
 @MainActor
 class ImageProcessor {
@@ -19,6 +20,330 @@ class ImageProcessor {
     private static var lutCache: [LUTCacheKey: (data: Data, size: Int)] = [:]
     private static var lutCacheOrder: [LUTCacheKey] = []
     private static let lutCacheLimit = 16
+
+    private struct ChromaticityPoint {
+        let x: Double
+        let y: Double
+    }
+
+    private struct RGBPrimaries {
+        let red: ChromaticityPoint
+        let green: ChromaticityPoint
+        let blue: ChromaticityPoint
+        let white: ChromaticityPoint
+
+        var rgbToXYZ: simd_double3x3 {
+            let r = SIMD3<Double>(
+                red.x / red.y,
+                1.0,
+                (1.0 - red.x - red.y) / red.y
+            )
+            let g = SIMD3<Double>(
+                green.x / green.y,
+                1.0,
+                (1.0 - green.x - green.y) / green.y
+            )
+            let b = SIMD3<Double>(
+                blue.x / blue.y,
+                1.0,
+                (1.0 - blue.x - blue.y) / blue.y
+            )
+            let whiteXYZ = SIMD3<Double>(
+                white.x / white.y,
+                1.0,
+                (1.0 - white.x - white.y) / white.y
+            )
+
+            let primaries = simd_double3x3(columns: (r, g, b))
+            let scale = simd_inverse(primaries) * whiteXYZ
+            return simd_double3x3(columns: (
+                r * scale.x,
+                g * scale.y,
+                b * scale.z
+            ))
+        }
+
+        var xyzToRGB: simd_double3x3 {
+            simd_inverse(rgbToXYZ)
+        }
+    }
+
+    private enum LUTTransferMode: Int {
+        case linear = 0
+        case sRGB = 1
+        case gamma22 = 2
+        case gamma24 = 3
+        case gamma26 = 4
+        case rec709 = 5
+        case hlg = 6
+        case pq = 7
+        case fLog = 8
+        case fLog2 = 9
+        case fLog2C = 10
+
+        init(_ transferFunction: LUTTransferFunction) {
+            switch transferFunction {
+            case .linear:
+                self = .linear
+            case .sRGB:
+                self = .sRGB
+            case .gamma22:
+                self = .gamma22
+            case .gamma24:
+                self = .gamma24
+            case .gamma26:
+                self = .gamma26
+            case .rec709:
+                self = .rec709
+            case .hlg:
+                self = .hlg
+            case .pq:
+                self = .pq
+            case .fLog:
+                self = .fLog
+            case .fLog2:
+                self = .fLog2
+            case .fLog2C:
+                self = .fLog2C
+            }
+        }
+
+        var kernelValue: CGFloat {
+            CGFloat(rawValue)
+        }
+    }
+
+    private static let lutKernelHelpers = """
+    float positive(float value) {
+        return max(value, 0.0);
+    }
+
+    float encodeSRGBValue(float value) {
+        float v = positive(value);
+        if (v <= 0.0031308) {
+            return 12.92 * v;
+        }
+        return 1.055 * pow(v, 1.0 / 2.4) - 0.055;
+    }
+
+    float decodeSRGBValue(float value) {
+        float v = positive(value);
+        if (v <= 0.04045) {
+            return v / 12.92;
+        }
+        return pow((v + 0.055) / 1.055, 2.4);
+    }
+
+    float encodeGammaValue(float value, float gamma) {
+        return pow(positive(value), 1.0 / gamma);
+    }
+
+    float decodeGammaValue(float value, float gamma) {
+        return pow(positive(value), gamma);
+    }
+
+    float encodeRec709Value(float value) {
+        float v = positive(value);
+        if (v < 0.018) {
+            return 4.5 * v;
+        }
+        return 1.099 * pow(v, 0.45) - 0.099;
+    }
+
+    float decodeRec709Value(float value) {
+        float v = positive(value);
+        if (v < 0.081) {
+            return v / 4.5;
+        }
+        return pow((v + 0.099) / 1.099, 1.0 / 0.45);
+    }
+
+    float encodeHLGValue(float value) {
+        float v = positive(value);
+        if (v <= (1.0 / 12.0)) {
+            return sqrt(3.0 * v);
+        }
+        return 0.17883277 * log(12.0 * v - 0.28466892) + 0.55991073;
+    }
+
+    float decodeHLGValue(float value) {
+        float v = positive(value);
+        if (v <= 0.5) {
+            return (v * v) / 3.0;
+        }
+        return (exp((v - 0.55991073) / 0.17883277) + 0.28466892) / 12.0;
+    }
+
+    float encodePQValue(float value) {
+        float v = positive(value);
+        float m1 = 0.1593017578125;
+        float m2 = 78.84375;
+        float c1 = 0.8359375;
+        float c2 = 18.8515625;
+        float c3 = 18.6875;
+        float powered = pow(v, m1);
+        float numerator = c1 + c2 * powered;
+        float denominator = 1.0 + c3 * powered;
+        return pow(numerator / denominator, m2);
+    }
+
+    float decodePQValue(float value) {
+        float v = positive(value);
+        float m1 = 0.1593017578125;
+        float m2 = 78.84375;
+        float c1 = 0.8359375;
+        float c2 = 18.8515625;
+        float c3 = 18.6875;
+        float powered = pow(v, 1.0 / m2);
+        float numerator = max(powered - c1, 0.0);
+        float denominator = c2 - c3 * powered;
+        return pow(numerator / denominator, 1.0 / m1);
+    }
+
+    float encodeFLogValue(float value) {
+        float v = positive(value);
+        if (v >= 0.00089) {
+            return 0.344676 * log(0.555556 * v + 0.009468) / log(10.0) + 0.790453;
+        }
+        return 8.735631 * v + 0.092864;
+    }
+
+    float decodeFLogValue(float value) {
+        float v = positive(value);
+        if (v >= 0.100537775223865) {
+            return exp(((v - 0.790453) / 0.344676) * log(10.0)) / 0.555556 - 0.009468 / 0.555556;
+        }
+        return (v - 0.092864) / 8.735631;
+    }
+
+    float encodeFLog2Value(float value) {
+        float v = positive(value);
+        if (v >= 0.000889) {
+            return 0.245281 * log(5.555556 * v + 0.064829) / log(10.0) + 0.384316;
+        }
+        return 8.799461 * v + 0.092864;
+    }
+
+    float decodeFLog2Value(float value) {
+        float v = positive(value);
+        if (v >= 0.100686685370811) {
+            return exp(((v - 0.384316) / 0.245281) * log(10.0)) / 5.555556 - 0.064829 / 5.555556;
+        }
+        return (v - 0.092864) / 8.799461;
+    }
+
+    float encodeTransferValue(float value, float mode) {
+        if (mode < 0.5) {
+            return value;
+        }
+        if (mode < 1.5) {
+            return encodeSRGBValue(value);
+        }
+        if (mode < 2.5) {
+            return encodeGammaValue(value, 2.2);
+        }
+        if (mode < 3.5) {
+            return encodeGammaValue(value, 2.4);
+        }
+        if (mode < 4.5) {
+            return encodeGammaValue(value, 2.6);
+        }
+        if (mode < 5.5) {
+            return encodeRec709Value(value);
+        }
+        if (mode < 6.5) {
+            return encodeHLGValue(value);
+        }
+        if (mode < 7.5) {
+            return encodePQValue(value);
+        }
+        if (mode < 8.5) {
+            return encodeFLogValue(value);
+        }
+        if (mode < 10.5) {
+            return encodeFLog2Value(value);
+        }
+        return value;
+    }
+
+    float decodeTransferValue(float value, float mode) {
+        if (mode < 0.5) {
+            return value;
+        }
+        if (mode < 1.5) {
+            return decodeSRGBValue(value);
+        }
+        if (mode < 2.5) {
+            return decodeGammaValue(value, 2.2);
+        }
+        if (mode < 3.5) {
+            return decodeGammaValue(value, 2.4);
+        }
+        if (mode < 4.5) {
+            return decodeGammaValue(value, 2.6);
+        }
+        if (mode < 5.5) {
+            return decodeRec709Value(value);
+        }
+        if (mode < 6.5) {
+            return decodeHLGValue(value);
+        }
+        if (mode < 7.5) {
+            return decodePQValue(value);
+        }
+        if (mode < 8.5) {
+            return decodeFLogValue(value);
+        }
+        if (mode < 10.5) {
+            return decodeFLog2Value(value);
+        }
+        return value;
+    }
+
+    vec3 applyMatrix(vec3 color, vec3 row0, vec3 row1, vec3 row2) {
+        return vec3(
+            dot(color, row0),
+            dot(color, row1),
+            dot(color, row2)
+        );
+    }
+
+    vec3 encodeTransfer(vec3 color, float mode) {
+        return vec3(
+            encodeTransferValue(color.r, mode),
+            encodeTransferValue(color.g, mode),
+            encodeTransferValue(color.b, mode)
+        );
+    }
+
+    vec3 decodeTransfer(vec3 color, float mode) {
+        return vec3(
+            decodeTransferValue(color.r, mode),
+            decodeTransferValue(color.g, mode),
+            decodeTransferValue(color.b, mode)
+        );
+    }
+    """
+
+    private static let lutInputTransformKernel: CIColorKernel? = {
+        CIColorKernel(source: lutKernelHelpers + """
+        kernel vec4 lutInputTransform(__sample image, vec3 row0, vec3 row1, vec3 row2, float transferMode) {
+            vec3 linearColor = applyMatrix(image.rgb, row0, row1, row2);
+            vec3 encodedColor = encodeTransfer(linearColor, transferMode);
+            return vec4(encodedColor, image.a);
+        }
+        """)
+    }()
+
+    private static let lutOutputTransformKernel: CIColorKernel? = {
+        CIColorKernel(source: lutKernelHelpers + """
+        kernel vec4 lutOutputTransform(__sample image, vec3 row0, vec3 row1, vec3 row2, float transferMode) {
+            vec3 linearColor = decodeTransfer(image.rgb, transferMode);
+            vec3 workingColor = applyMatrix(linearColor, row0, row1, row2);
+            return vec4(workingColor, image.a);
+        }
+        """)
+    }()
 
     // 使用 CIContextManager 替代直接创建 context
     // CIContext 本身是线程安全的，通过 Manager 的 nonisolated getter 访问
@@ -1085,7 +1410,7 @@ class ImageProcessor {
                 to: result,
                 lutURL: lutURL,
                 alpha: adjustments.lutAlpha,
-                lutColorSpace: adjustments.lutColorSpace
+                profile: adjustments.lutColorProfile
             )
         }
 
@@ -1424,29 +1749,29 @@ class ImageProcessor {
         to image: CIImage,
         lutURL: URL,
         alpha: Double,
-        lutColorSpace: String
+        profile: LUTColorProfile
     ) -> CIImage {
         guard let (data, size) = cachedLUTData(from: lutURL) else {
             return image
         }
 
-        guard let lutInputColorSpace = getLUTColorSpace(from: lutColorSpace) else {
-            print("ImageProcessor: ⚠️ 未知 LUT 输入色彩空间: \(lutColorSpace)，跳过 LUT")
-            return image
-        }
-
-        guard let workingColorSpace = lutWorkingColorSpace() else {
-            print("ImageProcessor: ⚠️ 无法获取 LUT 工作色彩空间，跳过 LUT")
-            return image
-        }
-
-        // 统一的数据流：
-        // 当前渲染工作空间 -> LUT 标注输入空间 -> 当前渲染工作空间
-        let imageInLUTSpace = convertColorSpace(
-            image,
-            from: workingColorSpace,
-            to: lutInputColorSpace
+        let workingToInputGamut = gamutTransformMatrix(
+            from: .sRGB,
+            to: profile.inputGamut
         )
+        let outputToWorkingGamut = gamutTransformMatrix(
+            from: profile.outputGamut,
+            to: .sRGB
+        )
+
+        guard let imageInLUTSpace = applyLUTInputTransform(
+            to: image,
+            gamutTransform: workingToInputGamut,
+            transferFunction: profile.inputTransfer
+        ) else {
+            print("ImageProcessor: ⚠️ 无法创建 LUT 输入变换，跳过 LUT")
+            return image
+        }
 
         guard let filter = CIFilter(name: "CIColorCube") else {
             return image
@@ -1460,11 +1785,14 @@ class ImageProcessor {
             return image
         }
 
-        let lutApplied = convertColorSpace(
-            lutAppliedInLUTSpace,
-            from: lutInputColorSpace,
-            to: workingColorSpace
-        )
+        guard let lutApplied = applyLUTOutputTransform(
+            to: lutAppliedInLUTSpace,
+            gamutTransform: outputToWorkingGamut,
+            transferFunction: profile.outputTransfer
+        ) else {
+            print("ImageProcessor: ⚠️ 无法创建 LUT 输出变换，跳过 LUT")
+            return image
+        }
 
         return applyLUTAlpha(original: image, lutApplied: lutApplied, alpha: alpha)
     }
@@ -1763,50 +2091,137 @@ class ImageProcessor {
         return result
     }
 
-    // 获取LUT对应的CGColorSpace
-    private static func getLUTColorSpace(from name: String) -> CGColorSpace? {
-        switch name {
-        case "sRGB":
-            CGColorSpace(name: CGColorSpace.sRGB)
-        case "Linear":
-            CGColorSpace(name: CGColorSpace.linearSRGB)
-        case "Rec.709":
-            CGColorSpace(name: CGColorSpace.itur_709)
-        case "Rec.2020":
-            CGColorSpace(name: CGColorSpace.itur_2020)
-        default:
-            nil
+    private static func gamutTransformMatrix(
+        from source: LUTGamut,
+        to target: LUTGamut
+    ) -> simd_double3x3 {
+        if source == target {
+            return matrix_identity_double3x3
+        }
+
+        let sourceSpace = primaries(for: source)
+        let targetSpace = primaries(for: target)
+        return targetSpace.xyzToRGB * sourceSpace.rgbToXYZ
+    }
+
+    private static func primaries(for gamut: LUTGamut) -> RGBPrimaries {
+        switch gamut {
+        case .sRGB:
+            RGBPrimaries(
+                red: ChromaticityPoint(x: 0.64, y: 0.33),
+                green: ChromaticityPoint(x: 0.30, y: 0.60),
+                blue: ChromaticityPoint(x: 0.15, y: 0.06),
+                white: ChromaticityPoint(x: 0.3127, y: 0.3290)
+            )
+        case .displayP3:
+            RGBPrimaries(
+                red: ChromaticityPoint(x: 0.68, y: 0.32),
+                green: ChromaticityPoint(x: 0.265, y: 0.69),
+                blue: ChromaticityPoint(x: 0.15, y: 0.06),
+                white: ChromaticityPoint(x: 0.3127, y: 0.3290)
+            )
+        case .rec709:
+            RGBPrimaries(
+                red: ChromaticityPoint(x: 0.64, y: 0.33),
+                green: ChromaticityPoint(x: 0.30, y: 0.60),
+                blue: ChromaticityPoint(x: 0.15, y: 0.06),
+                white: ChromaticityPoint(x: 0.3127, y: 0.3290)
+            )
+        case .dciP3:
+            RGBPrimaries(
+                red: ChromaticityPoint(x: 0.68, y: 0.32),
+                green: ChromaticityPoint(x: 0.265, y: 0.69),
+                blue: ChromaticityPoint(x: 0.15, y: 0.06),
+                white: ChromaticityPoint(x: 0.314, y: 0.351)
+            )
+        case .rec2020:
+            RGBPrimaries(
+                red: ChromaticityPoint(x: 0.708, y: 0.292),
+                green: ChromaticityPoint(x: 0.170, y: 0.797),
+                blue: ChromaticityPoint(x: 0.131, y: 0.046),
+                white: ChromaticityPoint(x: 0.3127, y: 0.3290)
+            )
+        case .fGamut:
+            RGBPrimaries(
+                red: ChromaticityPoint(x: 0.708, y: 0.292),
+                green: ChromaticityPoint(x: 0.170, y: 0.797),
+                blue: ChromaticityPoint(x: 0.131, y: 0.046),
+                white: ChromaticityPoint(x: 0.3127, y: 0.3290)
+            )
+        case .fGamutC:
+            RGBPrimaries(
+                red: ChromaticityPoint(x: 0.7347, y: 0.2653),
+                green: ChromaticityPoint(x: 0.0263, y: 0.9737),
+                blue: ChromaticityPoint(x: 0.1173, y: -0.0224),
+                white: ChromaticityPoint(x: 0.3127, y: 0.3290)
+            )
         }
     }
 
-    private static func lutWorkingColorSpace() -> CGColorSpace? {
-        if let extendedLinearSRGB = CGColorSpace(name: CGColorSpace.extendedLinearSRGB) {
-            return extendedLinearSRGB
+    private static func applyLUTInputTransform(
+        to image: CIImage,
+        gamutTransform: simd_double3x3,
+        transferFunction: LUTTransferFunction
+    ) -> CIImage? {
+        guard let kernel = lutInputTransformKernel else {
+            return nil
         }
 
-        if let linearSRGB = CGColorSpace(name: CGColorSpace.linearSRGB) {
-            return linearSRGB
-        }
-
-        return CGColorSpace(name: CGColorSpace.sRGB)
+        let rows = matrixRows(from: gamutTransform)
+        return kernel.apply(
+            extent: image.extent,
+            arguments: [
+                image,
+                rows.0,
+                rows.1,
+                rows.2,
+                LUTTransferMode(transferFunction).kernelValue,
+            ]
+        )
     }
 
-    // 将图像从源色彩空间显式转换到目标色彩空间
-    private static func convertColorSpace(
-        _ image: CIImage,
-        from sourceColorSpace: CGColorSpace,
-        to targetColorSpace: CGColorSpace
-    ) -> CIImage {
-        if sourceColorSpace.name == targetColorSpace.name {
-            return image
+    private static func applyLUTOutputTransform(
+        to image: CIImage,
+        gamutTransform: simd_double3x3,
+        transferFunction: LUTTransferFunction
+    ) -> CIImage? {
+        guard let kernel = lutOutputTransformKernel else {
+            return nil
         }
 
-        // 使用 matchedToWorkingSpace 保持高精度，
-        // 显式声明 LUT handoff 的源/目标空间，避免隐式按 sRGB 猜测。
-        let convertedImage = image
-            .matchedToWorkingSpace(from: sourceColorSpace)!
-            .matchedFromWorkingSpace(to: targetColorSpace)!
+        let rows = matrixRows(from: gamutTransform)
+        return kernel.apply(
+            extent: image.extent,
+            arguments: [
+                image,
+                rows.0,
+                rows.1,
+                rows.2,
+                LUTTransferMode(transferFunction).kernelValue,
+            ]
+        )
+    }
 
-        return convertedImage
+    private static func matrixRows(from matrix: simd_double3x3) -> (
+        CIVector,
+        CIVector,
+        CIVector
+    ) {
+        let row0 = CIVector(
+            x: CGFloat(matrix[0].x),
+            y: CGFloat(matrix[1].x),
+            z: CGFloat(matrix[2].x)
+        )
+        let row1 = CIVector(
+            x: CGFloat(matrix[0].y),
+            y: CGFloat(matrix[1].y),
+            z: CGFloat(matrix[2].y)
+        )
+        let row2 = CIVector(
+            x: CGFloat(matrix[0].z),
+            y: CGFloat(matrix[1].z),
+            z: CGFloat(matrix[2].z)
+        )
+        return (row0, row1, row2)
     }
 }

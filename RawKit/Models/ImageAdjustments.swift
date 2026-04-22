@@ -29,9 +29,20 @@ struct ImageAdjustments: Equatable, Codable {
 
     var lutURL: URL?
     var lutAlpha: Double = 1.0
-    var lutColorSpace: String = "sRGB" // LUT输入色彩空间
+    var lutColorSpace: String = "sRGB" // legacy LUT color space for migration
+    var lutProfile: LUTColorProfile?
 
     static let `default` = ImageAdjustments()
+
+    var lutColorProfile: LUTColorProfile {
+        get {
+            lutProfile ?? LUTColorProfile.legacy(from: lutColorSpace)
+        }
+        set {
+            lutProfile = newValue
+            lutColorSpace = newValue.legacyCombinedColorSpace.rawValue
+        }
+    }
 
     var hasAdjustments: Bool {
         // 排除变换，只检查色彩调整
@@ -39,6 +50,11 @@ struct ImageAdjustments: Equatable, Codable {
         temp.rotation = 0
         temp.flipHorizontal = false
         temp.flipVertical = false
+        if temp.lutURL == nil {
+            temp.lutAlpha = ImageAdjustments.default.lutAlpha
+            temp.lutColorSpace = ImageAdjustments.default.lutColorSpace
+            temp.lutProfile = ImageAdjustments.default.lutProfile
+        }
         return temp != .default
     }
 
@@ -49,6 +65,8 @@ struct ImageAdjustments: Equatable, Codable {
         let savedFlipV = flipVertical
         let savedLutURL = lutURL
         let savedLutAlpha = lutAlpha
+        let savedLutColorSpace = lutColorSpace
+        let savedLutProfile = lutProfile
 
         self = .default
 
@@ -58,6 +76,8 @@ struct ImageAdjustments: Equatable, Codable {
         flipVertical = savedFlipV
         lutURL = savedLutURL
         lutAlpha = savedLutAlpha
+        lutColorSpace = savedLutColorSpace
+        lutProfile = savedLutProfile
     }
 
     // 检查基础调整组是否有变化
