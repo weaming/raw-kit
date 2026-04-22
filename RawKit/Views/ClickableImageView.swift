@@ -159,6 +159,136 @@ struct ImageHoverSample {
     let imageSize: CGSize
 }
 
+private struct ViewportImageGeometry {
+    let imageSize: CGSize
+    let viewportSize: CGSize
+
+    var baseRect: CGRect {
+        guard imageSize.width > 0, imageSize.height > 0,
+              viewportSize.width > 0, viewportSize.height > 0 else {
+            return .zero
+        }
+
+        let fitRatio = min(
+            viewportSize.width / imageSize.width,
+            viewportSize.height / imageSize.height
+        )
+        let fitSize = CGSize(
+            width: imageSize.width * fitRatio,
+            height: imageSize.height * fitRatio
+        )
+
+        return CGRect(
+            x: (viewportSize.width - fitSize.width) * 0.5,
+            y: (viewportSize.height - fitSize.height) * 0.5,
+            width: fitSize.width,
+            height: fitSize.height
+        )
+    }
+
+    func displayedRect(scale: CGFloat, offset: CGSize) -> CGRect {
+        let rect = baseRect
+        guard !rect.isEmpty else { return .zero }
+
+        let scaledSize = CGSize(
+            width: rect.width * scale,
+            height: rect.height * scale
+        )
+        let center = CGPoint(
+            x: rect.midX + offset.width,
+            y: rect.midY + offset.height
+        )
+
+        return CGRect(
+            x: center.x - scaledSize.width * 0.5,
+            y: center.y - scaledSize.height * 0.5,
+            width: scaledSize.width,
+            height: scaledSize.height
+        )
+    }
+
+    func clampedOffset(_ candidate: CGSize, scale: CGFloat) -> CGSize {
+        let rect = baseRect
+        guard !rect.isEmpty else { return .zero }
+
+        let scaledWidth = rect.width * scale
+        let scaledHeight = rect.height * scale
+
+        let horizontalOverflow = max(0, (scaledWidth - viewportSize.width) * 0.5)
+        let verticalOverflow = max(0, (scaledHeight - viewportSize.height) * 0.5)
+
+        let clampedX = horizontalOverflow > 0
+            ? min(max(candidate.width, -horizontalOverflow), horizontalOverflow)
+            : 0
+        let clampedY = verticalOverflow > 0
+            ? min(max(candidate.height, -verticalOverflow), verticalOverflow)
+            : 0
+
+        return CGSize(width: clampedX, height: clampedY)
+    }
+
+    func imagePixel(for viewPoint: CGPoint, scale: CGFloat, offset: CGSize) -> CGPoint? {
+        let rect = displayedRect(scale: scale, offset: offset)
+        guard rect.width > 0, rect.height > 0, rect.contains(viewPoint) else {
+            return nil
+        }
+
+        let normalizedX = (viewPoint.x - rect.minX) / rect.width
+        let normalizedY = (viewPoint.y - rect.minY) / rect.height
+
+        return CGPoint(
+            x: normalizedX * imageSize.width,
+            y: (1.0 - normalizedY) * imageSize.height
+        )
+    }
+
+    func zoomOffset(
+        from oldScale: CGFloat,
+        oldOffset: CGSize,
+        to newScale: CGFloat,
+        anchorViewPoint: CGPoint?
+    ) -> CGSize {
+        let oldRect = displayedRect(scale: oldScale, offset: oldOffset)
+
+        let resolvedAnchorPoint: CGPoint
+        let normalizedAnchor: CGPoint
+
+        if let anchorViewPoint,
+           oldRect.width > 0,
+           oldRect.height > 0,
+           oldRect.contains(anchorViewPoint) {
+            resolvedAnchorPoint = anchorViewPoint
+            normalizedAnchor = CGPoint(
+                x: (anchorViewPoint.x - oldRect.minX) / oldRect.width,
+                y: (anchorViewPoint.y - oldRect.minY) / oldRect.height
+            )
+        } else {
+            resolvedAnchorPoint = CGPoint(x: viewportSize.width * 0.5, y: viewportSize.height * 0.5)
+            normalizedAnchor = CGPoint(x: 0.5, y: 0.5)
+        }
+
+        let rect = baseRect
+        let newSize = CGSize(
+            width: rect.width * newScale,
+            height: rect.height * newScale
+        )
+        let newOrigin = CGPoint(
+            x: resolvedAnchorPoint.x - normalizedAnchor.x * newSize.width,
+            y: resolvedAnchorPoint.y - normalizedAnchor.y * newSize.height
+        )
+        let newCenter = CGPoint(
+            x: newOrigin.x + newSize.width * 0.5,
+            y: newOrigin.y + newSize.height * 0.5
+        )
+        let rawOffset = CGSize(
+            width: newCenter.x - rect.midX,
+            height: newCenter.y - rect.midY
+        )
+
+        return clampedOffset(rawOffset, scale: newScale)
+    }
+}
+
 struct ClickableImageView: View {
     private struct LoupeOverlayState {
         let viewLocation: CGPoint
@@ -180,6 +310,7 @@ struct ClickableImageView: View {
     @State private var lastOffset: CGSize = .zero
     @State private var lastPixelSampleTime: TimeInterval = 0
     @State private var loupeState: LoupeOverlayState?
+    @State private var viewportSize: CGSize = .zero
     @FocusState private var isFocused: Bool
 
     var body: some View {
@@ -188,9 +319,14 @@ struct ClickableImageView: View {
                 image: image,
                 scale: $scale,
                 offset: $offset,
-                lastOffset: $lastOffset,
                 onScrollWheel: { deltaY, location in
-                    handleScrollWheel(deltaY: deltaY, location: location, geometry: geometry)
+                    handleScrollWheel(deltaY: deltaY, location: location, viewportSize: geometry.size)
+                },
+                onDragChanged: { translation in
+                    handleDragChanged(translation: translation, viewportSize: geometry.size)
+                },
+                onDragEnded: {
+                    lastOffset = offset
                 },
                 pickMode: pickMode,
                 onColorPick: onColorPick,
@@ -212,6 +348,12 @@ struct ClickableImageView: View {
                     .allowsHitTesting(false)
                     .transition(.opacity)
                 }
+            }
+            .onAppear {
+                updateViewportSize(geometry.size)
+            }
+            .onChange(of: geometry.size) { _, newSize in
+                updateViewportSize(newSize)
             }
         }
         .focusable(false)
@@ -341,18 +483,13 @@ struct ClickableImageView: View {
             return
         }
 
-        withAnimation(.easeInOut(duration: 0.1)) {
-            scale = newScale
-        }
+        applyScaleChange(newScale, anchorInView: nil)
     }
 
-    // Photoshop 风格的缩放算法
-    // 变换模型: Transform = Scale(scale) × Translate(offset)
-    // 即: 先对图片应用 offset 平移，再整体缩放
     private func handleScrollWheel(
         deltaY: CGFloat,
         location: CGPoint,
-        geometry: GeometryProxy
+        viewportSize: CGSize
     ) {
         let zoomFactor: CGFloat = 1.0 + (deltaY * 0.01)
         let oldScale = scale
@@ -362,48 +499,54 @@ struct ClickableImageView: View {
             return
         }
 
-        // 视图中心点
-        let viewCenterX = geometry.size.width / 2
-        let viewCenterY = geometry.size.height / 2
-
-        // 鼠标相对于视图中心的位置
-        let mouseX = location.x - viewCenterX
-        let mouseY = location.y - viewCenterY
-
-        // 找到鼠标当前指向的画布坐标（变换前的坐标）
-        // 逆变换: P_canvas = P_view / oldScale - offset
-        let canvasX = mouseX / oldScale - offset.width
-        let canvasY = mouseY / oldScale - offset.height
-
-        // 缩放后，让这个画布点仍然对应鼠标位置
-        // 正变换: P_view = (P_canvas + offset) × scale
-        // 求 offset: P_view = (P_canvas + offset) × newScale
-        //           mouseX = (canvasX + newOffsetX) × newScale
-        //           newOffsetX = mouseX / newScale - canvasX
-        let newOffsetX = mouseX / newScale - canvasX
-        let newOffsetY = mouseY / newScale - canvasY
-
-        scale = newScale
-        offset = CGSize(width: newOffsetX, height: newOffsetY)
-        lastOffset = offset
+        updateViewportSize(viewportSize)
+        applyScaleChange(newScale, anchorInView: location)
     }
 
-    private func calculateImageRect(in geometry: GeometryProxy) -> CGRect {
-        // 使用与 ImageGeometry 相同的计算逻辑
-        let fitRatio = min(
-            geometry.size.width / image.size.width,
-            geometry.size.height / image.size.height
+    private func handleDragChanged(translation: CGSize, viewportSize: CGSize) {
+        updateViewportSize(viewportSize)
+        let candidate = CGSize(
+            width: lastOffset.width + translation.width,
+            height: lastOffset.height + translation.height
         )
-        let fitWidth = image.size.width * fitRatio
-        let fitHeight = image.size.height * fitRatio
+        offset = viewportGeometry(for: viewportSize).clampedOffset(candidate, scale: scale)
+    }
 
-        let scaledWidth = fitWidth * scale
-        let scaledHeight = fitHeight * scale
+    private func updateViewportSize(_ newViewportSize: CGSize) {
+        guard newViewportSize != .zero else { return }
+        viewportSize = newViewportSize
 
-        let x = (geometry.size.width - scaledWidth) / 2 + offset.width
-        let y = (geometry.size.height - scaledHeight) / 2 + offset.height
+        let clamped = viewportGeometry(for: newViewportSize).clampedOffset(offset, scale: scale)
+        if abs(clamped.width - offset.width) > 0.0001 || abs(clamped.height - offset.height) > 0.0001 {
+            offset = clamped
+            lastOffset = clamped
+        }
+    }
 
-        return CGRect(x: x, y: y, width: scaledWidth, height: scaledHeight)
+    private func applyScaleChange(_ newScale: CGFloat, anchorInView: CGPoint?) {
+        guard viewportSize != .zero else {
+            scale = newScale
+            offset = .zero
+            lastOffset = .zero
+            return
+        }
+
+        let geometry = viewportGeometry(for: viewportSize)
+        let currentDisplayedOffset = geometry.clampedOffset(offset, scale: scale)
+        let newOffset = geometry.zoomOffset(
+            from: scale,
+            oldOffset: currentDisplayedOffset,
+            to: newScale,
+            anchorViewPoint: anchorInView
+        )
+
+        scale = newScale
+        offset = newOffset
+        lastOffset = newOffset
+    }
+
+    private func viewportGeometry(for viewportSize: CGSize) -> ViewportImageGeometry {
+        ViewportImageGeometry(imageSize: image.size, viewportSize: viewportSize)
     }
 
     private func resetZoom() {
@@ -419,8 +562,9 @@ struct ClickableImageRepresentable: NSViewRepresentable {
     let image: NSImage
     @Binding var scale: CGFloat
     @Binding var offset: CGSize
-    @Binding var lastOffset: CGSize
     let onScrollWheel: (CGFloat, CGPoint) -> Void
+    let onDragChanged: (CGSize) -> Void
+    let onDragEnded: () -> Void
     let pickMode: CurveAdjustmentView.PickMode
     let onColorPick: ((CGPoint, CGSize) -> Void)?
     let onCancelPickMode: (() -> Void)?
@@ -437,25 +581,21 @@ struct ClickableImageRepresentable: NSViewRepresentable {
         view.onCancelPickMode = onCancelPickMode
         view.onFilesDrop = onFilesDrop
         view.onMouseMove = onMouseMove
-        view.onDragChanged = { translation, currentScale in
-            // 拖动距离是屏幕空间的，需要除以 scale 转换为 offset 空间
-            offset = CGSize(
-                width: lastOffset.width + translation.width / currentScale,
-                height: lastOffset.height + translation.height / currentScale
-            )
-        }
-        view.onDragEnded = {
-            lastOffset = offset
-        }
+        view.onDragChanged = onDragChanged
+        view.onDragEnded = onDragEnded
         return view
     }
 
     func updateNSView(_ nsView: ClickableNSImageView, context _: Context) {
+        let imageChanged = nsView.imageView.image !== image
+
         // 更新图像
         nsView.imageView.image = image
 
         // 回调函数总是更新
         nsView.onScrollWheel = onScrollWheel
+        nsView.onDragChanged = onDragChanged
+        nsView.onDragEnded = onDragEnded
         nsView.pickMode = pickMode
         nsView.onColorPick = onColorPick
         nsView.onCancelPickMode = onCancelPickMode
@@ -467,20 +607,11 @@ struct ClickableImageRepresentable: NSViewRepresentable {
         let offsetChanged = abs(nsView.currentOffset.width - offset.width) > 0.0001 ||
             abs(nsView.currentOffset.height - offset.height) > 0.0001
 
-        // ⚠️ 关键:总是更新这两个值,确保几何计算使用最新值
         nsView.currentScale = scale
         nsView.currentOffset = offset
 
-        // scale/offset 变化时应用 transform
-        if scaleChanged || offsetChanged {
-            // 应用 GPU transform
-            // 变换模型: Scale(scale) × Translate(offset)
-            // 先平移 offset，再缩放 scale
-            let transform = CGAffineTransform.identity
-                .scaledBy(x: scale, y: scale)
-                .translatedBy(x: offset.width, y: offset.height)
-
-            nsView.imageView.layer?.setAffineTransform(transform)
+        if imageChanged || scaleChanged || offsetChanged {
+            nsView.updateImageLayout()
         }
     }
 }
@@ -583,7 +714,7 @@ class ClickableNSImageView: NSView {
 
     let imageView = NSImageView()
     var onScrollWheel: ((CGFloat, CGPoint) -> Void)?
-    var onDragChanged: ((CGSize, CGFloat) -> Void)?
+    var onDragChanged: ((CGSize) -> Void)?
     var onDragEnded: (() -> Void)?
     var onColorPick: ((CGPoint, CGSize) -> Void)?
     var onCancelPickMode: (() -> Void)?
@@ -607,53 +738,10 @@ class ClickableNSImageView: NSView {
     private var trackingArea: NSTrackingArea?
     private var eventMonitors: [Any] = []
 
-    // 将视图坐标转换为图片像素坐标
-    // 新方法：直接使用逆 transform
     private func viewPointToImagePixel(_ viewPoint: CGPoint) -> CGPoint? {
-        guard let image = imageView.image,
-              let layer = imageView.layer else { return nil }
-
-        // 步骤 1: 将父 view 坐标转换到 imageView 坐标系
-        let pointInImageView = convert(viewPoint, to: imageView)
-
-        // 步骤 2: 应用逆 transform
-        // layer.affineTransform() 返回当前的 transform
-        let transform = layer.affineTransform()
-        let invertedTransform = transform.inverted()
-
-        // 应用逆变换，得到变换前的坐标
-        let untransformedPoint = pointInImageView.applying(invertedTransform)
-
-        // 步骤 3: 现在 untransformedPoint 是在未变换的 imageView 坐标系中
-        // 计算图片在 imageView 中的 aspect-fit 位置
-        let viewBounds = imageView.bounds
-        let imageSize = image.size
-
-        let widthRatio = viewBounds.width / imageSize.width
-        let heightRatio = viewBounds.height / imageSize.height
-        let ratio = min(widthRatio, heightRatio)
-
-        let displayWidth = imageSize.width * ratio
-        let displayHeight = imageSize.height * ratio
-
-        let imageX = (viewBounds.width - displayWidth) / 2
-        let imageY = (viewBounds.height - displayHeight) / 2
-
-        let imageRect = CGRect(x: imageX, y: imageY, width: displayWidth, height: displayHeight)
-
-        // 步骤 4: 检查是否在图片范围内
-        guard imageRect.contains(untransformedPoint) else {
-            return nil
-        }
-
-        // 步骤 5: 转换为图片像素坐标
-        let normalizedX = (untransformedPoint.x - imageRect.minX) / imageRect.width
-        let normalizedY = (untransformedPoint.y - imageRect.minY) / imageRect.height
-
-        let pixelX = normalizedX * imageSize.width
-        let pixelY = (1.0 - normalizedY) * imageSize.height
-
-        return CGPoint(x: pixelX, y: pixelY)
+        guard let geometry = viewportGeometry else { return nil }
+        let displayedOffset = geometry.clampedOffset(currentOffset, scale: currentScale)
+        return geometry.imagePixel(for: viewPoint, scale: currentScale, offset: displayedOffset)
     }
 
     override init(frame frameRect: NSRect) {
@@ -676,11 +764,11 @@ class ClickableNSImageView: NSView {
 
     private func setupView() {
         wantsLayer = true
+        layer?.masksToBounds = true
         registerForDraggedTypes([.fileURL])
 
         imageView.imageScaling = .scaleProportionallyUpOrDown
         imageView.wantsLayer = true
-        imageView.layer?.anchorPoint = CGPoint(x: 0.5, y: 0.5)
 
         addSubview(imageView)
 
@@ -726,7 +814,7 @@ class ClickableNSImageView: NSView {
 
     override func layout() {
         super.layout()
-        imageView.frame = bounds
+        updateImageLayout()
         updateTrackingAreas()
     }
 
@@ -757,6 +845,7 @@ class ClickableNSImageView: NSView {
     override func mouseExited(with event: NSEvent) {
         isMouseInside = false
         isHoveringImageContent = false
+        onMouseMove?(nil)
         super.mouseExited(with: event)
     }
 
@@ -788,16 +877,12 @@ class ClickableNSImageView: NSView {
 
     override func scrollWheel(with event: NSEvent) {
         let locationInView = convert(event.locationInWindow, from: nil)
-        let flippedLocation = CGPoint(x: locationInView.x, y: bounds.height - locationInView.y)
-        onScrollWheel?(event.deltaY, flippedLocation)
+        onScrollWheel?(event.deltaY, locationInView)
     }
 
     override func mouseDown(with event: NSEvent) {
-        print("🖱️ mouseDown 被调用")
-
         // 如果按住空格键，强制进入拖拽模式
         if isSpaceKeyPressed {
-            print("  空格键被按住，进入拖拽模式")
             isDragging = true
             dragStartPoint = convert(event.locationInWindow, from: nil)
             NSCursor.closedHand.set()
@@ -806,21 +891,16 @@ class ClickableNSImageView: NSView {
 
         // 如果有取色回调，先尝试取色
         if let onColorPick, let image = imageView.image {
-            print("  有 onColorPick 回调")
             let locationInView = convert(event.locationInWindow, from: nil)
 
             // 将视图坐标转换为图片像素坐标
             if let pixelPoint = viewPointToImagePixel(locationInView) {
-                print("  转换成功，像素坐标: \(pixelPoint)")
                 onColorPick(pixelPoint, image.size)
-            } else {
-                print("  ⚠️ 坐标转换失败（点击在图片外）")
             }
             return
         }
 
         // 否则进入拖拽模式
-        print("  没有 onColorPick，进入拖拽模式")
         isDragging = true
         dragStartPoint = convert(event.locationInWindow, from: nil)
         NSCursor.closedHand.set()
@@ -835,7 +915,7 @@ class ClickableNSImageView: NSView {
             height: currentPoint.y - dragStartPoint.y
         )
 
-        onDragChanged?(translation, currentScale)
+        onDragChanged?(translation)
     }
 
     override func mouseUp(with _: NSEvent) {
@@ -905,6 +985,24 @@ class ClickableNSImageView: NSView {
             .urlReadingFileURLsOnly: true,
         ]
         return (pasteboard.readObjects(forClasses: [NSURL.self], options: options) as? [URL]) ?? []
+    }
+
+    private var viewportGeometry: ViewportImageGeometry? {
+        guard let image = imageView.image else { return nil }
+        return ViewportImageGeometry(imageSize: image.size, viewportSize: bounds.size)
+    }
+
+    func updateImageLayout() {
+        guard let geometry = viewportGeometry else {
+            imageView.frame = bounds
+            return
+        }
+
+        let displayedOffset = geometry.clampedOffset(currentOffset, scale: currentScale)
+        imageView.frame = geometry.displayedRect(
+            scale: currentScale,
+            offset: displayedOffset
+        )
     }
 }
 
