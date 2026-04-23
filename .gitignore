@@ -15,6 +15,6 @@ Carthage/Build/
 # macOS
 .DS_Store
 ._*
+AppIcon.icns
+AppIcon.iconset/
 
-# 临时文档
-claude-docs/
