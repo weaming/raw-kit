@@ -27,7 +27,7 @@ struct ContentView: View {
     @State private var displayedIndex: Int?
     @State private var editingSessions: [UUID: ImageEditingSession] = [:]
     @State private var rightSidebarWidth: CGFloat = 400
-    @State private var leftSidebarWidth: CGFloat = 250
+    @AppStorage("LeftSidebarWidth") private var leftSidebarWidth: Double = 250
     @State private var presetsExpanded = true
     @State private var lutExpanded = true
     @State private var showingExportDialog = false

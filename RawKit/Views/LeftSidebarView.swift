@@ -2,7 +2,7 @@ import SwiftUI
 
 // 左侧边栏，包含多个可折叠的面板
 struct LeftSidebarView: View {
-    @Binding var width: CGFloat
+    @Binding var width: Double
     @Binding var presetsExpanded: Bool
     @Binding var lutExpanded: Bool
     let editingSessionID: UUID
@@ -10,8 +10,8 @@ struct LeftSidebarView: View {
     let onLoadPreset: (ImageAdjustments) -> Void
     let onLoadLUT: (URL?) -> Void
 
-    private let minWidth: CGFloat = 200
-    private let maxWidth: CGFloat = 400
+    private let minWidth = 200.0
+    private let maxWidth = 400.0
 
     var body: some View {
         HStack(spacing: 0) {
@@ -63,7 +63,7 @@ struct LeftSidebarView: View {
                     }
                 }
             }
-            .frame(width: width)
+            .frame(width: CGFloat(width))
             .background(Color(nsColor: .windowBackgroundColor))
 
             Divider()
@@ -76,7 +76,7 @@ struct LeftSidebarView: View {
                 .gesture(
                     DragGesture()
                         .onChanged { value in
-                            let newWidth = width + value.translation.width
+                            let newWidth = width + Double(value.translation.width)
                             width = min(max(newWidth, minWidth), maxWidth)
                         }
                 )
