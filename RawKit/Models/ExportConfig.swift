@@ -5,6 +5,7 @@ enum ExportFormat: String, Codable, CaseIterable {
     case tiff = "TIFF"
     case jpg = "JPEG"
     case heif = "HEIF"
+    case jpegGainMap = "JPEG + gain map"
     case dng = "DNG"
 
     var fileExtension: String {
@@ -12,6 +13,7 @@ enum ExportFormat: String, Codable, CaseIterable {
         case .tiff: "tiff"
         case .jpg: "jpg"
         case .heif: "heic"
+        case .jpegGainMap: "jpg"
         case .dng: "dng"
         }
     }
@@ -21,8 +23,13 @@ enum ExportFormat: String, Codable, CaseIterable {
         case .tiff: "16-bit 无损，适合打印和后期处理"
         case .jpg: "8-bit 有损压缩，适合网络分享"
         case .heif: "10-bit 高效压缩，适合 Apple 生态"
+        case .jpegGainMap: "SDR JPEG 内嵌 HDR gain map，适合兼容分享"
         case .dng: "16-bit 数字底片格式"
         }
+    }
+
+    func isCompatible(with outputPreset: ExportOutputPreset) -> Bool {
+        outputPreset.compatibleFormats.contains(self)
     }
 }
 
@@ -34,22 +41,103 @@ enum ExportColorSpace: String, Codable, CaseIterable {
     case proPhotoRGB = "ProPhoto RGB"
 }
 
+// 输出预设
+enum ExportOutputPreset: String, Codable, CaseIterable {
+    case sdrSRGB = "SDR sRGB"
+    case displayP3SDR = "Display P3 SDR"
+    case displayP3HLGHDR = "Display P3 HLG HDR"
+    case rec2020HLGHDR = "Rec.2020 HLG HDR"
+    case rec2020PQHDR = "Rec.2020 PQ HDR"
+
+    var description: String {
+        switch self {
+        case .sdrSRGB:
+            "标准 SDR 照片输出，兼容性最高"
+        case .displayP3SDR:
+            "宽色域 SDR，适合 Apple 设备和现代浏览器"
+        case .displayP3HLGHDR:
+            "照片 HDR 首选，Display P3 色域和 HLG 传递函数"
+        case .rec2020HLGHDR:
+            "HDR 宽色域输出，适合 HLG HDR 工作流"
+        case .rec2020PQHDR:
+            "HDR 宽色域输出，适合 PQ HDR 工作流"
+        }
+    }
+
+    var isHDR: Bool {
+        switch self {
+        case .sdrSRGB, .displayP3SDR:
+            false
+        case .displayP3HLGHDR, .rec2020HLGHDR, .rec2020PQHDR:
+            true
+        }
+    }
+
+    var compatibleFormats: [ExportFormat] {
+        if isHDR {
+            return [.heif, .jpegGainMap]
+        }
+
+        return [.jpg, .heif, .tiff, .dng]
+    }
+
+    var preferredFormat: ExportFormat {
+        isHDR ? .heif : .jpg
+    }
+
+    static func migrated(from colorSpace: ExportColorSpace) -> ExportOutputPreset {
+        switch colorSpace {
+        case .sRGB:
+            .sdrSRGB
+        case .displayP3:
+            .displayP3SDR
+        case .adobeRGB, .proPhotoRGB:
+            .sdrSRGB
+        }
+    }
+
+    var legacyColorSpace: ExportColorSpace {
+        switch self {
+        case .sdrSRGB:
+            .sRGB
+        case .displayP3SDR, .displayP3HLGHDR:
+            .displayP3
+        case .rec2020HLGHDR, .rec2020PQHDR:
+            .sRGB
+        }
+    }
+}
+
 // 导出配置
 struct ExportConfig: Codable, Identifiable {
     let id: UUID
     var name: String
     var format: ExportFormat
     var colorSpace: ExportColorSpace
+    var outputPreset: ExportOutputPreset
     var maxDimension: Int? // nil 表示原始尺寸
     var quality: Double // 0.0-1.0，仅用于 JPG 和 HEIF
     var outputDirectory: URL?
     var prefix: String // 文件名前缀
     var suffix: String // 文件名后缀
 
+    enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case format
+        case colorSpace
+        case outputPreset
+        case maxDimension
+        case quality
+        case outputDirectory
+        case prefix
+        case suffix
+    }
+
     init(
         name: String = "默认",
         format: ExportFormat = .jpg,
-        colorSpace: ExportColorSpace = .sRGB,
+        outputPreset: ExportOutputPreset = .sdrSRGB,
         maxDimension: Int? = nil,
         quality: Double = 0.98,
         outputDirectory: URL? = nil,
@@ -59,12 +147,41 @@ struct ExportConfig: Codable, Identifiable {
         id = UUID()
         self.name = name
         self.format = format
-        self.colorSpace = colorSpace
+        self.colorSpace = outputPreset.legacyColorSpace
+        self.outputPreset = outputPreset
         self.maxDimension = maxDimension
         self.quality = quality
         self.outputDirectory = outputDirectory
         self.prefix = prefix
         self.suffix = suffix
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        name = try container.decodeIfPresent(String.self, forKey: .name) ?? "默认"
+        format = try container.decodeIfPresent(ExportFormat.self, forKey: .format) ?? .jpg
+
+        let decodedColorSpace = try container.decodeIfPresent(
+            ExportColorSpace.self,
+            forKey: .colorSpace
+        ) ?? .sRGB
+
+        outputPreset = try container.decodeIfPresent(
+            ExportOutputPreset.self,
+            forKey: .outputPreset
+        ) ?? ExportOutputPreset.migrated(from: decodedColorSpace)
+
+        colorSpace = outputPreset.legacyColorSpace
+        maxDimension = try container.decodeIfPresent(Int.self, forKey: .maxDimension)
+        quality = try container.decodeIfPresent(Double.self, forKey: .quality) ?? 0.98
+        outputDirectory = try container.decodeIfPresent(URL.self, forKey: .outputDirectory)
+        prefix = try container.decodeIfPresent(String.self, forKey: .prefix) ?? ""
+        suffix = try container.decodeIfPresent(String.self, forKey: .suffix) ?? ""
+
+        if !format.isCompatible(with: outputPreset) {
+            format = outputPreset.preferredFormat
+        }
     }
 
     static let `default` = ExportConfig()

@@ -531,6 +531,31 @@ class ImageProcessor {
 
         return float4(safeColor * scale, image.a);
     }
+
+    [[ stitchable ]] float4 hdrDisplayBoost(sample_t image, float brightness, float highlights, float whites, float headroom) {
+        float3 safeColor = max(image.rgb, float3(0.0));
+        float luminance = sceneLuminance(safeColor);
+
+        if (luminance <= 1e-6) {
+            return float4(safeColor, image.a);
+        }
+
+        float displayLuma = encodeSRGBValue(compressPerceptualLuminance(luminance));
+        float highlightWeight = smoothstep(0.48, 0.88, displayLuma);
+        float whiteWeight = smoothstep(0.76, 0.98, displayLuma);
+
+        float baseScale = pow(2.0, brightness * 0.65);
+        float highlightScale = 1.0 + highlights * 1.10 * highlightWeight;
+        float whiteScale = 1.0 + whites * 1.60 * whiteWeight;
+        float combinedScale = max(0.05, baseScale * max(0.05, highlightScale) * max(0.05, whiteScale));
+
+        float3 boostedColor = safeColor * combinedScale;
+        float safeHeadroom = max(headroom, 1.0);
+        float3 shoulder = safeHeadroom * boostedColor / (boostedColor + safeHeadroom);
+        float3 protectedColor = mix(boostedColor, shoulder, smoothstep(safeHeadroom * 0.72, safeHeadroom * 1.35, boostedColor));
+
+        return float4(min(protectedColor, float3(safeHeadroom)), image.a);
+    }
     }
     """
 
@@ -554,10 +579,16 @@ class ImageProcessor {
 
     private static let perceptualLuminanceShiftKernel: CIColorKernel? = colorKernels["perceptualLuminanceShift"]
 
+    private static let hdrDisplayBoostKernel: CIColorKernel? = colorKernels["hdrDisplayBoost"]
+
     // 使用 CIContextManager 替代直接创建 context
     // CIContext 本身是线程安全的，通过 Manager 的 nonisolated getter 访问
     private static var ciContext: CIContext {
         CIContextManager.shared.getRenderContext()
+    }
+
+    private static var standardDisplayColorSpace: CGColorSpace {
+        CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
     }
 
     private static func isRawFormat(_ ext: String) -> Bool {
@@ -679,9 +710,7 @@ class ImageProcessor {
             return nil
         }
 
-        // 优化：直接使用 ciContext，移除 sync 阻塞
-        // CIContext 是线程安全的，不需要队列同步
-        guard let cgImage = ciContext.createCGImage(ciImage, from: extent) else {
+        guard let cgImage = createStandardDisplayCGImage(ciImage, from: extent) else {
             return nil
         }
 
@@ -696,8 +725,7 @@ class ImageProcessor {
             return nil
         }
 
-        // 直接在调用线程渲染（后台线程）
-        guard let cgImage = ciContext.createCGImage(ciImage, from: extent) else {
+        guard let cgImage = createStandardDisplayCGImage(ciImage, from: extent) else {
             return nil
         }
 
@@ -711,9 +739,16 @@ class ImageProcessor {
             return nil
         }
 
-        // 优化：直接使用 ciContext，移除 sync 阻塞
-        // CIContext 是线程安全的，不需要队列同步
-        return ciContext.createCGImage(ciImage, from: extent)
+        return createStandardDisplayCGImage(ciImage, from: extent)
+    }
+
+    private static func createStandardDisplayCGImage(_ ciImage: CIImage, from extent: CGRect) -> CGImage? {
+        ciContext.createCGImage(
+            ciImage,
+            from: extent,
+            format: .RGBA8,
+            colorSpace: standardDisplayColorSpace
+        )
     }
 
     private static func loadWithCoreImage(from url: URL) -> CIImage? {
@@ -736,7 +771,14 @@ class ImageProcessor {
         let options: [CIImageOption: Any] = [
             .applyOrientationProperty: true,
             .properties: [:],
+            .toneMapHDRtoSDR: false,
+            .expandToHDR: true,
         ]
+
+        if let expandedImage = loadHDRGainMapImage(from: url, baseOptions: options) {
+            print("ImageProcessor: ✓ HDR gain map 已融合")
+            return expandedImage
+        }
 
         if let ciImage = CIImage(contentsOf: url, options: options) {
             print("ImageProcessor: ✓ CIImage 直接加载成功")
@@ -753,13 +795,63 @@ class ImageProcessor {
         let imageType = CGImageSourceGetType(imageSource)
         print("ImageProcessor: 图片类型: \(imageType ?? "unknown" as CFString)")
 
-        guard let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, nil) else {
+        let cgImageOptions: [CFString: Any] = [
+            kCGImageSourceDecodeRequest: kCGImageSourceDecodeToHDR,
+            kCGImageSourceDecodeRequestOptions: [
+                kCGImageSourceGenerateImageSpecificLumaScaling: true,
+            ],
+        ]
+
+        guard let cgImage = CGImageSourceCreateImageAtIndex(
+            imageSource,
+            0,
+            cgImageOptions as CFDictionary
+        ) else {
             print("ImageProcessor: ✗ 无法从 CGImageSource 创建 CGImage")
             return nil
         }
 
         print("ImageProcessor: ✓ CGImageSource 加载成功")
         return CIImage(cgImage: cgImage)
+    }
+
+    private static func loadHDRGainMapImage(
+        from url: URL,
+        baseOptions: [CIImageOption: Any]
+    ) -> CIImage? {
+        let gainMapOptions: [CIImageOption: Any] = [
+            .applyOrientationProperty: true,
+            .auxiliaryHDRGainMap: true,
+        ]
+
+        guard let gainMap = CIImage(contentsOf: url, options: gainMapOptions) else {
+            return nil
+        }
+
+        var sdrBaseOptions = baseOptions
+        sdrBaseOptions[.expandToHDR] = false
+        sdrBaseOptions[.toneMapHDRtoSDR] = false
+        sdrBaseOptions[.auxiliaryHDRGainMap] = false
+
+        guard let sdrBaseImage = CIImage(contentsOf: url, options: sdrBaseOptions) else {
+            return nil
+        }
+
+        let expandedImage = sdrBaseImage.applyingGainMap(gainMap)
+        let resolvedHeadroom = max(
+            Float(expandedImage.contentHeadroom),
+            Float(sdrBaseImage.contentHeadroom),
+            Float(gainMap.contentHeadroom),
+            2.0
+        )
+
+        if #available(macOS 16.0, *) {
+            return expandedImage.settingContentHeadroom(
+                resolvedHeadroom
+            )
+        }
+
+        return expandedImage
     }
 
     static func extractRawWhiteBalance(from url: URL) -> (temperature: Double, tint: Double)? {
@@ -1831,7 +1923,49 @@ class ImageProcessor {
             )
         }
 
+        if adjustments.isHDREnabled,
+           adjustments.isHDRAutoAdjustmentEnabled ||
+           abs(adjustments.hdrBrightness) > 0.0001 ||
+           abs(adjustments.hdrHighlights) > 0.0001 ||
+           abs(adjustments.hdrWhites) > 0.0001 {
+            result = applyHDRDisplayBoost(to: result, adjustments: adjustments)
+        } else if adjustments.isHDREnabled, #available(macOS 16.0, *) {
+            result = result.settingContentHeadroom(Float(adjustments.hdrHeadroom))
+        }
+
         return result
+    }
+
+    static func convertToDisplayCGImage(_ ciImage: CIImage, adjustments: ImageAdjustments) -> CGImage? {
+        guard adjustments.isHDREnabled else {
+            return convertToCGImage(ciImage)
+        }
+
+        let extent = ciImage.extent
+        guard !extent.isEmpty, extent.isInfinite == false else {
+            return nil
+        }
+
+        let outputImage: CIImage
+        if #available(macOS 16.0, *) {
+            outputImage = ciImage.settingContentHeadroom(Float(adjustments.hdrHeadroom))
+        } else {
+            outputImage = ciImage
+        }
+
+        let hdrColorSpace = CGColorSpace(name: CGColorSpace.itur_2100_HLG) ??
+            CGColorSpace(name: CGColorSpace.displayP3_HLG)
+
+        guard let hdrColorSpace else {
+            return convertToCGImage(ciImage)
+        }
+
+        return ciContext.createCGImage(
+            outputImage,
+            from: extent,
+            format: .RGBAh,
+            colorSpace: hdrColorSpace
+        )
     }
 
     // 摄影曝光调整 - 真实 EV 曝光
@@ -1885,6 +2019,34 @@ class ImageProcessor {
                 maxShift,
             ]
         ) ?? image
+    }
+
+    private static func applyHDRDisplayBoost(to image: CIImage, adjustments: ImageAdjustments) -> CIImage {
+        guard let kernel = hdrDisplayBoostKernel else {
+            return image
+        }
+
+        let headroom = min(
+            max(adjustments.hdrHeadroom, ImageAdjustments.hdrHeadroomRange.lowerBound),
+            ImageAdjustments.hdrHeadroomRange.upperBound
+        )
+
+        let output = kernel.apply(
+            extent: image.extent,
+            arguments: [
+                image,
+                CGFloat(adjustments.hdrBrightness),
+                CGFloat(adjustments.hdrHighlights),
+                CGFloat(adjustments.hdrWhites),
+                CGFloat(headroom),
+            ]
+        ) ?? image
+
+        if #available(macOS 16.0, *) {
+            return output.settingContentHeadroom(Float(headroom))
+        }
+
+        return output
     }
 
     // Photoshop 风格的对比度调整

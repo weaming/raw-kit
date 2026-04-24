@@ -15,6 +15,12 @@ struct ImageAdjustments: Equatable, Codable {
     var tint: Double = 0.0
     var vibrance: Double = 0.0
     var sharpness: Double = 0.0
+    var isHDREnabled: Bool = false
+    var hdrBrightness: Double = 0.0
+    var hdrHighlights: Double = 0.0
+    var hdrWhites: Double = 0.0
+    var hdrHeadroom: Double = 2.0
+    var isHDRAutoAdjustmentEnabled: Bool = true
 
     var rotation: Int = 0
     var flipHorizontal: Bool = false
@@ -32,6 +38,92 @@ struct ImageAdjustments: Equatable, Codable {
     var lutProfile: LUTColorProfile?
 
     static let `default` = ImageAdjustments()
+
+    enum CodingKeys: String, CodingKey {
+        case contrast
+        case saturation
+        case exposure
+        case perceptualExposure
+        case highlights
+        case shadows
+        case whites
+        case blacks
+        case clarity
+        case dehaze
+        case temperature
+        case tint
+        case vibrance
+        case sharpness
+        case isHDREnabled
+        case hdrBrightness
+        case hdrHighlights
+        case hdrWhites
+        case hdrHeadroom
+        case isHDRAutoAdjustmentEnabled
+        case rotation
+        case flipHorizontal
+        case flipVertical
+        case rgbCurve
+        case redCurve
+        case greenCurve
+        case blueCurve
+        case luminanceCurve
+        case lutURL
+        case lutAlpha
+        case lutColorSpace
+        case lutProfile
+    }
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+
+        contrast = try container.decodeIfPresent(Double.self, forKey: .contrast) ?? contrast
+        saturation = try container.decodeIfPresent(Double.self, forKey: .saturation) ?? saturation
+        exposure = try container.decodeIfPresent(Double.self, forKey: .exposure) ?? exposure
+        perceptualExposure = try container.decodeIfPresent(
+            Double.self,
+            forKey: .perceptualExposure
+        ) ?? perceptualExposure
+        highlights = try container.decodeIfPresent(Double.self, forKey: .highlights) ?? highlights
+        shadows = try container.decodeIfPresent(Double.self, forKey: .shadows) ?? shadows
+        whites = try container.decodeIfPresent(Double.self, forKey: .whites) ?? whites
+        blacks = try container.decodeIfPresent(Double.self, forKey: .blacks) ?? blacks
+        clarity = try container.decodeIfPresent(Double.self, forKey: .clarity) ?? clarity
+        dehaze = try container.decodeIfPresent(Double.self, forKey: .dehaze) ?? dehaze
+        temperature = try container.decodeIfPresent(Double.self, forKey: .temperature) ?? temperature
+        tint = try container.decodeIfPresent(Double.self, forKey: .tint) ?? tint
+        vibrance = try container.decodeIfPresent(Double.self, forKey: .vibrance) ?? vibrance
+        sharpness = try container.decodeIfPresent(Double.self, forKey: .sharpness) ?? sharpness
+        isHDREnabled = try container.decodeIfPresent(Bool.self, forKey: .isHDREnabled) ?? isHDREnabled
+        hdrBrightness = try container.decodeIfPresent(Double.self, forKey: .hdrBrightness) ?? hdrBrightness
+        hdrHighlights = try container.decodeIfPresent(Double.self, forKey: .hdrHighlights) ?? hdrHighlights
+        hdrWhites = try container.decodeIfPresent(Double.self, forKey: .hdrWhites) ?? hdrWhites
+        hdrHeadroom = try container.decodeIfPresent(Double.self, forKey: .hdrHeadroom) ?? hdrHeadroom
+        isHDRAutoAdjustmentEnabled = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .isHDRAutoAdjustmentEnabled
+        ) ?? isHDRAutoAdjustmentEnabled
+
+        rotation = try container.decodeIfPresent(Int.self, forKey: .rotation) ?? rotation
+        flipHorizontal = try container.decodeIfPresent(Bool.self, forKey: .flipHorizontal) ?? flipHorizontal
+        flipVertical = try container.decodeIfPresent(Bool.self, forKey: .flipVertical) ?? flipVertical
+
+        rgbCurve = try container.decodeIfPresent(CurveAdjustment.self, forKey: .rgbCurve) ?? rgbCurve
+        redCurve = try container.decodeIfPresent(CurveAdjustment.self, forKey: .redCurve) ?? redCurve
+        greenCurve = try container.decodeIfPresent(CurveAdjustment.self, forKey: .greenCurve) ?? greenCurve
+        blueCurve = try container.decodeIfPresent(CurveAdjustment.self, forKey: .blueCurve) ?? blueCurve
+        luminanceCurve = try container.decodeIfPresent(
+            CurveAdjustment.self,
+            forKey: .luminanceCurve
+        ) ?? luminanceCurve
+
+        lutURL = try container.decodeIfPresent(URL.self, forKey: .lutURL)
+        lutAlpha = try container.decodeIfPresent(Double.self, forKey: .lutAlpha) ?? lutAlpha
+        lutColorSpace = try container.decodeIfPresent(String.self, forKey: .lutColorSpace) ?? lutColorSpace
+        lutProfile = try container.decodeIfPresent(LUTColorProfile.self, forKey: .lutProfile)
+    }
 
     var lutColorProfile: LUTColorProfile {
         get {
@@ -79,6 +171,26 @@ struct ImageAdjustments: Equatable, Codable {
         lutProfile = savedLutProfile
     }
 
+    mutating func reset(to baseline: ImageAdjustments) {
+        let savedRotation = rotation
+        let savedFlipH = flipHorizontal
+        let savedFlipV = flipVertical
+        let savedLutURL = lutURL
+        let savedLutAlpha = lutAlpha
+        let savedLutColorSpace = lutColorSpace
+        let savedLutProfile = lutProfile
+
+        self = baseline
+
+        rotation = savedRotation
+        flipHorizontal = savedFlipH
+        flipVertical = savedFlipV
+        lutURL = savedLutURL
+        lutAlpha = savedLutAlpha
+        lutColorSpace = savedLutColorSpace
+        lutProfile = savedLutProfile
+    }
+
     // 检查基础调整组是否有变化
     var hasBasicAdjustments: Bool {
         exposure != 0.0 ||
@@ -88,6 +200,15 @@ struct ImageAdjustments: Equatable, Codable {
             highlights != 1.0 ||
             shadows != 0.0 ||
             blacks != 0.0
+    }
+
+    var hasHDRAdjustments: Bool {
+        isHDREnabled ||
+            hdrBrightness != 0.0 ||
+            hdrHighlights != 0.0 ||
+            hdrWhites != 0.0 ||
+            hdrHeadroom != 2.0 ||
+            isHDRAutoAdjustmentEnabled != true
     }
 
     // 检查色彩调整组是否有变化
@@ -121,6 +242,15 @@ struct ImageAdjustments: Equatable, Codable {
         blacks = 0.0
     }
 
+    mutating func resetHDR() {
+        isHDREnabled = false
+        hdrBrightness = 0.0
+        hdrHighlights = 0.0
+        hdrWhites = 0.0
+        hdrHeadroom = 2.0
+        isHDRAutoAdjustmentEnabled = true
+    }
+
     // 重置色彩调整组
     mutating func resetColor() {
         saturation = 1.0
@@ -145,6 +275,7 @@ struct ImageAdjustments: Equatable, Codable {
 enum AdjustmentSyncGroup: String, CaseIterable, Hashable, Identifiable {
     case lut
     case basic
+    case hdr
     case color
     case detail
 
@@ -154,6 +285,7 @@ enum AdjustmentSyncGroup: String, CaseIterable, Hashable, Identifiable {
         switch self {
         case .lut: "LUT"
         case .basic: "基础"
+        case .hdr: "HDR"
         case .color: "色彩"
         case .detail: "细节"
         }
@@ -161,6 +293,22 @@ enum AdjustmentSyncGroup: String, CaseIterable, Hashable, Identifiable {
 }
 
 extension ImageAdjustments {
+    static func sourceHDRBaseline(headroom: Double?) -> ImageAdjustments {
+        guard let headroom,
+              headroom > 1.01 else {
+            return .default
+        }
+
+        var adjustments = ImageAdjustments.default
+        adjustments.isHDREnabled = true
+        adjustments.hdrHeadroom = min(
+            max(headroom, ImageAdjustments.hdrHeadroomRange.lowerBound),
+            ImageAdjustments.hdrHeadroomRange.upperBound
+        )
+        adjustments.isHDRAutoAdjustmentEnabled = false
+        return adjustments
+    }
+
     static let contrastRange: ClosedRange<Double> = -1.0 ... 1.0
     static let saturationRange: ClosedRange<Double> = 0.0 ... 2.0
     static let exposureRange: ClosedRange<Double> = -5.0 ... 5.0
@@ -175,6 +323,10 @@ extension ImageAdjustments {
     static let tintRange: ClosedRange<Double> = -100.0 ... 100.0
     static let vibranceRange: ClosedRange<Double> = -1.0 ... 1.0
     static let sharpnessRange: ClosedRange<Double> = -1.0 ... 2.0
+    static let hdrBrightnessRange: ClosedRange<Double> = -2.0 ... 2.0
+    static let hdrHighlightsRange: ClosedRange<Double> = -1.0 ... 1.0
+    static let hdrWhitesRange: ClosedRange<Double> = -1.0 ... 1.0
+    static let hdrHeadroomRange: ClosedRange<Double> = 1.0 ... 32.0
 
     func synced(with source: ImageAdjustments, groups: Set<AdjustmentSyncGroup>) -> ImageAdjustments {
         var result = self
@@ -204,6 +356,14 @@ extension ImageAdjustments {
             highlights = source.highlights
             shadows = source.shadows
             blacks = source.blacks
+
+        case .hdr:
+            isHDREnabled = source.isHDREnabled
+            hdrBrightness = source.hdrBrightness
+            hdrHighlights = source.hdrHighlights
+            hdrWhites = source.hdrWhites
+            hdrHeadroom = source.hdrHeadroom
+            isHDRAutoAdjustmentEnabled = source.isHDRAutoAdjustmentEnabled
 
         case .color:
             saturation = source.saturation

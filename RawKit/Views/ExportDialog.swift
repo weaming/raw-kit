@@ -102,7 +102,13 @@ struct ExportDialog: View {
     }
 
     private var supportsQuality: Bool {
-        currentConfig.format == .jpg || currentConfig.format == .heif
+        currentConfig.format == .jpg ||
+            currentConfig.format == .heif ||
+            currentConfig.format == .jpegGainMap
+    }
+
+    private var availableFormats: [ExportFormat] {
+        currentConfig.outputPreset.compatibleFormats
     }
 
     private var canExport: Bool {
@@ -167,6 +173,11 @@ struct ExportDialog: View {
         .onAppear {
             loadInitialConfig()
             focusedField = Field.none
+        }
+        .onSubmit {
+            Task {
+                await startExport()
+            }
         }
         .sheet(isPresented: $showingSavePresetDialog) {
             SaveExportPresetDialog(
@@ -351,7 +362,7 @@ struct ExportDialog: View {
         ) {
             VStack(alignment: .leading, spacing: 14) {
                 Picker("格式", selection: $currentConfig.format) {
-                    ForEach(ExportFormat.allCases, id: \.self) { format in
+                    ForEach(availableFormats, id: \.self) { format in
                         Text(format.rawValue).tag(format)
                     }
                 }
@@ -359,17 +370,21 @@ struct ExportDialog: View {
 
                 HStack(alignment: .top, spacing: 20) {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("色彩空间")
+                        Text("输出预设")
                             .font(.subheadline)
                             .fontWeight(.medium)
 
-                        Picker("", selection: $currentConfig.colorSpace) {
-                            ForEach(ExportColorSpace.allCases, id: \.self) { colorSpace in
-                                Text(colorSpace.rawValue).tag(colorSpace)
+                        Picker("", selection: $currentConfig.outputPreset) {
+                            ForEach(ExportOutputPreset.allCases, id: \.self) { outputPreset in
+                                Text(outputPreset.rawValue).tag(outputPreset)
                             }
                         }
                         .pickerStyle(.menu)
                         .frame(maxWidth: .infinity, alignment: .leading)
+
+                        Text(currentConfig.outputPreset.description)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -403,6 +418,13 @@ struct ExportDialog: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
+            }
+        }
+        .onChange(of: currentConfig.outputPreset) { _, newOutputPreset in
+            currentConfig.colorSpace = newOutputPreset.legacyColorSpace
+
+            if !currentConfig.format.isCompatible(with: newOutputPreset) {
+                currentConfig.format = newOutputPreset.preferredFormat
             }
         }
     }
@@ -573,7 +595,7 @@ struct ExportDialog: View {
                     await startExport()
                 }
             }
-            .keyboardShortcut(.return)
+            .keyboardShortcut(.defaultAction)
             .disabled(!canExport)
         }
         .padding(.horizontal, 20)
@@ -643,7 +665,7 @@ struct ExportDialog: View {
         let preset = ExportConfig(
             name: trimmedName,
             format: currentConfig.format,
-            colorSpace: currentConfig.colorSpace,
+            outputPreset: currentConfig.outputPreset,
             maxDimension: currentConfig.maxDimension,
             quality: currentConfig.quality,
             outputDirectory: currentConfig.outputDirectory,
@@ -684,7 +706,7 @@ struct ExportDialog: View {
 
     private func configsMatch(_ config1: ExportConfig, _ config2: ExportConfig) -> Bool {
         config1.format == config2.format &&
-            config1.colorSpace == config2.colorSpace &&
+            config1.outputPreset == config2.outputPreset &&
             config1.maxDimension == config2.maxDimension &&
             abs(config1.quality - config2.quality) < 0.001 &&
             config1.outputDirectory?.path == config2.outputDirectory?.path &&
@@ -699,11 +721,14 @@ struct ExportDialog: View {
     private func configSummary(_ config: ExportConfig) -> String {
         let sizeLabel = config.maxDimension.map { "\($0) px" } ?? "原始尺寸"
 
-        if config.format == .jpg || config.format == .heif {
-            return "\(config.format.rawValue) · \(config.colorSpace.rawValue) · \(sizeLabel) · \(Int(config.quality * 100))%"
+        if config.format == .jpg ||
+            config.format == .heif ||
+            config.format == .jpegGainMap
+        {
+            return "\(config.format.rawValue) · \(config.outputPreset.rawValue) · \(sizeLabel) · \(Int(config.quality * 100))%"
         }
 
-        return "\(config.format.rawValue) · \(config.colorSpace.rawValue) · \(sizeLabel)"
+        return "\(config.format.rawValue) · \(config.outputPreset.rawValue) · \(sizeLabel)"
     }
 
     private func selectOutputDirectory() {

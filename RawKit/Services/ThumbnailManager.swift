@@ -65,11 +65,28 @@ class ThumbnailManager: ObservableObject {
             )
         }
 
-        guard let cgImage = ImageProcessor.convertToCGImage(thumbnailImage) else {
+        let cgImage = if adjustments.isHDREnabled {
+            ImageProcessor.convertToDisplayCGImage(thumbnailImage, adjustments: adjustments)
+        } else {
+            ImageProcessor.convertToCGImage(thumbnailImage)
+        }
+
+        guard let cgImage else {
             return nil
         }
 
-        let size = NSSize(width: thumbnailSize, height: thumbnailSize)
+        let extent = thumbnailImage.extent
+        let maxDimension = max(extent.width, extent.height)
+        guard maxDimension > 0 else {
+            return nil
+        }
+
+        let scale = thumbnailSize / maxDimension
+        let size = NSSize(
+            width: max(extent.width * scale, 1),
+            height: max(extent.height * scale, 1)
+        )
+
         return NSImage(cgImage: cgImage, size: size)
     }
 }

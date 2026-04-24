@@ -34,6 +34,7 @@ struct ImageDetailView: View {
     private struct RenderSnapshot: @unchecked Sendable {
         let requestID: Int
         let originalImage: CIImage
+        let sourceHDRHeadroom: Double?
         let viewportSize: CGSize
         let adjustments: ImageAdjustments
         let showOriginal: Bool
@@ -89,6 +90,18 @@ struct ImageDetailView: View {
         case fullResolution
     }
 
+    private var isDisplayedImageHDR: Bool {
+        if showOriginal {
+            return (imageInfo.hdrHeadroom ?? 1.0) > 1.01
+        }
+
+        return editingState.adjustments.isHDREnabled
+    }
+
+    private var resetBaseline: ImageAdjustments {
+        ImageAdjustments.sourceHDRBaseline(headroom: imageInfo.hdrHeadroom)
+    }
+
     init(
         imageInfo: ImageInfo,
         session: ImageEditingSession,
@@ -125,6 +138,7 @@ struct ImageDetailView: View {
                     adjustedCIImage: adjustedCIImage ?? originalCIImage,
                     previewCIImage: previewCIImage,
                     previewRevision: previewRevision,
+                    resetBaseline: resetBaseline,
                     width: $sidebarWidth,
                     whiteBalancePickMode: $whiteBalancePickMode
                 )
@@ -290,6 +304,7 @@ struct ImageDetailView: View {
             return RenderSnapshot(
                 requestID: request.id,
                 originalImage: originalImage,
+                sourceHDRHeadroom: imageInfo.hdrHeadroom,
                 viewportSize: viewportSize,
                 adjustments: request.adjustments,
                 showOriginal: showOriginal
@@ -396,11 +411,17 @@ struct ImageDetailView: View {
         let outputImage = snapshot.showOriginal
             ? scaledImage
             : ImageProcessor.applyAdjustments(to: scaledImage, adjustments: snapshot.adjustments)
+        let displayAdjustments = snapshot.showOriginal
+            ? ImageAdjustments.sourceHDRBaseline(headroom: snapshot.sourceHDRHeadroom)
+            : snapshot.adjustments
 
         return RenderOutput(
             requestID: snapshot.requestID,
             image: outputImage,
-            cgImage: ImageProcessor.convertToCGImage(outputImage),
+            cgImage: ImageProcessor.convertToDisplayCGImage(
+                outputImage,
+                adjustments: displayAdjustments
+            ),
             adjustments: snapshot.adjustments,
             showOriginal: snapshot.showOriginal
         )
@@ -572,6 +593,7 @@ struct ImageDetailView: View {
                     currentPixelInfo: $currentPixelInfo,
                     originalCIImage: originalCIImage,
                     displayedCIImage: previewCIImage ?? adjustedCIImage ?? originalCIImage,
+                    isHDREnabled: isDisplayedImageHDR,
                     pickMode: whiteBalancePickMode,
                     onColorPick: whiteBalancePickMode != .none ? handleColorPick : nil,
                     onCancelPickMode: cancelWhiteBalancePickMode,
@@ -613,6 +635,7 @@ struct ImageDetailView: View {
             curvePickSamples: $curvePickSamples,
             showAdjustmentPanel: $showAdjustmentPanel,
             showOriginal: $showOriginal,
+            resetBaseline: resetBaseline,
             pixelInfo: currentPixelInfo,
             syncTargetCount: syncTargetCount,
             onSync: syncTargetCount > 0 ? openSyncDialog : nil
@@ -648,6 +671,7 @@ struct ImageInfoBar: View {
     @Binding var curvePickSamples: CurvePickSamples
     @Binding var showAdjustmentPanel: Bool
     @Binding var showOriginal: Bool
+    let resetBaseline: ImageAdjustments
     let pixelInfo: PixelInfo?
     let syncTargetCount: Int
     let onSync: (() -> Void)?
@@ -740,7 +764,7 @@ struct ImageInfoBar: View {
 
             // 重置按钮
             Button(action: {
-                var newAdj = ImageAdjustments.default
+                var newAdj = resetBaseline
                 // 保留变换设置
                 newAdj.rotation = adjustments.rotation
                 newAdj.flipHorizontal = adjustments.flipHorizontal

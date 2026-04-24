@@ -48,7 +48,7 @@ class ImageExporter {
             resizedImage,
             to: outputURL,
             format: config.format,
-            colorSpace: config.colorSpace,
+            outputPreset: config.outputPreset,
             quality: config.quality
         )
 
@@ -101,13 +101,12 @@ class ImageExporter {
         _ image: CIImage,
         to url: URL,
         format: ExportFormat,
-        colorSpace: ExportColorSpace,
+        outputPreset: ExportOutputPreset,
         quality: Double
     ) throws {
         let context = exportContext
 
-        // 获取色彩空间
-        let cgColorSpace = getColorSpace(for: colorSpace)
+        let cgColorSpace = getColorSpace(for: outputPreset)
 
         switch format {
         case .tiff:
@@ -128,21 +127,30 @@ class ImageExporter {
                 quality: quality,
                 context: context
             )
+        case .jpegGainMap:
+            try exportJPEGGainMap(
+                image,
+                to: url,
+                quality: quality,
+                context: context
+            )
         case .dng:
             try exportDNG(image, to: url, colorSpace: cgColorSpace, context: context)
         }
     }
 
-    private static func getColorSpace(for exportSpace: ExportColorSpace) -> CGColorSpace {
-        switch exportSpace {
-        case .sRGB:
+    private static func getColorSpace(for outputPreset: ExportOutputPreset) -> CGColorSpace {
+        switch outputPreset {
+        case .sdrSRGB:
             CGColorSpace(name: CGColorSpace.sRGB)!
-        case .displayP3:
+        case .displayP3SDR:
             CGColorSpace(name: CGColorSpace.displayP3)!
-        case .adobeRGB:
-            CGColorSpace(name: CGColorSpace.adobeRGB1998)!
-        case .proPhotoRGB:
-            CGColorSpace(name: CGColorSpace.rommrgb)!
+        case .displayP3HLGHDR:
+            CGColorSpace(name: CGColorSpace.displayP3_HLG)!
+        case .rec2020HLGHDR:
+            CGColorSpace(name: CGColorSpace.itur_2100_HLG)!
+        case .rec2020PQHDR:
+            CGColorSpace(name: CGColorSpace.itur_2100_PQ)!
         }
     }
 
@@ -208,14 +216,62 @@ class ImageExporter {
         quality: Double,
         context: CIContext
     ) throws {
-        // 使用 RGBA8 格式，但系统会自动优化：如果图片不透明，不会保存 alpha 通道
-        try context.writeHEIFRepresentation(
+        try context.writeHEIF10Representation(
             of: image,
             to: url,
-            format: .RGBA8,
             colorSpace: colorSpace,
             options: [
                 kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: quality,
+            ]
+        )
+    }
+
+    private static func exportJPEGGainMap(
+        _ image: CIImage,
+        to url: URL,
+        quality: Double,
+        context: CIContext
+    ) throws {
+        let sdrColorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
+        let hdrImage = normalizedHDRImage(image)
+        let sdrImage = makeSDRBaseImage(from: hdrImage)
+
+        try context.writeJPEGRepresentation(
+            of: sdrImage,
+            to: url,
+            colorSpace: sdrColorSpace,
+            options: [
+                kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: quality,
+                .hdrImage: hdrImage,
+            ]
+        )
+    }
+
+    private static func normalizedHDRImage(_ image: CIImage) -> CIImage {
+        if #available(macOS 16.0, *) {
+            return image.settingContentHeadroom(max(Float(image.contentHeadroom), 1.0))
+        }
+
+        return image
+    }
+
+    private static func makeSDRBaseImage(from image: CIImage) -> CIImage {
+        if #available(macOS 16.0, *),
+           let filter = CIFilter(name: "CISystemToneMap") {
+            filter.setValue(image, forKey: kCIInputImageKey)
+            filter.setValue(1.0, forKey: "inputDisplayHeadroom")
+            filter.setValue(CIDynamicRangeOption.standard.rawValue, forKey: "inputPreferredDynamicRange")
+
+            if let outputImage = filter.outputImage {
+                return outputImage
+            }
+        }
+
+        return image.applyingFilter(
+            "CIColorClamp",
+            parameters: [
+                "inputMinComponents": CIVector(x: 0, y: 0, z: 0, w: 0),
+                "inputMaxComponents": CIVector(x: 1, y: 1, z: 1, w: 1),
             ]
         )
     }

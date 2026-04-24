@@ -13,7 +13,7 @@ class ImageManager: ObservableObject {
     ]
 
     private let normalExtensions = [
-        "jpg", "jpeg", "png", "tiff", "tif",
+        "jpg", "jpeg", "png", "tiff", "tif", "heic", "heif", "hif",
     ]
 
     private var supportedExtensions: [String] {
@@ -47,7 +47,10 @@ class ImageManager: ObservableObject {
         }
     }
 
-    func addImages(from urls: [URL]) {
+    func addImages(
+        from urls: [URL],
+        onAdded: (([ImageInfo]) -> Void)? = nil
+    ) {
         guard !urls.isEmpty else { return }
 
         let supportedExtensions = self.supportedExtensions
@@ -72,9 +75,11 @@ class ImageManager: ObservableObject {
             let newImages = resolvedURLs
                 .filter { url in !images.contains(where: { $0.url == url }) }
                 .map { ImageInfo(url: $0) }
+                .sorted { $0.filename < $1.filename }
 
             images.append(contentsOf: newImages)
             images.sort { $0.filename < $1.filename }
+            onAdded?(newImages)
         }
     }
 
@@ -283,7 +288,13 @@ class ImageManager: ObservableObject {
     }
 
     private func allowedContentTypes() -> [UTType] {
-        var types: [UTType] = [.jpeg, .png, .tiff]
+        var types: [UTType] = []
+
+        for ext in normalExtensions {
+            if let utType = UTType(filenameExtension: ext) {
+                types.append(utType)
+            }
+        }
 
         // 添加通用 RAW 图片类型
         if let rawType = UTType("public.camera-raw-image") {

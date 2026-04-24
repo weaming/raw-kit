@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 private struct HistogramData: Sendable {
@@ -7,6 +8,142 @@ private struct HistogramData: Sendable {
     let luminance: [Int]
 }
 
+private struct DisplayHDRInfo: Equatable {
+    static let referenceWhiteNits = 100.0
+    static let fallbackHeadroom = 16.0
+
+    var headroom: Double
+    var activeHeadroom: Double
+    var potentialHeadroom: Double
+    var isFallback: Bool
+
+    var estimatedPeakNits: Int {
+        Int((headroom * Self.referenceWhiteNits).rounded())
+    }
+}
+
+private struct DisplayHDRInfoReader: NSViewRepresentable {
+    let onChange: (DisplayHDRInfo) -> Void
+
+    func makeNSView(context: Context) -> DisplayHDRInfoReaderView {
+        let view = DisplayHDRInfoReaderView()
+        view.onChange = onChange
+        context.coordinator.readerView = view
+        view.scheduleUpdate()
+        return view
+    }
+
+    func updateNSView(_ nsView: DisplayHDRInfoReaderView, context: Context) {
+        nsView.onChange = onChange
+        context.coordinator.readerView = nsView
+        nsView.scheduleUpdate()
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    final class Coordinator {
+        weak var readerView: DisplayHDRInfoReaderView?
+    }
+}
+
+private final class DisplayHDRInfoReaderView: NSView {
+    var onChange: ((DisplayHDRInfo) -> Void)?
+
+    private var observerTokens: [NSObjectProtocol] = []
+    private var lastInfo: DisplayHDRInfo?
+
+    override var intrinsicContentSize: NSSize {
+        .zero
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        registerObservers()
+        scheduleUpdate()
+    }
+
+    deinit {
+        removeObservers()
+    }
+
+    func scheduleUpdate() {
+        DispatchQueue.main.async { [weak self] in
+            self?.publishCurrentInfo()
+        }
+    }
+
+    private func removeObservers() {
+        for token in observerTokens {
+            NotificationCenter.default.removeObserver(token)
+        }
+
+        observerTokens.removeAll()
+    }
+
+    private func registerObservers() {
+        removeObservers()
+
+        let notificationCenter = NotificationCenter.default
+
+        observerTokens.append(
+            notificationCenter.addObserver(
+                forName: NSApplication.didChangeScreenParametersNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.publishCurrentInfo()
+            }
+        )
+
+        if let window {
+            observerTokens.append(
+                notificationCenter.addObserver(
+                    forName: NSWindow.didChangeScreenNotification,
+                    object: window,
+                    queue: .main
+                ) { [weak self] _ in
+                    self?.publishCurrentInfo()
+                }
+            )
+        }
+    }
+
+    private func publishCurrentInfo() {
+        let screen = window?.screen ?? NSScreen.main
+        let activeHeadroom = Double(screen?.maximumExtendedDynamicRangeColorComponentValue ?? 1.0)
+        let potentialHeadroom: Double
+        if #available(macOS 10.15, *) {
+            potentialHeadroom = Double(screen?.maximumPotentialExtendedDynamicRangeColorComponentValue ?? 1.0)
+        } else {
+            potentialHeadroom = activeHeadroom
+        }
+
+        let reportedHeadroom = max(activeHeadroom, potentialHeadroom)
+        let isFallback = reportedHeadroom <= ImageAdjustments.default.hdrHeadroom + 0.0001
+        let resolvedHeadroom = isFallback ? DisplayHDRInfo.fallbackHeadroom : reportedHeadroom
+        let headroom = min(
+            max(1.0, resolvedHeadroom),
+            DisplayHDRInfo.fallbackHeadroom
+        )
+        let info = DisplayHDRInfo(
+            headroom: headroom,
+            activeHeadroom: activeHeadroom,
+            potentialHeadroom: potentialHeadroom,
+            isFallback: isFallback
+        )
+
+        guard info != lastInfo else { return }
+        lastInfo = info
+        onChange?(info)
+    }
+}
+
 struct ResizableAdjustmentPanel: View, Equatable {
     @Binding var adjustments: ImageAdjustments
     @Binding var curvePickSamples: CurvePickSamples
@@ -14,6 +151,7 @@ struct ResizableAdjustmentPanel: View, Equatable {
     let adjustedCIImage: CIImage?
     let previewCIImage: CIImage?
     let previewRevision: Int
+    let resetBaseline: ImageAdjustments
     @Binding var width: CGFloat
     @Binding var whiteBalancePickMode: CurveAdjustmentView.PickMode
     @State private var isDragging = false
@@ -24,6 +162,7 @@ struct ResizableAdjustmentPanel: View, Equatable {
         lhs.width == rhs.width &&
         lhs.whiteBalancePickMode == rhs.whiteBalancePickMode &&
         lhs.previewRevision == rhs.previewRevision &&
+        lhs.resetBaseline == rhs.resetBaseline &&
         (lhs.originalCIImage != nil) == (rhs.originalCIImage != nil)
     }
 
@@ -59,6 +198,7 @@ struct ResizableAdjustmentPanel: View, Equatable {
                 adjustedCIImage: adjustedCIImage,
                 previewCIImage: previewCIImage,
                 previewRevision: previewRevision,
+                resetBaseline: resetBaseline,
                 whiteBalancePickMode: $whiteBalancePickMode
             )
             .frame(width: width)
@@ -72,16 +212,26 @@ struct AdjustmentPanel: View {
         let revision: Int
     }
 
+    private nonisolated static let defaultAutoHDRBrightness = 0.35
+
     @Binding var adjustments: ImageAdjustments
     @Binding var curvePickSamples: CurvePickSamples
     let originalCIImage: CIImage?
     let adjustedCIImage: CIImage?
     let previewCIImage: CIImage?
     let previewRevision: Int
+    let resetBaseline: ImageAdjustments
     @Binding var whiteBalancePickMode: CurveAdjustmentView.PickMode
-    @State private var expandedSections: Set<AdjustmentSection> = [.basic, .color, .detail]
+    @State private var expandedSections: Set<AdjustmentSection> = [.basic, .hdr, .color, .detail]
     @State private var histogram: HistogramData?
     @State private var histogramTask: Task<Void, Never>?
+    @State private var autoHDRBrightness = Self.defaultAutoHDRBrightness
+    @State private var displayHDRInfo = DisplayHDRInfo(
+        headroom: DisplayHDRInfo.fallbackHeadroom,
+        activeHeadroom: 1.0,
+        potentialHeadroom: 1.0,
+        isFallback: true
+    )
 
     var body: some View {
         VStack(spacing: 0) {
@@ -113,7 +263,7 @@ struct AdjustmentPanel: View {
 
                 if adjustments.hasAdjustments {
                     Button("重置") {
-                        adjustments.reset()
+                        adjustments.reset(to: resetBaseline)
                         curvePickSamples.reset()
                     }
                     .buttonStyle(.borderless)
@@ -132,6 +282,21 @@ struct AdjustmentPanel: View {
                         onReset: { adjustments.resetBasic() }
                     ) {
                         BasicAdjustmentsView(adjustments: $adjustments)
+                            .equatable()
+                    }
+
+                    CollapsibleSection(
+                        section: .hdr,
+                        isExpanded: expandedSections.contains(.hdr),
+                        hasChanges: adjustments.hasHDRAdjustments,
+                        onToggle: { toggleSection(.hdr) },
+                        onReset: { resetHDRAdjustments() }
+                    ) {
+                        HDRAdjustmentsView(
+                            adjustments: $adjustments,
+                            displayHDRInfo: displayHDRInfo,
+                            autoHDRBrightness: autoHDRBrightness
+                        )
                             .equatable()
                     }
 
@@ -176,9 +341,20 @@ struct AdjustmentPanel: View {
         .onChange(of: previewRevision) { _, _ in
             scheduleHistogramLoad()
         }
+        .onChange(of: displayHDRInfo) { _, _ in
+            updateAutoHDRBrightness()
+        }
         .onDisappear {
             histogramTask?.cancel()
         }
+        .background(
+            DisplayHDRInfoReader { newInfo in
+                displayHDRInfo = newInfo
+            }
+            .frame(width: 0, height: 0)
+            .allowsHitTesting(false),
+            alignment: .topLeading
+        )
     }
 
     private func toggleSection(_ section: AdjustmentSection) {
@@ -189,10 +365,20 @@ struct AdjustmentPanel: View {
         }
     }
 
+    private func resetHDRAdjustments() {
+        adjustments.isHDREnabled = resetBaseline.isHDREnabled
+        adjustments.hdrBrightness = resetBaseline.hdrBrightness
+        adjustments.hdrHighlights = resetBaseline.hdrHighlights
+        adjustments.hdrWhites = resetBaseline.hdrWhites
+        adjustments.hdrHeadroom = resetBaseline.hdrHeadroom
+        adjustments.isHDRAutoAdjustmentEnabled = resetBaseline.isHDRAutoAdjustmentEnabled
+    }
+
     private func scheduleHistogramLoad() {
         guard let previewCIImage else {
             histogramTask?.cancel()
             histogram = nil
+            autoHDRBrightness = Self.defaultAutoHDRBrightness
             return
         }
 
@@ -212,8 +398,21 @@ struct AdjustmentPanel: View {
             await MainActor.run {
                 guard previewRevision == input.revision else { return }
                 histogram = newHistogram
+                updateAutoHDRBrightness(using: newHistogram)
             }
         }
+    }
+
+    private func updateAutoHDRBrightness(using sourceHistogram: HistogramData? = nil) {
+        guard let histogram = sourceHistogram ?? histogram else {
+            autoHDRBrightness = Self.defaultAutoHDRBrightness
+            return
+        }
+
+        autoHDRBrightness = Self.calculateAutoHDRBrightness(
+            from: histogram,
+            headroom: displayHDRInfo.headroom
+        )
     }
 
     private nonisolated static var histogramContext: CIContext {
@@ -316,6 +515,82 @@ struct AdjustmentPanel: View {
             luminance: luminanceHistogram.red
         )
     }
+
+    private nonisolated static func calculateAutoHDRBrightness(
+        from histogram: HistogramData,
+        headroom: Double
+    ) -> Double {
+        let luminance = histogram.luminance
+        guard !luminance.isEmpty else {
+            return Self.defaultAutoHDRBrightness
+        }
+
+        let totalCount = luminance.reduce(0, +)
+        guard totalCount > 0 else {
+            return Self.defaultAutoHDRBrightness
+        }
+
+        let p90 = percentileValue(in: luminance, totalCount: totalCount, percentile: 0.90)
+        let p95 = percentileValue(in: luminance, totalCount: totalCount, percentile: 0.95)
+        let p99 = percentileValue(in: luminance, totalCount: totalCount, percentile: 0.99)
+        let brightAreaShare = fractionAbove(0.80, in: luminance, totalCount: totalCount)
+
+        let highlightPotential = clamp((p95 - 0.45) / 0.35, to: 0.0 ... 1.0)
+        let sparklePotential = clamp((p99 - 0.68) / 0.24, to: 0.0 ... 1.0)
+        let highlightSeparation = clamp((p99 - p90 - 0.04) / 0.18, to: 0.0 ... 1.0)
+        let brightAreaPenalty = clamp((brightAreaShare - 0.14) / 0.34, to: 0.0 ... 1.0)
+        let headroomScale = clamp(log2(max(headroom, 1.0)) / 3.5, to: 0.45 ... 1.15)
+
+        let rawBrightness = (
+            0.18 +
+                highlightPotential * 0.68 +
+                sparklePotential * 0.28 +
+                highlightSeparation * 0.20 -
+                brightAreaPenalty * 0.24
+        ) * headroomScale
+
+        let brightness = clamp(rawBrightness, to: 0.0 ... 1.15)
+        return (brightness * 100).rounded() / 100
+    }
+
+    private nonisolated static func percentileValue(
+        in histogram: [Int],
+        totalCount: Int,
+        percentile: Double
+    ) -> Double {
+        let targetCount = Int((Double(totalCount) * percentile).rounded(.up))
+        var cumulativeCount = 0
+
+        for (index, count) in histogram.enumerated() {
+            cumulativeCount += count
+            if cumulativeCount >= targetCount {
+                return Double(index) / Double(max(histogram.count - 1, 1))
+            }
+        }
+
+        return 1.0
+    }
+
+    private nonisolated static func fractionAbove(
+        _ threshold: Double,
+        in histogram: [Int],
+        totalCount: Int
+    ) -> Double {
+        let startIndex = min(
+            max(Int((threshold * Double(histogram.count - 1)).rounded(.up)), 0),
+            histogram.count - 1
+        )
+        let count = histogram[startIndex...].reduce(0, +)
+
+        return Double(count) / Double(totalCount)
+    }
+
+    private nonisolated static func clamp(
+        _ value: Double,
+        to range: ClosedRange<Double>
+    ) -> Double {
+        min(max(value, range.lowerBound), range.upperBound)
+    }
 }
 
 struct CollapsibleSection<Content: View>: View {
@@ -388,12 +663,14 @@ struct CollapsibleSection<Content: View>: View {
 
 enum AdjustmentSection: Hashable {
     case basic
+    case hdr
     case color
     case detail
 
     var title: String {
         switch self {
         case .basic: "基础"
+        case .hdr: "HDR"
         case .color: "色彩"
         case .detail: "细节"
         }
@@ -513,6 +790,143 @@ struct BasicAdjustmentsView: View, Equatable {
             )
         }
         .padding(.horizontal, 16)
+    }
+}
+
+private struct HDRAdjustmentsView: View, Equatable {
+    @Binding var adjustments: ImageAdjustments
+    let displayHDRInfo: DisplayHDRInfo
+    let autoHDRBrightness: Double
+
+    static func == (lhs: HDRAdjustmentsView, rhs: HDRAdjustmentsView) -> Bool {
+        lhs.adjustments.isHDREnabled == rhs.adjustments.isHDREnabled &&
+            lhs.adjustments.hdrBrightness == rhs.adjustments.hdrBrightness &&
+            lhs.adjustments.hdrHighlights == rhs.adjustments.hdrHighlights &&
+            lhs.adjustments.hdrWhites == rhs.adjustments.hdrWhites &&
+            lhs.adjustments.hdrHeadroom == rhs.adjustments.hdrHeadroom &&
+            lhs.adjustments.isHDRAutoAdjustmentEnabled == rhs.adjustments.isHDRAutoAdjustmentEnabled &&
+            lhs.displayHDRInfo == rhs.displayHDRInfo &&
+            lhs.autoHDRBrightness == rhs.autoHDRBrightness
+    }
+
+    private var hdrHeadroomRange: ClosedRange<Double> {
+        let upperBound = max(
+            ImageAdjustments.hdrHeadroomRange.lowerBound,
+            displayHDRInfo.headroom,
+            adjustments.hdrHeadroom
+        )
+
+        return ImageAdjustments.hdrHeadroomRange.lowerBound ... upperBound
+    }
+
+    private var hdrHelpText: String {
+        let capabilityText: String
+
+        if displayHDRInfo.isFallback {
+            let activeHeadroom = String(format: "%.1f", displayHDRInfo.activeHeadroom)
+            let potentialHeadroom = String(format: "%.1f", displayHDRInfo.potentialHeadroom)
+            let fallbackHeadroom = String(format: "%.1f", displayHDRInfo.headroom)
+
+            capabilityText = "当前屏幕只报告 active \(activeHeadroom)x / potential \(potentialHeadroom)x EDR headroom，使用 Apple XDR 峰值 1600 nits 作为兜底上限，也就是约 \(fallbackHeadroom)x。"
+        } else {
+            let headroom = String(format: "%.1f", displayHDRInfo.headroom)
+
+            capabilityText = "当前屏幕可用 EDR headroom 约 \(headroom)x，按 100 nits SDR reference white 估算约 \(displayHDRInfo.estimatedPeakNits) nits。"
+        }
+
+        return "\(capabilityText) 100 nits 是 HDR 工作流常用的 SDR reference white，用于估算内容 headroom，不等同于这台显示器在 SDR 模式下的实际亮度设置。"
+    }
+
+    var body: some View {
+        VStack(spacing: 16) {
+            HStack(spacing: 8) {
+                Toggle("HDR", isOn: $adjustments.isHDREnabled)
+                    .toggleStyle(.switch)
+
+                Image(systemName: "info.circle")
+                    .foregroundColor(.secondary)
+                    .help(hdrHelpText)
+
+                Spacer()
+            }
+
+            SliderControl(
+                title: "HDR 亮度",
+                value: $adjustments.hdrBrightness,
+                range: ImageAdjustments.hdrBrightnessRange,
+                step: 0.01
+            )
+            .disabled(!adjustments.isHDREnabled)
+
+            SliderControl(
+                title: "高光亮度",
+                value: $adjustments.hdrHighlights,
+                range: ImageAdjustments.hdrHighlightsRange,
+                step: 0.01
+            )
+            .disabled(!adjustments.isHDREnabled)
+
+            SliderControl(
+                title: "白色亮度",
+                value: $adjustments.hdrWhites,
+                range: ImageAdjustments.hdrWhitesRange,
+                step: 0.01
+            )
+            .disabled(!adjustments.isHDREnabled)
+
+            SliderControl(
+                title: "HDR 峰值",
+                value: $adjustments.hdrHeadroom,
+                range: hdrHeadroomRange,
+                step: 0.1
+            )
+            .help(hdrHelpText)
+            .disabled(!adjustments.isHDREnabled)
+        }
+        .padding(.horizontal, 16)
+        .onAppear {
+            guard adjustments.isHDREnabled else { return }
+            guard adjustments.isHDRAutoAdjustmentEnabled else { return }
+
+            applyMaximumHDRHeadroomIfNeeded()
+        }
+        .onChange(of: displayHDRInfo) { _, _ in
+            guard adjustments.isHDRAutoAdjustmentEnabled else { return }
+            applyMaximumHDRHeadroomIfNeeded()
+        }
+        .onChange(of: adjustments.isHDREnabled) { _, isEnabled in
+            if isEnabled {
+                adjustments.isHDRAutoAdjustmentEnabled = true
+                applyAutomaticHDRDefaults()
+            } else {
+                adjustments.isHDRAutoAdjustmentEnabled = true
+            }
+        }
+    }
+
+    private func applyAutomaticHDRDefaults() {
+        applyMaximumHDRHeadroomIfNeeded()
+        applyAutoHDRBrightness(autoHDRBrightness)
+    }
+
+    private func applyMaximumHDRHeadroomIfNeeded() {
+        guard adjustments.isHDREnabled else { return }
+
+        let maximumHeadroom = hdrHeadroomRange.upperBound
+        guard abs(maximumHeadroom - adjustments.hdrHeadroom) > 0.0001 else { return }
+
+        adjustments.hdrHeadroom = maximumHeadroom
+    }
+
+    private func applyAutoHDRBrightness(_ value: Double) {
+        let clampedValue = min(
+            max(value, ImageAdjustments.hdrBrightnessRange.lowerBound),
+            ImageAdjustments.hdrBrightnessRange.upperBound
+        )
+
+        guard abs(clampedValue - adjustments.hdrBrightness) > 0.0001 else { return }
+
+        adjustments.hdrBrightness = clampedValue
     }
 }
 
@@ -765,6 +1179,18 @@ struct SliderControl: View, Equatable {
                 displayValue = newValue
             }
         }
+        .onChange(of: range) { _, newRange in
+            let clampedValue = clamp(displayValue, to: newRange)
+            guard abs(clampedValue - displayValue) > 0.0001 else { return }
+
+            displayValue = clampedValue
+            let binding = _value
+            DispatchQueue.main.async {
+                if abs(binding.wrappedValue - clampedValue) > 0.0001 {
+                    binding.wrappedValue = clampedValue
+                }
+            }
+        }
     }
 
     private func formatValue(_ value: Double) -> String {
@@ -795,12 +1221,16 @@ struct SliderControl: View, Equatable {
         case "色调": return displayValue == defaultAdjustments.tint
         case "自然饱和度": return displayValue == defaultAdjustments.vibrance
         case "锐化": return displayValue == defaultAdjustments.sharpness
+        case "HDR 亮度": return displayValue == defaultAdjustments.hdrBrightness
+        case "高光亮度": return displayValue == defaultAdjustments.hdrHighlights
+        case "白色亮度": return displayValue == defaultAdjustments.hdrWhites
+        case "HDR 峰值": return displayValue == defaultAdjustments.hdrHeadroom
         default: return false
         }
     }
 
     private func handleDisplayValueChange(_ newValue: Double) {
-        let steppedValue = round(newValue / step) * step
+        let steppedValue = clamp(round(newValue / step) * step, to: range)
         if abs(displayValue - steppedValue) > 0.0001 {
             displayValue = steppedValue
         }
@@ -811,6 +1241,10 @@ struct SliderControl: View, Equatable {
                 binding.wrappedValue = steppedValue
             }
         }
+    }
+
+    private func clamp(_ value: Double, to range: ClosedRange<Double>) -> Double {
+        min(max(value, range.lowerBound), range.upperBound)
     }
 
     private func resetToDefault() {
@@ -832,6 +1266,10 @@ struct SliderControl: View, Equatable {
         case "色调": resetValue = defaultAdjustments.tint
         case "自然饱和度": resetValue = defaultAdjustments.vibrance
         case "锐化": resetValue = defaultAdjustments.sharpness
+        case "HDR 亮度": resetValue = defaultAdjustments.hdrBrightness
+        case "高光亮度": resetValue = defaultAdjustments.hdrHighlights
+        case "白色亮度": resetValue = defaultAdjustments.hdrWhites
+        case "HDR 峰值": resetValue = defaultAdjustments.hdrHeadroom
         default: return
         }
 
@@ -864,9 +1302,14 @@ struct SliderWithDoubleTap: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: TrackClickableSlider, context: Context) {
+        nsView.minValue = range.lowerBound
+        nsView.maxValue = range.upperBound
+        nsView.onDoubleClick = onDoubleTap
+
         // 只在值真正不同时才更新，避免干扰用户交互
-        if abs(nsView.doubleValue - value) > 0.0001 {
-            nsView.doubleValue = value
+        let clampedValue = min(max(value, range.lowerBound), range.upperBound)
+        if abs(nsView.doubleValue - clampedValue) > 0.0001 {
+            nsView.doubleValue = clampedValue
         }
     }
 

@@ -1,4 +1,5 @@
 import AppKit
+import CoreImage
 import Foundation
 
 struct ImageInfo: Identifiable {
@@ -11,6 +12,7 @@ struct ImageInfo: Identifiable {
     let thumbnail: NSImage?
     let colorSpace: String?
     let colorProfile: String?
+    let hdrHeadroom: Double?
 
     init(url: URL) {
         self.url = url
@@ -23,6 +25,7 @@ struct ImageInfo: Identifiable {
         let colorInfo = Self.getColorSpaceInfo(for: url)
         colorSpace = colorInfo.space
         colorProfile = colorInfo.profile
+        hdrHeadroom = Self.detectHDRHeadroom(for: url)
     }
 
     private static func getFileSize(for url: URL) -> Int64 {
@@ -162,6 +165,76 @@ struct ImageInfo: Identifiable {
 
         return "未知"
     }
+
+    private static func detectHDRHeadroom(for url: URL) -> Double? {
+        if ImageFileType(from: url).isRaw {
+            return nil
+        }
+
+        let ciImageOptions: [CIImageOption: Any] = [
+            .applyOrientationProperty: true,
+            .toneMapHDRtoSDR: false,
+            .expandToHDR: true,
+        ]
+
+        if let ciImage = CIImage(contentsOf: url, options: ciImageOptions) {
+            let headroom = Double(ciImage.contentHeadroom)
+            if headroom > 1.01 {
+                return headroom
+            }
+
+            if let colorSpace = ciImage.colorSpace,
+               colorSpace.isHDR() {
+                return max(headroom, 2.0)
+            }
+        }
+
+        guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil) else {
+            return nil
+        }
+
+        if CGImageSourceCopyAuxiliaryDataInfoAtIndex(
+            imageSource,
+            0,
+            kCGImageAuxiliaryDataTypeHDRGainMap
+        ) != nil {
+            return 2.0
+        }
+
+        if #available(macOS 15.0, *),
+           CGImageSourceCopyAuxiliaryDataInfoAtIndex(
+               imageSource,
+               0,
+               kCGImageAuxiliaryDataTypeISOGainMap
+           ) != nil {
+            return 2.0
+        }
+
+        guard let cgImage = CGImageSourceCreateImageAtIndex(
+            imageSource,
+            0,
+            [
+                kCGImageSourceDecodeRequest: kCGImageSourceDecodeToHDR,
+                kCGImageSourceDecodeRequestOptions: [
+                    kCGImageSourceGenerateImageSpecificLumaScaling: true,
+                ],
+            ] as CFDictionary
+        ) else {
+            return nil
+        }
+
+        let cgImageHeadroom = Double(cgImage.contentHeadroom)
+        if cgImageHeadroom > 1.01 {
+            return cgImageHeadroom
+        }
+
+        if let colorSpace = cgImage.colorSpace,
+           colorSpace.isHDR() {
+            return max(cgImageHeadroom, 2.0)
+        }
+
+        return nil
+    }
 }
 
 enum ImageFileType: Equatable {
@@ -169,6 +242,7 @@ enum ImageFileType: Equatable {
     case jpeg
     case png
     case tiff
+    case heif
     case unknown
 
     enum RawType: String {
@@ -196,6 +270,8 @@ enum ImageFileType: Equatable {
                 self = .png
             case "tif", "tiff":
                 self = .tiff
+            case "heic", "heif", "hif":
+                self = .heif
             default:
                 self = .unknown
             }
@@ -212,6 +288,8 @@ enum ImageFileType: Equatable {
             "PNG"
         case .tiff:
             "TIFF"
+        case .heif:
+            "HEIF"
         case .unknown:
             "未知"
         }

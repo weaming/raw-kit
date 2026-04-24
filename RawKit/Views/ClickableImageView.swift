@@ -303,6 +303,7 @@ struct ClickableImageView: View {
     @Binding var currentPixelInfo: PixelInfo?
     let originalCIImage: CIImage?
     let displayedCIImage: CIImage?
+    let isHDREnabled: Bool
     let pickMode: CurveAdjustmentView.PickMode
     let onColorPick: ((CGPoint, CGSize) -> Void)?
     let onCancelPickMode: (() -> Void)?
@@ -330,6 +331,7 @@ struct ClickableImageView: View {
                 onDragEnded: {
                     lastOffset = offset
                 },
+                isHDREnabled: isHDREnabled,
                 pickMode: pickMode,
                 onColorPick: onColorPick,
                 onCancelPickMode: onCancelPickMode,
@@ -562,6 +564,7 @@ struct ClickableImageRepresentable: NSViewRepresentable {
     let onScrollWheel: (CGFloat, CGPoint) -> Void
     let onDragChanged: (CGSize) -> Void
     let onDragEnded: () -> Void
+    let isHDREnabled: Bool
     let pickMode: CurveAdjustmentView.PickMode
     let onColorPick: ((CGPoint, CGSize) -> Void)?
     let onCancelPickMode: (() -> Void)?
@@ -572,6 +575,7 @@ struct ClickableImageRepresentable: NSViewRepresentable {
         let view = ClickableNSImageView()
         view.imageView.image = image
         view.currentScale = scale
+        view.isHDREnabled = isHDREnabled
         view.onScrollWheel = onScrollWheel
         view.pickMode = pickMode
         view.onColorPick = onColorPick
@@ -593,6 +597,7 @@ struct ClickableImageRepresentable: NSViewRepresentable {
         nsView.onScrollWheel = onScrollWheel
         nsView.onDragChanged = onDragChanged
         nsView.onDragEnded = onDragEnded
+        nsView.isHDREnabled = isHDREnabled
         nsView.pickMode = pickMode
         nsView.onColorPick = onColorPick
         nsView.onCancelPickMode = onCancelPickMode
@@ -717,6 +722,12 @@ class ClickableNSImageView: NSView {
     var onCancelPickMode: (() -> Void)?
     var onFilesDrop: (([URL]) -> Void)?
     var onMouseMove: ((ImageHoverSample?) -> Void)?
+    var isHDREnabled: Bool = false {
+        didSet {
+            guard isHDREnabled != oldValue else { return }
+            applyDynamicRangePreference()
+        }
+    }
     var pickMode: CurveAdjustmentView.PickMode = .none {
         didSet {
             guard pickMode != oldValue else { return }
@@ -766,6 +777,7 @@ class ClickableNSImageView: NSView {
 
         imageView.imageScaling = .scaleProportionallyUpOrDown
         imageView.wantsLayer = true
+        applyDynamicRangePreference()
 
         addSubview(imageView)
 
@@ -807,6 +819,15 @@ class ClickableNSImageView: NSView {
 
     private func handleFlagsChanged(_: NSEvent) {
         // 空格键通过 keyDown/keyUp 处理，这里处理其他修饰键（如果需要）
+    }
+
+    private func applyDynamicRangePreference() {
+        imageView.preferredImageDynamicRange = isHDREnabled ? .high : .standard
+
+        if #available(macOS 26.0, *) {
+            imageView.layer?.preferredDynamicRange = isHDREnabled ? .high : .standard
+            layer?.preferredDynamicRange = isHDREnabled ? .high : .standard
+        }
     }
 
     override func layout() {

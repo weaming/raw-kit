@@ -57,10 +57,22 @@ struct SimpleSlider: View {
                 displayValue = newValue
             }
         }
+        .onChange(of: range) { _, newRange in
+            let clampedValue = clamp(displayValue, to: newRange)
+            guard abs(clampedValue - displayValue) > 0.0001 else { return }
+
+            displayValue = clampedValue
+            let binding = _value
+            DispatchQueue.main.async {
+                if abs(binding.wrappedValue - clampedValue) > 0.0001 {
+                    binding.wrappedValue = clampedValue
+                }
+            }
+        }
     }
 
     private func handleDisplayValueChange(_ newValue: Double) {
-        let steppedValue = round(newValue / step) * step
+        let steppedValue = clamp(round(newValue / step) * step, to: range)
         if abs(displayValue - steppedValue) > 0.0001 {
             displayValue = steppedValue
         }
@@ -71,6 +83,10 @@ struct SimpleSlider: View {
                 binding.wrappedValue = steppedValue
             }
         }
+    }
+
+    private func clamp(_ value: Double, to range: ClosedRange<Double>) -> Double {
+        min(max(value, range.lowerBound), range.upperBound)
     }
 
     private func resetToDefault() {
@@ -196,10 +212,15 @@ struct SliderWithDoubleTapSmall: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: TrackClickableSlider, context: Context) {
+        nsView.minValue = range.lowerBound
+        nsView.maxValue = range.upperBound
+        nsView.onDoubleClick = onDoubleTap
+
         // 只在值真正不同时才更新，避免干扰用户交互
         // 允许小的浮点误差（0.0001）
-        if abs(nsView.doubleValue - value) > 0.0001 {
-            nsView.doubleValue = value
+        let clampedValue = min(max(value, range.lowerBound), range.upperBound)
+        if abs(nsView.doubleValue - clampedValue) > 0.0001 {
+            nsView.doubleValue = clampedValue
         }
     }
 

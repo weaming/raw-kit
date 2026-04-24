@@ -80,7 +80,7 @@ struct ContentView: View {
                             )
                         },
                         onFilesDrop: { urls in
-                            imageManager.addImages(from: urls)
+                            addImagesAndDisplayFirst(from: urls)
                         }
                     )
                     .id(imageInfo.id)
@@ -303,11 +303,17 @@ struct ContentView: View {
         }
 
         for imageInfo in images where editingSessions[imageInfo.id] == nil {
+            let initialAdjustments = initialAdjustments(for: imageInfo)
             editingSessions[imageInfo.id] = ImageEditingSession(
                 imageInfo: imageInfo,
+                initialAdjustments: initialAdjustments,
                 thumbnailManager: thumbnailManager
             )
         }
+    }
+
+    private func initialAdjustments(for imageInfo: ImageInfo) -> ImageAdjustments {
+        ImageAdjustments.sourceHDRBaseline(headroom: imageInfo.hdrHeadroom)
     }
 
     private func handleDrop(providers: [NSItemProvider]) {
@@ -334,7 +340,19 @@ struct ContentView: View {
                 return
             }
 
-            imageManager.addImages(from: droppedURLs)
+            addImagesAndDisplayFirst(from: droppedURLs)
+        }
+    }
+
+    private func addImagesAndDisplayFirst(from urls: [URL]) {
+        imageManager.addImages(from: urls) { addedImages in
+            guard let firstAddedImage = addedImages.first,
+                  let firstAddedIndex = imageManager.images.firstIndex(where: { $0.id == firstAddedImage.id }) else {
+                return
+            }
+
+            displayedIndex = firstAddedIndex
+            selectedIndices = [firstAddedIndex]
         }
     }
 

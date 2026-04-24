@@ -44,9 +44,12 @@ struct FilmstripView: View {
                 HorizontalWheelScrollContainer {
                     HStack(spacing: 4) {
                         ForEach(Array(images.enumerated()), id: \.element.id) { index, imageInfo in
+                            let adjustments = adjustmentsForImageID(imageInfo.id)
+
                             ThumbnailItemView(
                                 imageInfo: imageInfo,
                                 adjustedThumbnail: thumbnailManager.adjustedThumbnails[imageInfo.id],
+                                isHDREnabled: adjustments.isHDREnabled,
                                 isSelected: selectedIndices.contains(index),
                                 isDisplayed: displayedIndex == index,
                                 size: thumbnailSize
@@ -60,7 +63,6 @@ struct FilmstripView: View {
                                 }
                             }
                             .onAppear {
-                                let adjustments = adjustmentsForImageID(imageInfo.id)
                                 if adjustments.hasAdjustments || adjustments.lutURL != nil {
                                     thumbnailManager.generateAdjustedThumbnail(
                                         for: imageInfo,
@@ -192,6 +194,7 @@ private final class HorizontalWheelScrollView: NSScrollView {
 struct ThumbnailItemView: View {
     let imageInfo: ImageInfo
     let adjustedThumbnail: NSImage?
+    let isHDREnabled: Bool
     let isSelected: Bool
     let isDisplayed: Bool
     let size: CGFloat
@@ -203,11 +206,11 @@ struct ThumbnailItemView: View {
     var body: some View {
         ZStack(alignment: .topTrailing) {
             if let thumbnail = displayThumbnail {
-                Image(nsImage: thumbnail)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
+                DynamicRangeThumbnailImage(
+                    image: thumbnail,
+                    isHDREnabled: isHDREnabled && adjustedThumbnail != nil
+                )
                     .frame(width: size, height: size)
-                    .clipped()
                     .cornerRadius(4)
                     .overlay(
                         RoundedRectangle(cornerRadius: 4)
@@ -251,6 +254,63 @@ struct ThumbnailItemView: View {
             2
         } else {
             0
+        }
+    }
+}
+
+private struct DynamicRangeThumbnailImage: NSViewRepresentable {
+    let image: NSImage
+    let isHDREnabled: Bool
+
+    func makeNSView(context _: Context) -> DynamicRangeThumbnailNSView {
+        let view = DynamicRangeThumbnailNSView()
+        view.image = image
+        view.isHDREnabled = isHDREnabled
+        return view
+    }
+
+    func updateNSView(_ nsView: DynamicRangeThumbnailNSView, context _: Context) {
+        nsView.image = image
+        nsView.isHDREnabled = isHDREnabled
+    }
+}
+
+private final class DynamicRangeThumbnailNSView: NSView {
+    var image: NSImage? {
+        didSet {
+            guard image !== oldValue else { return }
+            layer?.contents = image
+        }
+    }
+
+    var isHDREnabled = false {
+        didSet {
+            guard isHDREnabled != oldValue else { return }
+            applyDynamicRangePreference()
+        }
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        setupView()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setupView()
+    }
+
+    private func setupView() {
+        wantsLayer = true
+        layer?.masksToBounds = true
+        layer?.contentsGravity = .resizeAspectFill
+        layer?.contentsScale = NSScreen.main?.backingScaleFactor ?? 2.0
+        applyDynamicRangePreference()
+    }
+
+    private func applyDynamicRangePreference() {
+        if #available(macOS 26.0, *) {
+            layer?.preferredDynamicRange = isHDREnabled ? .high : .standard
         }
     }
 }
