@@ -91,6 +91,11 @@ class ImageProcessor {
         case fLog = 8
         case fLog2 = 9
         case fLog2C = 10
+        case sLog2 = 11
+        case sLog3 = 12
+        case dLog = 13
+        case canonLog3 = 14
+        case vLog = 15
 
         init(_ transferFunction: LUTTransferFunction) {
             switch transferFunction {
@@ -116,6 +121,16 @@ class ImageProcessor {
                 self = .fLog2
             case .fLog2C:
                 self = .fLog2C
+            case .sLog2:
+                self = .sLog2
+            case .sLog3:
+                self = .sLog3
+            case .dLog:
+                self = .dLog
+            case .canonLog3:
+                self = .canonLog3
+            case .vLog:
+                self = .vLog
             }
         }
 
@@ -243,6 +258,86 @@ class ImageProcessor {
         return (v - 0.092864) / 8.799461;
     }
 
+    float encodeSLog2Value(float value) {
+        float v = value;
+        if (v >= 0.0) {
+            return 0.432699 * log(155.0 * v / 219.0 + 0.037584) / log(10.0) + 0.646596;
+        }
+        return v * 3.53881278538813 + 0.030001222851889303;
+    }
+
+    float decodeSLog2Value(float value) {
+        float v = positive(value);
+        if (v >= 0.030001222851889303) {
+            return 219.0 * (pow(10.0, (v - 0.646596) / 0.432699) - 0.037584) / 155.0;
+        }
+        return (v - 0.030001222851889303) / 3.53881278538813;
+    }
+
+    float encodeSLog3Value(float value) {
+        float v = positive(value);
+        if (v >= 0.01125) {
+            return (420.0 + log((v + 0.01) / 0.19) / log(10.0) * 261.5) / 1023.0;
+        }
+        return (v * (171.2102946929 - 95.0) / 0.01125 + 95.0) / 1023.0;
+    }
+
+    float decodeSLog3Value(float value) {
+        float v = positive(value);
+        if (v >= 171.2102946929 / 1023.0) {
+            return pow(10.0, (v * 1023.0 - 420.0) / 261.5) * 0.19 - 0.01;
+        }
+        return (v * 1023.0 - 95.0) * 0.01125 / (171.2102946929 - 95.0);
+    }
+
+    float encodeDLogValue(float value) {
+        float v = positive(value);
+        if (v <= 0.0078) {
+            return 6.025 * v + 0.0929;
+        }
+        return log(v * 0.9892 + 0.0108) / log(10.0) * 0.256663 + 0.584555;
+    }
+
+    float decodeDLogValue(float value) {
+        float v = positive(value);
+        if (v <= 0.14) {
+            return (v - 0.0929) / 6.025;
+        }
+        return (pow(10.0, 3.89616 * v - 2.27752) - 0.0108) / 0.9892;
+    }
+
+    float encodeCanonLog3Value(float value) {
+        float v = positive(value);
+        if (v < 0.014) {
+            return 2.3069815 * v + 0.12512219;
+        }
+        return log(14.98325 * v + 1.0) / log(10.0) * 0.36726845 + 0.12783901;
+    }
+
+    float decodeCanonLog3Value(float value) {
+        float v = positive(value);
+        if (v < 0.15742) {
+            return (v - 0.12512219) / 2.3069815;
+        }
+        return (pow(10.0, (v - 0.12783901) / 0.36726845) - 1.0) / 14.98325;
+    }
+
+    float encodeVLogValue(float value) {
+        float v = positive(value);
+        if (v < 0.01) {
+            return 5.6 * v + 0.125;
+        }
+        return 0.241514 * log(v + 0.00873) / log(10.0) + 0.598206;
+    }
+
+    float decodeVLogValue(float value) {
+        float v = positive(value);
+        if (v < 0.181) {
+            return (v - 0.125) / 5.6;
+        }
+        return pow(10.0, (v - 0.598206) / 0.241514) - 0.00873;
+    }
+
     float encodeTransferValue(float value, float mode) {
         if (mode < 0.5) {
             return value;
@@ -273,6 +368,21 @@ class ImageProcessor {
         }
         if (mode < 10.5) {
             return encodeFLog2Value(value);
+        }
+        if (mode < 11.5) {
+            return encodeSLog2Value(value);
+        }
+        if (mode < 12.5) {
+            return encodeSLog3Value(value);
+        }
+        if (mode < 13.5) {
+            return encodeDLogValue(value);
+        }
+        if (mode < 14.5) {
+            return encodeCanonLog3Value(value);
+        }
+        if (mode < 15.5) {
+            return encodeVLogValue(value);
         }
         return value;
     }
@@ -307,6 +417,21 @@ class ImageProcessor {
         }
         if (mode < 10.5) {
             return decodeFLog2Value(value);
+        }
+        if (mode < 11.5) {
+            return decodeSLog2Value(value);
+        }
+        if (mode < 12.5) {
+            return decodeSLog3Value(value);
+        }
+        if (mode < 13.5) {
+            return decodeDLogValue(value);
+        }
+        if (mode < 14.5) {
+            return decodeCanonLog3Value(value);
+        }
+        if (mode < 15.5) {
+            return decodeVLogValue(value);
         }
         return value;
     }
@@ -2468,6 +2593,41 @@ class ImageProcessor {
                 red: ChromaticityPoint(x: 0.7347, y: 0.2653),
                 green: ChromaticityPoint(x: 0.0263, y: 0.9737),
                 blue: ChromaticityPoint(x: 0.1173, y: -0.0224),
+                white: ChromaticityPoint(x: 0.3127, y: 0.3290)
+            )
+        case .sonySGamut:
+            RGBPrimaries(
+                red: ChromaticityPoint(x: 0.730, y: 0.280),
+                green: ChromaticityPoint(x: 0.140, y: 0.855),
+                blue: ChromaticityPoint(x: 0.100, y: -0.050),
+                white: ChromaticityPoint(x: 0.3127, y: 0.3290)
+            )
+        case .sonySGamut3Cine:
+            RGBPrimaries(
+                red: ChromaticityPoint(x: 0.766, y: 0.275),
+                green: ChromaticityPoint(x: 0.225, y: 0.800),
+                blue: ChromaticityPoint(x: 0.089, y: -0.087),
+                white: ChromaticityPoint(x: 0.3127, y: 0.3290)
+            )
+        case .djiDGamut:
+            RGBPrimaries(
+                red: ChromaticityPoint(x: 0.710, y: 0.310),
+                green: ChromaticityPoint(x: 0.210, y: 0.880),
+                blue: ChromaticityPoint(x: 0.090, y: -0.080),
+                white: ChromaticityPoint(x: 0.3127, y: 0.3290)
+            )
+        case .canonCinemaGamut:
+            RGBPrimaries(
+                red: ChromaticityPoint(x: 0.740, y: 0.270),
+                green: ChromaticityPoint(x: 0.170, y: 1.140),
+                blue: ChromaticityPoint(x: 0.080, y: -0.100),
+                white: ChromaticityPoint(x: 0.3127, y: 0.3290)
+            )
+        case .panasonicVGamut:
+            RGBPrimaries(
+                red: ChromaticityPoint(x: 0.730, y: 0.280),
+                green: ChromaticityPoint(x: 0.165, y: 0.840),
+                blue: ChromaticityPoint(x: 0.100, y: -0.030),
                 white: ChromaticityPoint(x: 0.3127, y: 0.3290)
             )
         }

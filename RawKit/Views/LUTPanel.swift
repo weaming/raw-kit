@@ -690,11 +690,31 @@ struct LUTGroupView<Content: View>: View {
 struct LUTProfileEditor: View {
     @Binding var profile: LUTColorProfile
 
+    private var presetSelection: Binding<String> {
+        Binding(
+            get: {
+                LUTProfilePreset.matching(profile)?.id ?? LUTProfilePreset.customID
+            },
+            set: { presetID in
+                guard let preset = LUTProfilePreset.preset(for: presetID) else {
+                    return
+                }
+
+                profile = preset.profile
+            }
+        )
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("LUT 变换")
                 .font(.caption2)
                 .foregroundColor(.secondary)
+
+            LUTPresetRow(selection: presetSelection)
+
+            Divider()
+                .padding(.vertical, 2)
 
             LUTOptionRow(
                 title: "输入色域",
@@ -722,6 +742,30 @@ struct LUTProfileEditor: View {
             RoundedRectangle(cornerRadius: 6)
                 .fill(Color(nsColor: .controlBackgroundColor))
         )
+    }
+}
+
+struct LUTPresetRow: View {
+    @Binding var selection: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text("常用预设")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .frame(width: 56, alignment: .leading)
+
+            Picker("", selection: $selection) {
+                Text("自定义").tag(LUTProfilePreset.customID)
+
+                ForEach(LUTProfilePreset.common) { preset in
+                    Text(preset.displayName).tag(preset.id)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 }
 

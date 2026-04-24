@@ -83,6 +83,150 @@ struct LUTColorProfile: Codable, Equatable {
     }
 }
 
+struct LUTProfilePreset: Identifiable {
+    static let customID = "__custom__"
+
+    let id: String
+    let displayName: String
+    let profile: LUTColorProfile
+
+    static let common: [LUTProfilePreset] = [
+        LUTProfilePreset(
+            id: "photo-srgb",
+            displayName: "照片 sRGB LUT",
+            profile: .default
+        ),
+        LUTProfilePreset(
+            id: "photo-linear-srgb",
+            displayName: "照片 Linear sRGB LUT",
+            profile: LUTColorProfile(
+                inputGamut: .sRGB,
+                inputTransfer: .linear,
+                outputGamut: .sRGB,
+                outputTransfer: .linear
+            )
+        ),
+        LUTProfilePreset(
+            id: "video-rec709",
+            displayName: "视频 Rec.709 LUT",
+            profile: LUTColorProfile(
+                inputGamut: .rec709,
+                inputTransfer: .gamma24,
+                outputGamut: .rec709,
+                outputTransfer: .gamma24
+            )
+        ),
+        LUTProfilePreset(
+            id: "all-rec709",
+            displayName: "All Rec.709",
+            profile: LUTColorProfile(
+                inputGamut: .rec709,
+                inputTransfer: .rec709,
+                outputGamut: .rec709,
+                outputTransfer: .rec709
+            )
+        ),
+        LUTProfilePreset(
+            id: "hdr-hlg-to-sdr-rec709",
+            displayName: "HDR HLG -> SDR Rec.709",
+            profile: LUTColorProfile(
+                inputGamut: .rec2020,
+                inputTransfer: .hlg,
+                outputGamut: .rec709,
+                outputTransfer: .gamma24
+            )
+        ),
+        LUTProfilePreset(
+            id: "hdr-pq-to-sdr-rec709",
+            displayName: "HDR PQ -> SDR Rec.709",
+            profile: LUTColorProfile(
+                inputGamut: .rec2020,
+                inputTransfer: .pq,
+                outputGamut: .rec709,
+                outputTransfer: .gamma24
+            )
+        ),
+        LUTProfilePreset(
+            id: "fuji-flog-to-rec709",
+            displayName: "Fuji F-Log -> Rec.709",
+            profile: LUTColorProfile(
+                inputGamut: .fGamut,
+                inputTransfer: .fLog,
+                outputGamut: .rec709,
+                outputTransfer: .rec709
+            )
+        ),
+        LUTProfilePreset(
+            id: "fuji-flog2-to-rec709",
+            displayName: "Fuji F-Log2 -> Rec.709",
+            profile: LUTColorProfile(
+                inputGamut: .fGamut,
+                inputTransfer: .fLog2,
+                outputGamut: .rec709,
+                outputTransfer: .rec709
+            )
+        ),
+        LUTProfilePreset(
+            id: "sony-slog3-to-rec709",
+            displayName: "Sony SL3 & SG3C -> Rec.709",
+            profile: LUTColorProfile(
+                inputGamut: .sonySGamut3Cine,
+                inputTransfer: .sLog3,
+                outputGamut: .rec709,
+                outputTransfer: .rec709
+            )
+        ),
+        LUTProfilePreset(
+            id: "sony-slog2-to-rec709",
+            displayName: "Sony SL2 & SG3  -> Rec.709",
+            profile: LUTColorProfile(
+                inputGamut: .sonySGamut,
+                inputTransfer: .sLog2,
+                outputGamut: .rec709,
+                outputTransfer: .rec709
+            )
+        ),
+        LUTProfilePreset(
+            id: "dji-dlog-to-rec709",
+            displayName: "DJI D-Log -> Rec.709",
+            profile: LUTColorProfile(
+                inputGamut: .djiDGamut,
+                inputTransfer: .dLog,
+                outputGamut: .rec709,
+                outputTransfer: .gamma24
+            )
+        ),
+        LUTProfilePreset(
+            id: "canon-log3-to-rec709",
+            displayName: "Canon Log 3 -> Rec.709",
+            profile: LUTColorProfile(
+                inputGamut: .canonCinemaGamut,
+                inputTransfer: .canonLog3,
+                outputGamut: .rec709,
+                outputTransfer: .gamma24
+            )
+        ),
+        LUTProfilePreset(
+            id: "panasonic-vlog-to-rec709",
+            displayName: "Panasonic V-Log -> Rec.709",
+            profile: LUTColorProfile(
+                inputGamut: .panasonicVGamut,
+                inputTransfer: .vLog,
+                outputGamut: .rec709,
+                outputTransfer: .gamma24
+            )
+        ),
+    ]
+
+    static func matching(_ profile: LUTColorProfile) -> LUTProfilePreset? {
+        common.first { $0.profile == profile }
+    }
+
+    static func preset(for id: String) -> LUTProfilePreset? {
+        common.first { $0.id == id }
+    }
+}
+
 enum LUTGamut: String, Codable, CaseIterable {
     case sRGB = "sRGB"
     case displayP3 = "Display P3"
@@ -91,6 +235,11 @@ enum LUTGamut: String, Codable, CaseIterable {
     case rec2020 = "Rec.2020"
     case fGamut = "F-Gamut"
     case fGamutC = "F-Gamut C"
+    case sonySGamut = "Sony S-Gamut"
+    case sonySGamut3Cine = "Sony S-Gamut3.Cine"
+    case djiDGamut = "DJI D-Gamut"
+    case canonCinemaGamut = "Canon Cinema Gamut"
+    case panasonicVGamut = "Panasonic V-Gamut"
 
     var displayName: String {
         rawValue
@@ -113,6 +262,11 @@ enum LUTTransferFunction: String, Codable, CaseIterable {
     case fLog = "F-Log"
     case fLog2 = "F-Log2"
     case fLog2C = "F-Log2 C"
+    case sLog2 = "S-Log2"
+    case sLog3 = "S-Log3"
+    case dLog = "D-Log"
+    case canonLog3 = "Canon Log 3"
+    case vLog = "V-Log"
 
     var displayName: String {
         rawValue
@@ -124,6 +278,8 @@ enum LUTTransferFunction: String, Codable, CaseIterable {
             "PQ"
         case .fLog2C:
             "F-Log2C"
+        case .canonLog3:
+            "C-Log3"
         default:
             rawValue
         }
