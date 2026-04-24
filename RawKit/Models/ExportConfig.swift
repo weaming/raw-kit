@@ -5,7 +5,9 @@ enum ExportFormat: String, Codable, CaseIterable {
     case tiff = "TIFF"
     case jpg = "JPEG"
     case heif = "HEIF"
+    case avif = "AVIF"
     case jpegGainMap = "JPEG + gain map"
+    case ultraHDRJPEG = "Ultra HDR JPEG"
     case dng = "DNG"
 
     var fileExtension: String {
@@ -13,7 +15,8 @@ enum ExportFormat: String, Codable, CaseIterable {
         case .tiff: "tiff"
         case .jpg: "jpg"
         case .heif: "heic"
-        case .jpegGainMap: "jpg"
+        case .avif: "avif"
+        case .jpegGainMap, .ultraHDRJPEG: "jpg"
         case .dng: "dng"
         }
     }
@@ -23,7 +26,9 @@ enum ExportFormat: String, Codable, CaseIterable {
         case .tiff: "16-bit 无损，适合打印和后期处理"
         case .jpg: "8-bit 有损压缩，适合网络分享"
         case .heif: "10-bit 高效压缩，适合 Apple 生态"
-        case .jpegGainMap: "SDR JPEG 内嵌 HDR gain map，适合兼容分享"
+        case .avif: "10-bit 高效压缩，适合支持 AVIF HDR 的平台"
+        case .jpegGainMap: "旧版 Apple/ISO gain map JPEG，仅用于兼容旧预设"
+        case .ultraHDRJPEG: "JPG 扩展名，写入 Ultra HDR gain map，适合支持 HDR 图片的平台"
         case .dng: "16-bit 数字底片格式"
         }
     }
@@ -75,7 +80,7 @@ enum ExportOutputPreset: String, Codable, CaseIterable {
 
     var compatibleFormats: [ExportFormat] {
         if isHDR {
-            return [.heif, .jpegGainMap]
+            return [.heif, .avif, .ultraHDRJPEG]
         }
 
         return [.jpg, .heif, .tiff, .dng]
@@ -108,6 +113,54 @@ enum ExportOutputPreset: String, Codable, CaseIterable {
     }
 }
 
+enum UltraHDRGainMapCompression: String, Codable, CaseIterable {
+    case highQuality = "高质量"
+    case balanced = "均衡"
+    case compact = "小体积"
+
+    var description: String {
+        switch self {
+        case .highQuality:
+            "完整 gain map，文件最大，保留最多局部 HDR 细节"
+        case .balanced:
+            "半分辨率 gain map，体积和 HDR 细节较均衡"
+        case .compact:
+            "低分辨率单通道 gain map，文件更小，复杂彩色高光可能略简化"
+        }
+    }
+
+    var gainMapScaleFactor: Int {
+        switch self {
+        case .highQuality:
+            1
+        case .balanced:
+            2
+        case .compact:
+            4
+        }
+    }
+
+    var gainMapQualityMultiplier: Double {
+        switch self {
+        case .highQuality:
+            1.0
+        case .balanced:
+            0.88
+        case .compact:
+            0.75
+        }
+    }
+
+    var usesMultiChannelGainMap: Bool {
+        switch self {
+        case .highQuality, .balanced:
+            true
+        case .compact:
+            false
+        }
+    }
+}
+
 // 导出配置
 struct ExportConfig: Codable, Identifiable {
     let id: UUID
@@ -117,6 +170,7 @@ struct ExportConfig: Codable, Identifiable {
     var outputPreset: ExportOutputPreset
     var maxDimension: Int? // nil 表示原始尺寸
     var quality: Double // 0.0-1.0，仅用于 JPG 和 HEIF
+    var ultraHDRGainMapCompression: UltraHDRGainMapCompression
     var outputDirectory: URL?
     var prefix: String // 文件名前缀
     var suffix: String // 文件名后缀
@@ -129,6 +183,7 @@ struct ExportConfig: Codable, Identifiable {
         case outputPreset
         case maxDimension
         case quality
+        case ultraHDRGainMapCompression
         case outputDirectory
         case prefix
         case suffix
@@ -140,6 +195,7 @@ struct ExportConfig: Codable, Identifiable {
         outputPreset: ExportOutputPreset = .sdrSRGB,
         maxDimension: Int? = nil,
         quality: Double = 0.98,
+        ultraHDRGainMapCompression: UltraHDRGainMapCompression = .balanced,
         outputDirectory: URL? = nil,
         prefix: String = "",
         suffix: String = ""
@@ -151,6 +207,7 @@ struct ExportConfig: Codable, Identifiable {
         self.outputPreset = outputPreset
         self.maxDimension = maxDimension
         self.quality = quality
+        self.ultraHDRGainMapCompression = ultraHDRGainMapCompression
         self.outputDirectory = outputDirectory
         self.prefix = prefix
         self.suffix = suffix
@@ -175,9 +232,17 @@ struct ExportConfig: Codable, Identifiable {
         colorSpace = outputPreset.legacyColorSpace
         maxDimension = try container.decodeIfPresent(Int.self, forKey: .maxDimension)
         quality = try container.decodeIfPresent(Double.self, forKey: .quality) ?? 0.98
+        ultraHDRGainMapCompression = try container.decodeIfPresent(
+            UltraHDRGainMapCompression.self,
+            forKey: .ultraHDRGainMapCompression
+        ) ?? .balanced
         outputDirectory = try container.decodeIfPresent(URL.self, forKey: .outputDirectory)
         prefix = try container.decodeIfPresent(String.self, forKey: .prefix) ?? ""
         suffix = try container.decodeIfPresent(String.self, forKey: .suffix) ?? ""
+
+        if format == .jpegGainMap {
+            format = .ultraHDRJPEG
+        }
 
         if !format.isCompatible(with: outputPreset) {
             format = outputPreset.preferredFormat

@@ -104,7 +104,8 @@ struct ExportDialog: View {
     private var supportsQuality: Bool {
         currentConfig.format == .jpg ||
             currentConfig.format == .heif ||
-            currentConfig.format == .jpegGainMap
+            currentConfig.format == .avif ||
+            currentConfig.format == .ultraHDRJPEG
     }
 
     private var availableFormats: [ExportFormat] {
@@ -418,6 +419,25 @@ struct ExportDialog: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
+
+                if currentConfig.format == .ultraHDRJPEG {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Gain Map 体积")
+                            .font(.subheadline)
+                            .fontWeight(.medium)
+
+                        Picker("Gain Map 体积", selection: $currentConfig.ultraHDRGainMapCompression) {
+                            ForEach(UltraHDRGainMapCompression.allCases, id: \.self) { compression in
+                                Text(compression.rawValue).tag(compression)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+
+                        Text(currentConfig.ultraHDRGainMapCompression.description)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
             }
         }
         .onChange(of: currentConfig.outputPreset) { _, newOutputPreset in
@@ -668,6 +688,7 @@ struct ExportDialog: View {
             outputPreset: currentConfig.outputPreset,
             maxDimension: currentConfig.maxDimension,
             quality: currentConfig.quality,
+            ultraHDRGainMapCompression: currentConfig.ultraHDRGainMapCompression,
             outputDirectory: currentConfig.outputDirectory,
             prefix: currentConfig.prefix,
             suffix: currentConfig.suffix
@@ -709,6 +730,7 @@ struct ExportDialog: View {
             config1.outputPreset == config2.outputPreset &&
             config1.maxDimension == config2.maxDimension &&
             abs(config1.quality - config2.quality) < 0.001 &&
+            config1.ultraHDRGainMapCompression == config2.ultraHDRGainMapCompression &&
             config1.outputDirectory?.path == config2.outputDirectory?.path &&
             config1.prefix == config2.prefix &&
             config1.suffix == config2.suffix
@@ -723,9 +745,21 @@ struct ExportDialog: View {
 
         if config.format == .jpg ||
             config.format == .heif ||
-            config.format == .jpegGainMap
+            config.format == .avif ||
+            config.format == .ultraHDRJPEG
         {
-            return "\(config.format.rawValue) · \(config.outputPreset.rawValue) · \(sizeLabel) · \(Int(config.quality * 100))%"
+            var parts = [
+                config.format.rawValue,
+                config.outputPreset.rawValue,
+                sizeLabel,
+                "\(Int(config.quality * 100))%",
+            ]
+
+            if config.format == .ultraHDRJPEG {
+                parts.append(config.ultraHDRGainMapCompression.rawValue)
+            }
+
+            return parts.joined(separator: " · ")
         }
 
         return "\(config.format.rawValue) · \(config.outputPreset.rawValue) · \(sizeLabel)"
