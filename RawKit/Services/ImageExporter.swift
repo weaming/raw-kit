@@ -11,6 +11,12 @@ class ImageExporter {
         "/opt/homebrew/bin/ultrahdr_app",
         "/usr/local/bin/ultrahdr_app",
     ]
+    private static let avifFFmpegToolCandidates: [String?] = [
+        Bundle.main.url(forResource: "ffmpeg", withExtension: nil)?.path,
+        Bundle.main.executableURL?.deletingLastPathComponent().appendingPathComponent("ffmpeg").path,
+        "/opt/homebrew/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+    ]
 
     private static var exportContext: CIContext {
         CIContextManager.shared.getRenderContext()
@@ -163,6 +169,7 @@ class ImageExporter {
                 exportReadyImage,
                 to: url,
                 colorSpace: cgColorSpace,
+                outputPreset: outputPreset,
                 quality: quality,
                 targetHeadroom: targetHDRHeadroom,
                 context: context
@@ -225,7 +232,7 @@ class ImageExporter {
         case .displayP3SDR:
             CGColorSpace(name: CGColorSpace.displayP3)!
         case .displayP3HLGHDR:
-            CGColorSpace(name: CGColorSpace.displayP3_HLG)!
+            CGColorSpace(name: CGColorSpace.itur_2100_HLG)!
         case .rec2020HLGHDR:
             CGColorSpace(name: CGColorSpace.itur_2100_HLG)!
         case .rec2020PQHDR:
@@ -343,10 +350,24 @@ class ImageExporter {
         _ image: CIImage,
         to url: URL,
         colorSpace: CGColorSpace,
+        outputPreset: ExportOutputPreset,
         quality: Double,
         targetHeadroom: Float?,
         context: CIContext
     ) throws {
+        if outputPreset.isHDR {
+            try exportHDRAVIFWithFFmpeg(
+                image,
+                to: url,
+                colorSpace: colorSpace,
+                outputPreset: outputPreset,
+                quality: quality,
+                targetHeadroom: targetHeadroom,
+                context: context
+            )
+            return
+        }
+
         guard let destination = CGImageDestinationCreateWithURL(
             url as CFURL,
             "public.avif" as CFString,
@@ -356,11 +377,15 @@ class ImageExporter {
             throw ExportError.failedToCreateDestination
         }
 
-        let outputImage = normalizedHDRImage(image, targetHeadroom: targetHeadroom)
+        let outputImage = normalizedHDRImage(
+            makeOpaqueImageForJPEG(image),
+            targetHeadroom: targetHeadroom
+        )
+
         guard let cgImage = context.createCGImage(
             outputImage,
             from: outputImage.extent,
-            format: .RGBAh,
+            format: .rgbXh,
             colorSpace: colorSpace
         ) else {
             throw ExportError.failedToRenderImage
@@ -368,6 +393,7 @@ class ImageExporter {
 
         let properties: [String: Any] = [
             kCGImageDestinationLossyCompressionQuality as String: quality,
+            kCGImagePropertyHasAlpha as String: false,
         ]
 
         CGImageDestinationAddImage(destination, cgImage, properties as CFDictionary)
@@ -375,6 +401,138 @@ class ImageExporter {
         if !CGImageDestinationFinalize(destination) {
             throw ExportError.failedToFinalizeExport
         }
+    }
+
+    private static func exportHDRAVIFWithFFmpeg(
+        _ image: CIImage,
+        to url: URL,
+        colorSpace: CGColorSpace,
+        outputPreset: ExportOutputPreset,
+        quality: Double,
+        targetHeadroom: Float?,
+        context: CIContext
+    ) throws {
+        guard let ffmpegURL = findAVIFFFMpegTool() else {
+            throw ExportError.missingAVIFEncoderTool
+        }
+
+        let tempDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("RawKit-AVIF-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: tempDirectory)
+        }
+
+        let outputImage = normalizedHDRImage(
+            makeOpaqueImageForJPEG(image),
+            targetHeadroom: targetHeadroom
+        )
+        let imageExtent = outputImage.extent
+        guard imageExtent.isInfinite == false, !imageExtent.isEmpty else {
+            throw ExportError.invalidImageExtent
+        }
+
+        let width = Int(imageExtent.width.rounded())
+        let height = Int(imageExtent.height.rounded())
+        guard width > 0, height > 0 else {
+            throw ExportError.invalidImageExtent
+        }
+
+        let intermediateURL = tempDirectory.appendingPathComponent("hdr-rgba16.raw")
+        let renderBounds = CGRect(x: 0, y: 0, width: width, height: height)
+
+        try writeHDRAVIFIntermediateRaw(
+            outputImage,
+            to: intermediateURL,
+            extent: renderBounds,
+            width: width,
+            height: height,
+            colorSpace: colorSpace,
+            context: context
+        )
+
+        let colorTransfer = avifColorTransferArgument(for: outputPreset)
+        let crfValue = String(avifCRFValue(for: quality))
+
+        try runAVIFFFMpegTool(
+            ffmpegURL,
+            arguments: [
+                "-y",
+                "-hide_banner",
+                "-f", "rawvideo",
+                "-pixel_format", "rgba64le",
+                "-video_size", "\(width)x\(height)",
+                "-framerate", "1",
+                "-color_primaries", "bt2020",
+                "-color_trc", colorTransfer,
+                "-colorspace", "bt2020nc",
+                "-color_range", "pc",
+                "-i", intermediateURL.path,
+                "-frames:v", "1",
+                "-an",
+                "-c:v", "libaom-av1",
+                "-still-picture", "1",
+                "-pix_fmt", "yuv420p10le",
+                "-color_primaries", "bt2020",
+                "-color_trc", colorTransfer,
+                "-colorspace", "bt2020nc",
+                "-color_range", "pc",
+                "-crf", crfValue,
+                "-b:v", "0",
+                "-cpu-used", "2",
+                "-row-mt", "1",
+                url.path,
+            ]
+        )
+    }
+
+    private static func writeHDRAVIFIntermediateRaw(
+        _ image: CIImage,
+        to url: URL,
+        extent: CGRect,
+        width: Int,
+        height: Int,
+        colorSpace: CGColorSpace,
+        context: CIContext
+    ) throws {
+        let normalizedImage = image
+            .transformed(
+                by: CGAffineTransform(
+                    translationX: -image.extent.origin.x,
+                    y: -image.extent.origin.y
+                )
+            )
+            .cropped(to: extent)
+
+        try renderRawImage(
+            normalizedImage,
+            to: url,
+            extent: extent,
+            width: width,
+            height: height,
+            bytesPerPixel: 8,
+            format: .RGBA16,
+            colorSpace: colorSpace,
+            context: context
+        )
+    }
+
+    private static func avifColorTransferArgument(for outputPreset: ExportOutputPreset) -> String {
+        switch outputPreset.normalized {
+        case .rec2020PQHDR:
+            "smpte2084"
+        case .rec2020HLGHDR, .displayP3HLGHDR:
+            "arib-std-b67"
+        case .sdrSRGB, .displayP3SDR:
+            "iec61966-2-1"
+        }
+    }
+
+    private static func avifCRFValue(for quality: Double) -> Int {
+        let clampedQuality = quality.clamped(to: 0.5 ... 1.0)
+        let crfValue = (1.0 - clampedQuality) * 120.0
+
+        return Int(crfValue.rounded()).clamped(to: 0 ... 35)
     }
 
     private static func exportJPEGGainMap(
@@ -486,7 +644,7 @@ class ImageExporter {
                 "-h", "\(height)",
                 "-a", "4",
                 "-b", "3",
-                "-C", "1",
+                "-C", "2",
                 "-c", "0",
                 "-t", "0",
                 "-R", "1",
@@ -514,6 +672,17 @@ class ImageExporter {
         return nil
     }
 
+    private static func findAVIFFFMpegTool() -> URL? {
+        for optionalPath in avifFFmpegToolCandidates {
+            guard let path = optionalPath else { continue }
+            guard FileManager.default.isExecutableFile(atPath: path) else { continue }
+
+            return URL(fileURLWithPath: path)
+        }
+
+        return nil
+    }
+
     private static func renderHDRRawImage(
         _ image: CIImage,
         to url: URL,
@@ -522,8 +691,8 @@ class ImageExporter {
         height: Int,
         context: CIContext
     ) throws {
-        guard let colorSpace = CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3) ??
-            CGColorSpace(name: CGColorSpace.displayP3) else {
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.extendedLinearITUR_2020) ??
+            CGColorSpace(name: CGColorSpace.linearITUR_2020) else {
             throw ExportError.failedToRenderImage
         }
 
@@ -610,6 +779,25 @@ class ImageExporter {
         let output = String(data: outputData, encoding: .utf8) ?? ""
         guard process.terminationStatus == 0 else {
             throw ExportError.failedUltraHDREncoding(output.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+    }
+
+    private static func runAVIFFFMpegTool(_ toolURL: URL, arguments: [String]) throws {
+        let process = Process()
+        process.executableURL = toolURL
+        process.arguments = arguments
+
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+
+        try process.run()
+        process.waitUntilExit()
+
+        let outputData = pipe.fileHandleForReading.readDataToEndOfFile()
+        let output = String(data: outputData, encoding: .utf8) ?? ""
+        guard process.terminationStatus == 0 else {
+            throw ExportError.failedAVIFEncoding(output.trimmingCharacters(in: .whitespacesAndNewlines))
         }
     }
 
@@ -715,7 +903,9 @@ enum ExportError: LocalizedError {
     case failedToRenderImage
     case failedToFinalizeExport
     case invalidImageExtent
+    case missingAVIFEncoderTool
     case missingUltraHDRTool
+    case failedAVIFEncoding(String)
     case failedUltraHDREncoding(String)
 
     var errorDescription: String? {
@@ -732,8 +922,12 @@ enum ExportError: LocalizedError {
             "无法完成导出"
         case .invalidImageExtent:
             "图像尺寸无效，无法导出"
+        case .missingAVIFEncoderTool:
+            "无法导出 HDR AVIF：未找到 ffmpeg。请先安装 ffmpeg：brew install ffmpeg"
         case .missingUltraHDRTool:
             "无法导出 Ultra HDR JPEG：未找到 Ultra HDR 编码器。请先安装 libultrahdr：brew install libultrahdr"
+        case let .failedAVIFEncoding(message):
+            message.isEmpty ? "HDR AVIF 编码失败" : "HDR AVIF 编码失败：\(message)"
         case let .failedUltraHDREncoding(message):
             message.isEmpty ? "Ultra HDR JPEG 编码失败" : "Ultra HDR JPEG 编码失败：\(message)"
         }

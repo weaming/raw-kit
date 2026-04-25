@@ -209,7 +209,7 @@ struct ExportDialog: View {
 
             ExportInfoBadge(
                 icon: "slider.horizontal.3",
-                label: "预设",
+                label: "方案",
                 value: selectedPresetName
             )
 
@@ -226,7 +226,7 @@ struct ExportDialog: View {
     private var presetsSidebar: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("预设")
+                Text("方案")
                     .font(.headline)
 
                 Spacer()
@@ -238,7 +238,7 @@ struct ExportDialog: View {
                     Image(systemName: "plus")
                 }
                 .buttonStyle(.borderless)
-                .help("保存当前设置为预设")
+                .help("保存当前设置为导出方案")
 
                 Button(role: .destructive) {
                     deleteMatchedPreset()
@@ -247,7 +247,7 @@ struct ExportDialog: View {
                 }
                 .buttonStyle(.borderless)
                 .disabled(matchedPreset == nil)
-                .help("删除当前匹配的预设")
+                .help("删除当前匹配的导出方案")
             }
 
             Text("当前：\(selectedPresetName)")
@@ -371,7 +371,7 @@ struct ExportDialog: View {
 
                 HStack(alignment: .top, spacing: 20) {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("输出预设")
+                        Text("色彩预设")
                             .font(.subheadline)
                             .fontWeight(.medium)
 
@@ -917,14 +917,14 @@ struct SaveExportPresetDialog: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("保存导出预设")
+            Text("保存导出方案")
                 .font(.headline)
 
-            Text("将当前导出设置保存为可复用的预设。")
+            Text("将当前格式、色彩、尺寸和命名设置保存为可复用方案。")
                 .font(.caption)
                 .foregroundColor(.secondary)
 
-            TextField("预设名称", text: $presetName)
+            TextField("方案名称", text: $presetName)
                 .textFieldStyle(.roundedBorder)
                 .focused($isTextFieldFocused)
                 .onSubmit {

@@ -54,6 +54,15 @@ enum ExportOutputPreset: String, Codable, CaseIterable {
     case rec2020HLGHDR = "Rec.2020 HLG HDR"
     case rec2020PQHDR = "Rec.2020 PQ HDR"
 
+    static var allCases: [ExportOutputPreset] {
+        [
+            .sdrSRGB,
+            .displayP3SDR,
+            .rec2020HLGHDR,
+            .rec2020PQHDR,
+        ]
+    }
+
     var description: String {
         switch self {
         case .sdrSRGB:
@@ -61,11 +70,20 @@ enum ExportOutputPreset: String, Codable, CaseIterable {
         case .displayP3SDR:
             "宽色域 SDR，适合 Apple 设备和现代浏览器"
         case .displayP3HLGHDR:
-            "照片 HDR 首选，Display P3 色域和 HLG 传递函数"
+            "旧版 HDR 预设，导出时会迁移为 Rec.2020 HLG HDR"
         case .rec2020HLGHDR:
-            "HDR 宽色域输出，适合 HLG HDR 工作流"
+            "照片 HDR 首选，使用 BT.2020 色域和 HLG 传递函数"
         case .rec2020PQHDR:
             "HDR 宽色域输出，适合 PQ HDR 工作流"
+        }
+    }
+
+    var normalized: ExportOutputPreset {
+        switch self {
+        case .displayP3HLGHDR:
+            .rec2020HLGHDR
+        case .sdrSRGB, .displayP3SDR, .rec2020HLGHDR, .rec2020PQHDR:
+            self
         }
     }
 
@@ -203,8 +221,9 @@ struct ExportConfig: Codable, Identifiable {
         id = UUID()
         self.name = name
         self.format = format
-        self.colorSpace = outputPreset.legacyColorSpace
-        self.outputPreset = outputPreset
+        let normalizedOutputPreset = outputPreset.normalized
+        self.colorSpace = normalizedOutputPreset.legacyColorSpace
+        self.outputPreset = normalizedOutputPreset
         self.maxDimension = maxDimension
         self.quality = quality
         self.ultraHDRGainMapCompression = ultraHDRGainMapCompression
@@ -228,6 +247,8 @@ struct ExportConfig: Codable, Identifiable {
             ExportOutputPreset.self,
             forKey: .outputPreset
         ) ?? ExportOutputPreset.migrated(from: decodedColorSpace)
+
+        outputPreset = outputPreset.normalized
 
         colorSpace = outputPreset.legacyColorSpace
         maxDimension = try container.decodeIfPresent(Int.self, forKey: .maxDimension)
