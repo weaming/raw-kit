@@ -168,14 +168,6 @@ class ImageExporter {
                 targetHeadroom: targetHDRHeadroom,
                 context: context
             )
-        case .jpegGainMap:
-            try exportJPEGGainMap(
-                exportReadyImage,
-                to: url,
-                targetHeadroom: targetHDRHeadroom,
-                quality: quality,
-                context: context
-            )
         case .ultraHDRJPEG:
             try exportUltraHDRJPEG(
                 exportReadyImage,
@@ -225,8 +217,6 @@ class ImageExporter {
             CGColorSpace(name: CGColorSpace.sRGB)!
         case .displayP3SDR:
             CGColorSpace(name: CGColorSpace.displayP3)!
-        case .displayP3HLGHDR:
-            CGColorSpace(name: CGColorSpace.itur_2100_HLG)!
         case .rec2020HLGHDR:
             CGColorSpace(name: CGColorSpace.itur_2100_HLG)!
         case .rec2020PQHDR:
@@ -658,32 +648,6 @@ class ImageExporter {
                 fileData[byteOffset] &= ~mask
             }
         }
-    }
-
-    private static func exportJPEGGainMap(
-        _ image: CIImage,
-        to url: URL,
-        targetHeadroom: Float?,
-        quality: Double,
-        context: CIContext
-    ) throws {
-        let sdrColorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
-        let hdrImage = normalizedHDRImage(
-            makeOpaqueImageForJPEG(image),
-            targetHeadroom: targetHeadroom
-        )
-        let sdrImage = makeOpaqueImageForJPEG(makeSDRBaseImage(from: hdrImage))
-
-        try context.writeJPEGRepresentation(
-            of: sdrImage,
-            to: url,
-            colorSpace: sdrColorSpace,
-            options: [
-                kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: quality,
-                .hdrImage: hdrImage,
-                .hdrGainMapAsRGB: true,
-            ]
-        )
     }
 
     private static func exportUltraHDRJPEG(

@@ -6,7 +6,6 @@ enum ExportFormat: String, Codable, CaseIterable {
     case jpg = "JPEG"
     case heif = "HEIF"
     case avif = "AVIF"
-    case jpegGainMap = "JPEG + gain map"
     case ultraHDRJPEG = "Ultra HDR JPEG"
     case dng = "DNG"
 
@@ -16,7 +15,7 @@ enum ExportFormat: String, Codable, CaseIterable {
         case .jpg: "jpg"
         case .heif: "heic"
         case .avif: "avif"
-        case .jpegGainMap, .ultraHDRJPEG: "jpg"
+        case .ultraHDRJPEG: "jpg"
         case .dng: "dng"
         }
     }
@@ -27,7 +26,6 @@ enum ExportFormat: String, Codable, CaseIterable {
         case .jpg: "8-bit 有损压缩，适合网络分享"
         case .heif: "10-bit 高效压缩，适合 Apple 生态"
         case .avif: "10-bit 高效压缩，适合支持 AVIF HDR 的平台"
-        case .jpegGainMap: "旧版 Apple/ISO gain map JPEG，仅用于兼容旧预设"
         case .ultraHDRJPEG: "JPG 扩展名，写入 Ultra HDR gain map，适合支持 HDR 图片的平台"
         case .dng: "16-bit 数字底片格式"
         }
@@ -38,30 +36,12 @@ enum ExportFormat: String, Codable, CaseIterable {
     }
 }
 
-// 色彩空间
-enum ExportColorSpace: String, Codable, CaseIterable {
-    case sRGB
-    case displayP3 = "Display P3"
-    case adobeRGB = "Adobe RGB"
-    case proPhotoRGB = "ProPhoto RGB"
-}
-
 // 输出预设
 enum ExportOutputPreset: String, Codable, CaseIterable {
     case sdrSRGB = "SDR sRGB"
     case displayP3SDR = "Display P3 SDR"
-    case displayP3HLGHDR = "Display P3 HLG HDR"
     case rec2020HLGHDR = "Rec.2020 HLG HDR"
     case rec2020PQHDR = "Rec.2020 PQ HDR"
-
-    static var allCases: [ExportOutputPreset] {
-        [
-            .sdrSRGB,
-            .displayP3SDR,
-            .rec2020HLGHDR,
-            .rec2020PQHDR,
-        ]
-    }
 
     var description: String {
         switch self {
@@ -69,8 +49,6 @@ enum ExportOutputPreset: String, Codable, CaseIterable {
             "标准 SDR 照片输出，兼容性最高"
         case .displayP3SDR:
             "宽色域 SDR，适合 Apple 设备和现代浏览器"
-        case .displayP3HLGHDR:
-            "旧版 HDR 预设，导出时会迁移为 Rec.2020 HLG HDR"
         case .rec2020HLGHDR:
             "照片 HDR 首选，使用 BT.2020 色域和 HLG 传递函数"
         case .rec2020PQHDR:
@@ -78,20 +56,11 @@ enum ExportOutputPreset: String, Codable, CaseIterable {
         }
     }
 
-    var normalized: ExportOutputPreset {
-        switch self {
-        case .displayP3HLGHDR:
-            .rec2020HLGHDR
-        case .sdrSRGB, .displayP3SDR, .rec2020HLGHDR, .rec2020PQHDR:
-            self
-        }
-    }
-
     var isHDR: Bool {
         switch self {
         case .sdrSRGB, .displayP3SDR:
             false
-        case .displayP3HLGHDR, .rec2020HLGHDR, .rec2020PQHDR:
+        case .rec2020HLGHDR, .rec2020PQHDR:
             true
         }
     }
@@ -106,28 +75,6 @@ enum ExportOutputPreset: String, Codable, CaseIterable {
 
     var preferredFormat: ExportFormat {
         isHDR ? .heif : .jpg
-    }
-
-    static func migrated(from colorSpace: ExportColorSpace) -> ExportOutputPreset {
-        switch colorSpace {
-        case .sRGB:
-            .sdrSRGB
-        case .displayP3:
-            .displayP3SDR
-        case .adobeRGB, .proPhotoRGB:
-            .sdrSRGB
-        }
-    }
-
-    var legacyColorSpace: ExportColorSpace {
-        switch self {
-        case .sdrSRGB:
-            .sRGB
-        case .displayP3SDR, .displayP3HLGHDR:
-            .displayP3
-        case .rec2020HLGHDR, .rec2020PQHDR:
-            .sRGB
-        }
     }
 }
 
@@ -184,7 +131,6 @@ struct ExportConfig: Codable, Identifiable {
     let id: UUID
     var name: String
     var format: ExportFormat
-    var colorSpace: ExportColorSpace
     var outputPreset: ExportOutputPreset
     var maxDimension: Int? // nil 表示原始尺寸
     var quality: Double // 0.0-1.0，仅用于 JPG 和 HEIF
@@ -197,7 +143,6 @@ struct ExportConfig: Codable, Identifiable {
         case id
         case name
         case format
-        case colorSpace
         case outputPreset
         case maxDimension
         case quality
@@ -221,9 +166,7 @@ struct ExportConfig: Codable, Identifiable {
         id = UUID()
         self.name = name
         self.format = format
-        let normalizedOutputPreset = outputPreset.normalized
-        self.colorSpace = normalizedOutputPreset.legacyColorSpace
-        self.outputPreset = normalizedOutputPreset
+        self.outputPreset = outputPreset
         self.maxDimension = maxDimension
         self.quality = quality
         self.ultraHDRGainMapCompression = ultraHDRGainMapCompression
@@ -237,20 +180,11 @@ struct ExportConfig: Codable, Identifiable {
         id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
         name = try container.decodeIfPresent(String.self, forKey: .name) ?? "默认"
         format = try container.decodeIfPresent(ExportFormat.self, forKey: .format) ?? .jpg
-
-        let decodedColorSpace = try container.decodeIfPresent(
-            ExportColorSpace.self,
-            forKey: .colorSpace
-        ) ?? .sRGB
-
         outputPreset = try container.decodeIfPresent(
             ExportOutputPreset.self,
             forKey: .outputPreset
-        ) ?? ExportOutputPreset.migrated(from: decodedColorSpace)
+        ) ?? .sdrSRGB
 
-        outputPreset = outputPreset.normalized
-
-        colorSpace = outputPreset.legacyColorSpace
         maxDimension = try container.decodeIfPresent(Int.self, forKey: .maxDimension)
         quality = try container.decodeIfPresent(Double.self, forKey: .quality) ?? 0.98
         ultraHDRGainMapCompression = try container.decodeIfPresent(
@@ -260,10 +194,6 @@ struct ExportConfig: Codable, Identifiable {
         outputDirectory = try container.decodeIfPresent(URL.self, forKey: .outputDirectory)
         prefix = try container.decodeIfPresent(String.self, forKey: .prefix) ?? ""
         suffix = try container.decodeIfPresent(String.self, forKey: .suffix) ?? ""
-
-        if format == .jpegGainMap {
-            format = .ultraHDRJPEG
-        }
 
         if !format.isCompatible(with: outputPreset) {
             format = outputPreset.preferredFormat

@@ -441,8 +441,6 @@ struct ExportDialog: View {
             }
         }
         .onChange(of: currentConfig.outputPreset) { _, newOutputPreset in
-            currentConfig.colorSpace = newOutputPreset.legacyColorSpace
-
             if !currentConfig.format.isCompatible(with: newOutputPreset) {
                 currentConfig.format = newOutputPreset.preferredFormat
             }
