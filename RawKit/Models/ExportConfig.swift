@@ -86,11 +86,11 @@ enum UltraHDRGainMapCompression: String, Codable, CaseIterable {
     var description: String {
         switch self {
         case .highQuality:
-            "完整 gain map，文件最大，保留最多局部 HDR 细节"
+            "完整分辨率 gain map，文件最大，保留最多局部 HDR 细节"
         case .balanced:
             "半分辨率 gain map，体积和 HDR 细节较均衡"
         case .compact:
-            "低分辨率单通道 gain map，文件更小，复杂彩色高光可能略简化"
+            "低分辨率 gain map，文件更小，局部 HDR 细节略简化"
         }
     }
 
@@ -117,12 +117,7 @@ enum UltraHDRGainMapCompression: String, Codable, CaseIterable {
     }
 
     var usesMultiChannelGainMap: Bool {
-        switch self {
-        case .highQuality, .balanced:
-            true
-        case .compact:
-            false
-        }
+        false
     }
 }
 

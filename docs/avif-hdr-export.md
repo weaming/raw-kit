@@ -229,13 +229,6 @@ AVIF 导出不调用外部工具：
 - 不调用 `avifenc`
 - 不调用其他外部 AVIF 编码器
 
-`ImageExporter.swift` 中仍有 `Process()`，但它只用于 Ultra HDR JPEG 的 `ultrahdr_app`：
-
-```text
-Ultra HDR JPEG -> Homebrew libultrahdr / ultrahdr_app
-AVIF           -> Apple ImageIO + Swift 后处理
-```
-
 `scripts/check-avif.fish` 可能使用 `ffprobe`，但它只是检查脚本，不参与应用导出。
 
 ## 验证方法
