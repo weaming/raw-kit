@@ -11,12 +11,6 @@ class ImageExporter {
         "/opt/homebrew/bin/ultrahdr_app",
         "/usr/local/bin/ultrahdr_app",
     ]
-    private static let avifFFmpegToolCandidates: [String?] = [
-        Bundle.main.url(forResource: "ffmpeg", withExtension: nil)?.path,
-        Bundle.main.executableURL?.deletingLastPathComponent().appendingPathComponent("ffmpeg").path,
-        "/opt/homebrew/bin/ffmpeg",
-        "/usr/local/bin/ffmpeg",
-    ]
 
     private static var exportContext: CIContext {
         CIContextManager.shared.getRenderContext()
@@ -355,19 +349,6 @@ class ImageExporter {
         targetHeadroom: Float?,
         context: CIContext
     ) throws {
-        if outputPreset.isHDR {
-            try exportHDRAVIFWithFFmpeg(
-                image,
-                to: url,
-                colorSpace: colorSpace,
-                outputPreset: outputPreset,
-                quality: quality,
-                targetHeadroom: targetHeadroom,
-                context: context
-            )
-            return
-        }
-
         guard let destination = CGImageDestinationCreateWithURL(
             url as CFURL,
             "public.avif" as CFString,
@@ -394,6 +375,9 @@ class ImageExporter {
         let properties: [String: Any] = [
             kCGImageDestinationLossyCompressionQuality as String: quality,
             kCGImagePropertyHasAlpha as String: false,
+            kCGImageDestinationEncodeRequest as String: outputPreset.isHDR
+                ? kCGImageDestinationEncodeToISOHDR
+                : kCGImageDestinationEncodeToSDR,
         ]
 
         CGImageDestinationAddImage(destination, cgImage, properties as CFDictionary)
@@ -401,138 +385,279 @@ class ImageExporter {
         if !CGImageDestinationFinalize(destination) {
             throw ExportError.failedToFinalizeExport
         }
+
+        if outputPreset.isHDR {
+            try normalizeHDRAVIFColorMetadata(at: url)
+        }
     }
 
-    private static func exportHDRAVIFWithFFmpeg(
-        _ image: CIImage,
-        to url: URL,
-        colorSpace: CGColorSpace,
-        outputPreset: ExportOutputPreset,
-        quality: Double,
-        targetHeadroom: Float?,
-        context: CIContext
-    ) throws {
-        guard let ffmpegURL = findAVIFFFMpegTool() else {
-            throw ExportError.missingAVIFEncoderTool
-        }
+    private static func normalizeHDRAVIFColorMetadata(at url: URL) throws {
+        var fileData = try Data(contentsOf: url)
+        var patchedBoxCount = 0
 
-        let tempDirectory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("RawKit-AVIF-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
-        defer {
-            try? FileManager.default.removeItem(at: tempDirectory)
-        }
-
-        let outputImage = normalizedHDRImage(
-            makeOpaqueImageForJPEG(image),
-            targetHeadroom: targetHeadroom
-        )
-        let imageExtent = outputImage.extent
-        guard imageExtent.isInfinite == false, !imageExtent.isEmpty else {
-            throw ExportError.invalidImageExtent
-        }
-
-        let width = Int(imageExtent.width.rounded())
-        let height = Int(imageExtent.height.rounded())
-        guard width > 0, height > 0 else {
-            throw ExportError.invalidImageExtent
-        }
-
-        let intermediateURL = tempDirectory.appendingPathComponent("hdr-rgba16.raw")
-        let renderBounds = CGRect(x: 0, y: 0, width: width, height: height)
-
-        try writeHDRAVIFIntermediateRaw(
-            outputImage,
-            to: intermediateURL,
-            extent: renderBounds,
-            width: width,
-            height: height,
-            colorSpace: colorSpace,
-            context: context
+        patchAVIFColorBoxes(
+            in: &fileData,
+            range: 0 ..< fileData.count,
+            patchedBoxCount: &patchedBoxCount
         )
 
-        let colorTransfer = avifColorTransferArgument(for: outputPreset)
-        let crfValue = String(avifCRFValue(for: quality))
+        guard patchedBoxCount > 0 else { return }
 
-        try runAVIFFFMpegTool(
-            ffmpegURL,
-            arguments: [
-                "-y",
-                "-hide_banner",
-                "-f", "rawvideo",
-                "-pixel_format", "rgba64le",
-                "-video_size", "\(width)x\(height)",
-                "-framerate", "1",
-                "-color_primaries", "bt2020",
-                "-color_trc", colorTransfer,
-                "-colorspace", "bt2020nc",
-                "-color_range", "pc",
-                "-i", intermediateURL.path,
-                "-frames:v", "1",
-                "-an",
-                "-c:v", "libaom-av1",
-                "-still-picture", "1",
-                "-pix_fmt", "yuv420p10le",
-                "-color_primaries", "bt2020",
-                "-color_trc", colorTransfer,
-                "-colorspace", "bt2020nc",
-                "-color_range", "pc",
-                "-crf", crfValue,
-                "-b:v", "0",
-                "-cpu-used", "2",
-                "-row-mt", "1",
-                url.path,
-            ]
-        )
+        try fileData.write(to: url, options: .atomic)
     }
 
-    private static func writeHDRAVIFIntermediateRaw(
-        _ image: CIImage,
-        to url: URL,
-        extent: CGRect,
-        width: Int,
-        height: Int,
-        colorSpace: CGColorSpace,
-        context: CIContext
-    ) throws {
-        let normalizedImage = image
-            .transformed(
-                by: CGAffineTransform(
-                    translationX: -image.extent.origin.x,
-                    y: -image.extent.origin.y
+    private static func patchAVIFColorBoxes(
+        in fileData: inout Data,
+        range: Range<Int>,
+        patchedBoxCount: inout Int
+    ) {
+        var boxOffset = range.lowerBound
+
+        while boxOffset + 8 <= range.upperBound {
+            guard let baseBoxSize = readBigEndianUInt32(fileData, at: boxOffset) else { return }
+
+            var headerSize = 8
+            var boxSize = UInt64(baseBoxSize)
+            if baseBoxSize == 1 {
+                guard let extendedBoxSize = readBigEndianUInt64(fileData, at: boxOffset + 8) else { return }
+
+                headerSize = 16
+                boxSize = extendedBoxSize
+            } else if baseBoxSize == 0 {
+                boxSize = UInt64(range.upperBound - boxOffset)
+            }
+
+            guard boxSize >= UInt64(headerSize) else { return }
+            guard boxSize <= UInt64(Int.max - boxOffset) else { return }
+
+            let boxEnd = boxOffset + Int(boxSize)
+            guard boxEnd <= range.upperBound else { return }
+
+            if boxTypeEquals(fileData, at: boxOffset + 4, type: "colr") {
+                patchAVIFNCLXColorBox(
+                    in: &fileData,
+                    boxOffset: boxOffset,
+                    headerSize: headerSize,
+                    boxEnd: boxEnd,
+                    patchedBoxCount: &patchedBoxCount
                 )
-            )
-            .cropped(to: extent)
+            } else if boxTypeEquals(fileData, at: boxOffset + 4, type: "mdat") {
+                patchAV1ColorMetadata(
+                    in: &fileData,
+                    range: (boxOffset + headerSize) ..< boxEnd,
+                    patchedFieldCount: &patchedBoxCount
+                )
+            } else if canContainAVIFChildBoxes(fileData, at: boxOffset + 4) {
+                let childOffset = boxOffset + headerSize + (boxTypeEquals(fileData, at: boxOffset + 4, type: "meta") ? 4 : 0)
+                if childOffset < boxEnd {
+                    patchAVIFColorBoxes(
+                        in: &fileData,
+                        range: childOffset ..< boxEnd,
+                        patchedBoxCount: &patchedBoxCount
+                    )
+                }
+            }
 
-        try renderRawImage(
-            normalizedImage,
-            to: url,
-            extent: extent,
-            width: width,
-            height: height,
-            bytesPerPixel: 8,
-            format: .RGBA16,
-            colorSpace: colorSpace,
-            context: context
-        )
-    }
-
-    private static func avifColorTransferArgument(for outputPreset: ExportOutputPreset) -> String {
-        switch outputPreset.normalized {
-        case .rec2020PQHDR:
-            "smpte2084"
-        case .rec2020HLGHDR, .displayP3HLGHDR:
-            "arib-std-b67"
-        case .sdrSRGB, .displayP3SDR:
-            "iec61966-2-1"
+            boxOffset = boxEnd
         }
     }
 
-    private static func avifCRFValue(for quality: Double) -> Int {
-        let clampedQuality = quality.clamped(to: 0.5 ... 1.0)
-        let crfValue = (1.0 - clampedQuality) * 120.0
+    private static func patchAVIFNCLXColorBox(
+        in fileData: inout Data,
+        boxOffset: Int,
+        headerSize: Int,
+        boxEnd: Int,
+        patchedBoxCount: inout Int
+    ) {
+        let colorTypeOffset = boxOffset + headerSize
+        let colorPrimariesOffset = colorTypeOffset + 4
+        let transferOffset = colorPrimariesOffset + 2
+        let matrixOffset = transferOffset + 2
+        let fullRangeOffset = matrixOffset + 2
 
-        return Int(crfValue.rounded()).clamped(to: 0 ... 35)
+        guard fullRangeOffset < boxEnd else { return }
+        guard boxTypeEquals(fileData, at: colorTypeOffset, type: "nclx") else { return }
+        guard let colorPrimaries = readBigEndianUInt16(fileData, at: colorPrimariesOffset),
+              let transferCharacteristics = readBigEndianUInt16(fileData, at: transferOffset),
+              let matrixCoefficients = readBigEndianUInt16(fileData, at: matrixOffset) else {
+            return
+        }
+
+        let isBT2020 = colorPrimaries == 9
+        let isHDRTransfer = transferCharacteristics == 16 || transferCharacteristics == 18
+        guard isBT2020, isHDRTransfer, matrixCoefficients == 1 else { return }
+
+        fileData[matrixOffset] = 0
+        fileData[matrixOffset + 1] = 9
+        patchedBoxCount += 1
+    }
+
+    private static func patchAV1ColorMetadata(
+        in fileData: inout Data,
+        range: Range<Int>,
+        patchedFieldCount: inout Int
+    ) {
+        var obuOffset = range.lowerBound
+
+        while obuOffset < range.upperBound {
+            guard obuOffset + 1 <= range.upperBound else { return }
+
+            let obuHeader = fileData[obuOffset]
+            obuOffset += 1
+
+            let obuType = (obuHeader >> 3) & 0x0f
+            let hasExtension = (obuHeader & 0x04) != 0
+            let hasSize = (obuHeader & 0x02) != 0
+            guard (obuHeader & 0x80) == 0, (obuHeader & 0x01) == 0 else { return }
+
+            if hasExtension {
+                guard obuOffset + 1 <= range.upperBound else { return }
+                obuOffset += 1
+            }
+
+            guard hasSize else { return }
+            guard let (payloadSize, payloadSizeByteCount) = readLEB128UInt(fileData, at: obuOffset, end: range.upperBound) else {
+                return
+            }
+
+            obuOffset += payloadSizeByteCount
+            guard payloadSize <= UInt64(range.upperBound - obuOffset) else { return }
+
+            let payloadEnd = obuOffset + Int(payloadSize)
+            if obuType == 1 {
+                patchAV1SequenceHeaderColorMetadata(
+                    in: &fileData,
+                    payloadRange: obuOffset ..< payloadEnd,
+                    patchedFieldCount: &patchedFieldCount
+                )
+            }
+
+            obuOffset = payloadEnd
+        }
+    }
+
+    private static func patchAV1SequenceHeaderColorMetadata(
+        in fileData: inout Data,
+        payloadRange: Range<Int>,
+        patchedFieldCount: inout Int
+    ) {
+        let lowerBitOffset = payloadRange.lowerBound * 8
+        let upperBitOffset = payloadRange.upperBound * 8
+        guard lowerBitOffset + 24 <= upperBitOffset else { return }
+
+        var bitOffset = lowerBitOffset
+        while bitOffset + 24 <= upperBitOffset {
+            let colorPrimaries = readBits(fileData, at: bitOffset, count: 8)
+            let transferCharacteristics = readBits(fileData, at: bitOffset + 8, count: 8)
+            let matrixCoefficients = readBits(fileData, at: bitOffset + 16, count: 8)
+
+            if colorPrimaries == 9,
+               transferCharacteristics == 16 || transferCharacteristics == 18,
+               matrixCoefficients == 1 {
+                writeBits(&fileData, at: bitOffset + 16, count: 8, value: 9)
+                patchedFieldCount += 1
+            }
+
+            bitOffset += 1
+        }
+    }
+
+    private static func canContainAVIFChildBoxes(_ fileData: Data, at offset: Int) -> Bool {
+        boxTypeEquals(fileData, at: offset, type: "meta") ||
+            boxTypeEquals(fileData, at: offset, type: "iprp") ||
+            boxTypeEquals(fileData, at: offset, type: "ipco")
+    }
+
+    private static func boxTypeEquals(_ fileData: Data, at offset: Int, type: StaticString) -> Bool {
+        guard offset + 4 <= fileData.count else { return false }
+        guard type.utf8CodeUnitCount == 4 else { return false }
+
+        return fileData[offset] == type.utf8Start[0] &&
+            fileData[offset + 1] == type.utf8Start[1] &&
+            fileData[offset + 2] == type.utf8Start[2] &&
+            fileData[offset + 3] == type.utf8Start[3]
+    }
+
+    private static func readBigEndianUInt16(_ fileData: Data, at offset: Int) -> UInt16? {
+        guard offset + 2 <= fileData.count else { return nil }
+
+        return UInt16(fileData[offset]) << 8 |
+            UInt16(fileData[offset + 1])
+    }
+
+    private static func readBigEndianUInt32(_ fileData: Data, at offset: Int) -> UInt32? {
+        guard offset + 4 <= fileData.count else { return nil }
+
+        return UInt32(fileData[offset]) << 24 |
+            UInt32(fileData[offset + 1]) << 16 |
+            UInt32(fileData[offset + 2]) << 8 |
+            UInt32(fileData[offset + 3])
+    }
+
+    private static func readBigEndianUInt64(_ fileData: Data, at offset: Int) -> UInt64? {
+        guard let highBits = readBigEndianUInt32(fileData, at: offset),
+              let lowBits = readBigEndianUInt32(fileData, at: offset + 4) else {
+            return nil
+        }
+
+        return UInt64(highBits) << 32 | UInt64(lowBits)
+    }
+
+    private static func readLEB128UInt(_ fileData: Data, at offset: Int, end: Int) -> (UInt64, Int)? {
+        var value: UInt64 = 0
+        var shift = 0
+        var byteOffset = offset
+
+        while byteOffset < end {
+            let byteValue = fileData[byteOffset]
+            value |= UInt64(byteValue & 0x7f) << shift
+            byteOffset += 1
+
+            if (byteValue & 0x80) == 0 {
+                return (value, byteOffset - offset)
+            }
+
+            shift += 7
+            guard shift < 64 else { return nil }
+        }
+
+        return nil
+    }
+
+    private static func readBits(_ fileData: Data, at bitOffset: Int, count: Int) -> UInt32? {
+        guard count > 0, count <= 32 else { return nil }
+        guard bitOffset >= 0, bitOffset + count <= fileData.count * 8 else { return nil }
+
+        var value: UInt32 = 0
+        for bitIndex in 0 ..< count {
+            let absoluteBitOffset = bitOffset + bitIndex
+            let byteOffset = absoluteBitOffset / 8
+            let bitInByte = 7 - (absoluteBitOffset % 8)
+            let bitValue = (fileData[byteOffset] >> UInt8(bitInByte)) & 1
+
+            value = (value << 1) | UInt32(bitValue)
+        }
+
+        return value
+    }
+
+    private static func writeBits(_ fileData: inout Data, at bitOffset: Int, count: Int, value: UInt32) {
+        guard count > 0, count <= 32 else { return }
+        guard bitOffset >= 0, bitOffset + count <= fileData.count * 8 else { return }
+
+        for bitIndex in 0 ..< count {
+            let absoluteBitOffset = bitOffset + bitIndex
+            let byteOffset = absoluteBitOffset / 8
+            let bitInByte = 7 - (absoluteBitOffset % 8)
+            let mask = UInt8(1 << bitInByte)
+            let bitValue = (value >> UInt32(count - bitIndex - 1)) & 1
+
+            if bitValue == 1 {
+                fileData[byteOffset] |= mask
+            } else {
+                fileData[byteOffset] &= ~mask
+            }
+        }
     }
 
     private static func exportJPEGGainMap(
@@ -672,17 +797,6 @@ class ImageExporter {
         return nil
     }
 
-    private static func findAVIFFFMpegTool() -> URL? {
-        for optionalPath in avifFFmpegToolCandidates {
-            guard let path = optionalPath else { continue }
-            guard FileManager.default.isExecutableFile(atPath: path) else { continue }
-
-            return URL(fileURLWithPath: path)
-        }
-
-        return nil
-    }
-
     private static func renderHDRRawImage(
         _ image: CIImage,
         to url: URL,
@@ -779,25 +893,6 @@ class ImageExporter {
         let output = String(data: outputData, encoding: .utf8) ?? ""
         guard process.terminationStatus == 0 else {
             throw ExportError.failedUltraHDREncoding(output.trimmingCharacters(in: .whitespacesAndNewlines))
-        }
-    }
-
-    private static func runAVIFFFMpegTool(_ toolURL: URL, arguments: [String]) throws {
-        let process = Process()
-        process.executableURL = toolURL
-        process.arguments = arguments
-
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-
-        try process.run()
-        process.waitUntilExit()
-
-        let outputData = pipe.fileHandleForReading.readDataToEndOfFile()
-        let output = String(data: outputData, encoding: .utf8) ?? ""
-        guard process.terminationStatus == 0 else {
-            throw ExportError.failedAVIFEncoding(output.trimmingCharacters(in: .whitespacesAndNewlines))
         }
     }
 
@@ -903,9 +998,7 @@ enum ExportError: LocalizedError {
     case failedToRenderImage
     case failedToFinalizeExport
     case invalidImageExtent
-    case missingAVIFEncoderTool
     case missingUltraHDRTool
-    case failedAVIFEncoding(String)
     case failedUltraHDREncoding(String)
 
     var errorDescription: String? {
@@ -922,12 +1015,8 @@ enum ExportError: LocalizedError {
             "无法完成导出"
         case .invalidImageExtent:
             "图像尺寸无效，无法导出"
-        case .missingAVIFEncoderTool:
-            "无法导出 HDR AVIF：未找到 ffmpeg。请先安装 ffmpeg：brew install ffmpeg"
         case .missingUltraHDRTool:
             "无法导出 Ultra HDR JPEG：未找到 Ultra HDR 编码器。请先安装 libultrahdr：brew install libultrahdr"
-        case let .failedAVIFEncoding(message):
-            message.isEmpty ? "HDR AVIF 编码失败" : "HDR AVIF 编码失败：\(message)"
         case let .failedUltraHDREncoding(message):
             message.isEmpty ? "Ultra HDR JPEG 编码失败" : "Ultra HDR JPEG 编码失败：\(message)"
         }

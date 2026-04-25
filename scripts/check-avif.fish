@@ -101,11 +101,23 @@ end
 if command -q ffprobe
     echo
     echo "== ffprobe 摘要 =="
-    ffprobe -hide_banner -v error \
+    set -l ffprobe_metadata (ffprobe -hide_banner -v error \
         -select_streams v:0 \
         -show_entries stream=pix_fmt,color_range,color_space,color_transfer,color_primaries,width,height \
         -of default=noprint_wrappers=1 \
-        "$file"
+        "$file")
+
+    printf "%s\n" $ffprobe_metadata
+
+    echo
+    echo "== AV1 bitstream 判断 =="
+    if string match -q "*color_space=bt2020nc*" -- $ffprobe_metadata
+        echo "OK: AV1 bitstream color_space 是 bt2020nc"
+    else if string match -q "*color_space=bt709*" -- $ffprobe_metadata
+        echo "BAD: AV1 bitstream color_space 是 bt709，Chrome HDR 兼容风险高"
+    else
+        echo "WARN: AV1 bitstream color_space 未确认是 bt2020nc"
+    end
 else
     echo
     echo "提示: 安装 ffmpeg 后可用 ffprobe 交叉检查: brew install ffmpeg"
