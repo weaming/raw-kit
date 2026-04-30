@@ -223,6 +223,10 @@ class ImageExporter {
             CGColorSpace(name: CGColorSpace.sRGB)!
         case .displayP3SDR:
             CGColorSpace(name: CGColorSpace.displayP3)!
+        case .displayP3HLGHDR:
+            CGColorSpace(name: CGColorSpace.displayP3_HLG)!
+        case .displayP3PQHDR:
+            CGColorSpace(name: CGColorSpace.displayP3_PQ)!
         case .rec2020HLGHDR:
             CGColorSpace(name: CGColorSpace.itur_2100_HLG)!
         case .rec2020PQHDR:
@@ -422,6 +426,10 @@ class ImageExporter {
             "1/13/1"
         case .displayP3SDR:
             "12/13/1"
+        case .displayP3HLGHDR:
+            "12/18/1"
+        case .displayP3PQHDR:
+            "12/16/1"
         case .rec2020HLGHDR:
             "9/18/9"
         case .rec2020PQHDR:

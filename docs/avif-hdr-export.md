@@ -71,6 +71,8 @@ CICP 对应关系：
 ```text
 SDR sRGB          : 1/13/1
 Display P3 SDR    : 12/13/1
+Display P3 HLG HDR: 12/18/1
+Display P3 PQ HDR : 12/16/1
 Rec.2020 HLG HDR  : 9/18/9
 Rec.2020 PQ HDR   : 9/16/9
 ```

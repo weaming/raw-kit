@@ -40,6 +40,8 @@ enum ExportFormat: String, Codable, CaseIterable {
 enum ExportOutputPreset: String, Codable, CaseIterable {
     case sdrSRGB = "SDR sRGB"
     case displayP3SDR = "Display P3 SDR"
+    case displayP3HLGHDR = "Display P3 HLG HDR"
+    case displayP3PQHDR = "Display P3 PQ HDR"
     case rec2020HLGHDR = "Rec.2020 HLG HDR"
     case rec2020PQHDR = "Rec.2020 PQ HDR"
 
@@ -49,6 +51,10 @@ enum ExportOutputPreset: String, Codable, CaseIterable {
             "标准 SDR 照片输出，兼容性最高"
         case .displayP3SDR:
             "宽色域 SDR，适合 Apple 设备和现代浏览器"
+        case .displayP3HLGHDR:
+            "P3 HDR 输出，适合 Apple 设备和 P3 HDR 工作流"
+        case .displayP3PQHDR:
+            "P3 PQ HDR 输出，适合 Apple 设备和 PQ HDR 工作流"
         case .rec2020HLGHDR:
             "照片 HDR 首选，使用 BT.2020 色域和 HLG 传递函数"
         case .rec2020PQHDR:
@@ -60,7 +66,7 @@ enum ExportOutputPreset: String, Codable, CaseIterable {
         switch self {
         case .sdrSRGB, .displayP3SDR:
             false
-        case .rec2020HLGHDR, .rec2020PQHDR:
+        case .displayP3HLGHDR, .displayP3PQHDR, .rec2020HLGHDR, .rec2020PQHDR:
             true
         }
     }
