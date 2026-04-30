@@ -73,8 +73,10 @@ RawKit 是一个 macOS 本地 RAW 图像预览和处理工具，面向需要快�
 - TIFF 16-bit
 - JPEG（可调质量）
 - HEIF
+- AVIF（libavif 10-bit）
+- Ultra HDR JPEG
 - DNG 16-bit
-- 输出色彩空间：sRGB、Display P3、Adobe RGB、ProPhoto RGB
+- 输出预设：SDR sRGB、Display P3 SDR、Rec.2020 HLG HDR、Rec.2020 PQ HDR
 - 导出预设
 - 可配置输出尺寸、命名前后缀、输出目录
 - 批量导出当前图片列表

@@ -20,6 +20,32 @@ private final class FileURLCollector: @unchecked Sendable {
     }
 }
 
+private struct ExportFailure {
+    let fileName: String
+    let reason: String
+}
+
+private enum ContentExportError: LocalizedError {
+    case failedExports([ExportFailure])
+
+    var errorDescription: String? {
+        switch self {
+        case let .failedExports(failures):
+            let visibleFailures = failures.prefix(3)
+            let failureSummary = visibleFailures
+                .map { "\($0.fileName)：\($0.reason)" }
+                .joined(separator: "\n")
+            let remainingCount = failures.count - visibleFailures.count
+
+            if remainingCount > 0 {
+                return "有 \(failures.count) 张图片导出失败：\n\(failureSummary)\n另有 \(remainingCount) 张失败。"
+            }
+
+            return "有 \(failures.count) 张图片导出失败：\n\(failureSummary)"
+        }
+    }
+}
+
 struct ContentView: View {
     @StateObject private var imageManager = ImageManager()
     @StateObject private var thumbnailManager = ThumbnailManager()
@@ -124,17 +150,17 @@ struct ContentView: View {
             syncEditingSessions(for: imageManager.images)
         }
         .sheet(isPresented: $showingExportDialog) {
-            ExportDialog(
-                imagesToExport: getImagesToExport(),
-                adjustmentsForImageID: adjustments(for:),
-                onExport: { config, progress in
-                    await performExport(
-                        config: config,
-                        progress: progress
-                    )
-                },
-                onCancel: {
-                    showingExportDialog = false
+                ExportDialog(
+                    imagesToExport: getImagesToExport(),
+                    adjustmentsForImageID: adjustments(for:),
+                    onExport: { config, progress in
+                        try await performExport(
+                            config: config,
+                            progress: progress
+                        )
+                    },
+                    onCancel: {
+                        showingExportDialog = false
                 }
             )
         }
@@ -197,7 +223,7 @@ struct ContentView: View {
     private func performExport(
         config: ExportConfig,
         progress: @escaping @MainActor @Sendable (Double) -> Void
-    ) async {
+    ) async throws {
         let imagesToExport = getImagesToExport()
         guard !imagesToExport.isEmpty else {
             await MainActor.run {
@@ -209,6 +235,8 @@ struct ContentView: View {
         await MainActor.run {
             progress(0.0)
         }
+
+        var failures: [ExportFailure] = []
 
         for (index, imageInfo) in imagesToExport.enumerated() {
             let adjustments = adjustments(for: imageInfo.id)
@@ -229,13 +257,24 @@ struct ContentView: View {
                 )
                 print("导出成功: \(outputURL.path)")
             } catch {
-                print("导出失败: \(error.localizedDescription)")
+                let reason = error.localizedDescription
+                print("导出失败: \(reason)")
+                failures.append(
+                    ExportFailure(
+                        fileName: imageInfo.url.lastPathComponent,
+                        reason: reason
+                    )
+                )
             }
 
             let completedProgress = Double(index + 1) / Double(imagesToExport.count)
             await MainActor.run {
                 progress(completedProgress)
             }
+        }
+
+        if !failures.isEmpty {
+            throw ContentExportError.failedExports(failures)
         }
     }
 

@@ -8,6 +8,7 @@ struct ExportDialog: View {
     @State private var newPresetName = ""
     @State private var isExporting = false
     @State private var exportProgress: Double = 0.0
+    @State private var exportErrorMessage: String?
     @FocusState private var focusedField: Field?
 
     enum Field {
@@ -19,13 +20,13 @@ struct ExportDialog: View {
 
     let imagesToExport: [ImageInfo]
     let adjustmentsForImageID: (UUID) -> ImageAdjustments
-    let onExport: (ExportConfig, @escaping @MainActor @Sendable (Double) -> Void) async -> Void
+    let onExport: (ExportConfig, @escaping @MainActor @Sendable (Double) -> Void) async throws -> Void
     let onCancel: () -> Void
 
     init(
         imagesToExport: [ImageInfo],
         adjustmentsForImageID: @escaping (UUID) -> ImageAdjustments,
-        onExport: @escaping (ExportConfig, @escaping @MainActor @Sendable (Double) -> Void) async -> Void,
+        onExport: @escaping (ExportConfig, @escaping @MainActor @Sendable (Double) -> Void) async throws -> Void,
         onCancel: @escaping () -> Void
     ) {
         self.imagesToExport = imagesToExport
@@ -180,6 +181,13 @@ struct ExportDialog: View {
                 await startExport()
             }
         }
+        .alert("导出失败", isPresented: exportErrorAlertBinding) {
+            Button("好", role: .cancel) {
+                exportErrorMessage = nil
+            }
+        } message: {
+            Text(exportErrorMessage ?? "")
+        }
         .sheet(isPresented: $showingSavePresetDialog) {
             SaveExportPresetDialog(
                 presetName: $newPresetName,
@@ -189,8 +197,20 @@ struct ExportDialog: View {
                     showingSavePresetDialog = false
                     newPresetName = ""
                 }
-            )
-        }
+        )
+    }
+
+    }
+
+    private var exportErrorAlertBinding: Binding<Bool> {
+        Binding(
+            get: { exportErrorMessage != nil },
+            set: { isPresented in
+                if !isPresented {
+                    exportErrorMessage = nil
+                }
+            }
+        )
     }
 
     private var headerView: some View {
@@ -714,13 +734,18 @@ struct ExportDialog: View {
             configManager.selectPreset(nil)
         }
 
-        await onExport(currentConfig) { progress in
-            exportProgress = progress
-        }
+        do {
+            try await onExport(currentConfig) { progress in
+                exportProgress = progress
+            }
 
-        exportProgress = 1.0
-        isExporting = false
-        onCancel()
+            exportProgress = 1.0
+            isExporting = false
+            onCancel()
+        } catch {
+            exportErrorMessage = error.localizedDescription
+            isExporting = false
+        }
     }
 
     private func configsMatch(_ config1: ExportConfig, _ config2: ExportConfig) -> Bool {
