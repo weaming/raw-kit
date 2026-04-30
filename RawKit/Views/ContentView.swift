@@ -201,6 +201,20 @@ struct ContentView: View {
                 .keyboardShortcut("a", modifiers: .command)
                 .disabled(imageManager.images.isEmpty)
                 .hidden()
+
+                Button("") {
+                    navigateImage(by: -1)
+                }
+                .keyboardShortcut(.leftArrow, modifiers: [])
+                .disabled(imageManager.images.count <= 1)
+                .hidden()
+
+                Button("") {
+                    navigateImage(by: 1)
+                }
+                .keyboardShortcut(.rightArrow, modifiers: [])
+                .disabled(imageManager.images.count <= 1)
+                .hidden()
             }
         )
     }
@@ -480,6 +494,18 @@ struct ContentView: View {
         if displayedIndex == nil || displayedIndex! >= imageManager.images.count {
             displayedIndex = 0
         }
+    }
+
+    private func navigateImage(by offset: Int) {
+        guard !imageManager.images.isEmpty else { return }
+
+        let currentIndex = displayedIndex ?? selectedIndices.sorted().first ?? 0
+        let lastIndex = imageManager.images.count - 1
+        let targetIndex = min(max(currentIndex + offset, 0), lastIndex)
+        guard targetIndex != displayedIndex else { return }
+
+        displayedIndex = targetIndex
+        selectedIndices = [targetIndex]
     }
 }
 
