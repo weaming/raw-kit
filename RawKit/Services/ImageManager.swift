@@ -13,7 +13,7 @@ class ImageManager: ObservableObject {
     ]
 
     private let normalExtensions = [
-        "jpg", "jpeg", "png", "tiff", "tif", "heic", "heif", "hif",
+        "jpg", "jpeg", "png", "tiff", "tif", "heic", "heif", "hif", "avif",
     ]
 
     private var supportedExtensions: [String] {

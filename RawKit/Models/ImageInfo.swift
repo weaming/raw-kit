@@ -243,6 +243,7 @@ enum ImageFileType: Equatable {
     case png
     case tiff
     case heif
+    case avif
     case unknown
 
     enum RawType: String {
@@ -272,6 +273,8 @@ enum ImageFileType: Equatable {
                 self = .tiff
             case "heic", "heif", "hif":
                 self = .heif
+            case "avif":
+                self = .avif
             default:
                 self = .unknown
             }
@@ -290,6 +293,8 @@ enum ImageFileType: Equatable {
             "TIFF"
         case .heif:
             "HEIF"
+        case .avif:
+            "AVIF"
         case .unknown:
             "未知"
         }

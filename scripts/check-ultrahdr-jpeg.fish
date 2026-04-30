@@ -22,6 +22,15 @@ if not command -q strings
     exit 1
 end
 
+function joined_or_none
+    if test (count $argv) -eq 0
+        echo "(none)"
+        return
+    end
+
+    string join " | " $argv
+end
+
 echo "== 文件 =="
 echo "$file"
 echo
@@ -36,7 +45,12 @@ exiftool -a -G1 -s \
     -ColorComponents \
     -YCbCrSubSampling \
     -ColorSpace \
+    -ColorSpaceData \
+    -ProfileCMMType \
+    -ProfileClass \
     -ProfileDescription \
+    -ProfileConnectionSpace \
+    -RenderingIntent \
     -UniformResourceName \
     -MPFVersion \
     -NumberOfImages \
@@ -60,6 +74,8 @@ set -l metadata (exiftool -a -s -s -s \
     -MPImageLength \
     -MPImageStart \
     -ProfileDescription \
+    -ColorSpace \
+    -ColorSpaceData \
     "$file")
 
 set -l string_metadata (strings "$file")
@@ -111,6 +127,17 @@ if test (count $gain_map_hits) -gt 0
 else
     echo "未看到 gain map 字符串"
 end
+echo
+
+echo "== 主图色彩信息 =="
+set -l primary_color_space (exiftool -a -s -s -s -ColorSpace "$file")
+set -l primary_profile_description (exiftool -a -s -s -s -ProfileDescription "$file")
+set -l primary_color_space_data (exiftool -a -s -s -s -ColorSpaceData "$file")
+set -l primary_rendering_intent (exiftool -a -s -s -s -RenderingIntent "$file")
+echo "ColorSpace         : "(joined_or_none $primary_color_space)
+echo "ProfileDescription : "(joined_or_none $primary_profile_description)
+echo "ColorSpaceData     : "(joined_or_none $primary_color_space_data)
+echo "RenderingIntent    : "(joined_or_none $primary_rendering_intent)
 echo
 
 echo "== 判断 =="
@@ -172,6 +199,10 @@ if test -n "$temp_directory"
                 -BitsPerSample \
                 -ColorComponents \
                 -YCbCrSubSampling \
+                -ColorSpace \
+                -ColorSpaceData \
+                -ProfileDescription \
+                -ProfileConnectionSpace \
                 -XMP-hdrgm:Version \
                 -XMP-hdrgm:GainMapMin \
                 -XMP-hdrgm:GainMapMax \
@@ -190,6 +221,8 @@ if test -n "$temp_directory"
             set -l xmp_hdr_capacity_max (exiftool -s -s -s -XMP-hdrgm:HDRCapacityMax "$gain_map_file")
             set -l xmp_base_is_hdr (exiftool -s -s -s -XMP-hdrgm:BaseRenditionIsHDR "$gain_map_file")
             set -l gain_map_color_components (exiftool -s -s -s -ColorComponents "$gain_map_file")
+            set -l gain_map_color_space (exiftool -a -s -s -s -ColorSpace "$gain_map_file")
+            set -l gain_map_profile_description (exiftool -a -s -s -s -ProfileDescription "$gain_map_file")
 
             echo "== XMP gain map 判断 =="
             if test "$gain_map_color_components" = "1"
@@ -249,6 +282,12 @@ if test -n "$temp_directory"
             else
                 echo "BAD: BaseRenditionIsHDR 不是 False"
             end
+
+            if test -n "$gain_map_color_space"; or test -n "$gain_map_profile_description"
+                echo "INFO: gain map 子图携带色彩信息: "(joined_or_none $gain_map_color_space $gain_map_profile_description)
+            else
+                echo "OK: gain map 子图未携带额外 ICC/Profile 色彩信息"
+            end
             echo
         end
     end
@@ -271,6 +310,26 @@ if test -n "$temp_directory"
                 set -l decoded_min_content_boost (awk '/^--minContentBoost / { print $2; exit }' "$gain_map_config_file")
                 set -l decoded_hdr_capacity_min (awk '/^--hdrCapacityMin / { print $2; exit }' "$gain_map_config_file")
                 set -l decoded_hdr_capacity_max (awk '/^--hdrCapacityMax / { print $2; exit }' "$gain_map_config_file")
+                set -l decoded_base_color_gamut (awk '/^--baseColorGamut / { print $2; exit }' "$gain_map_config_file")
+                set -l decoded_alternate_color_gamut (awk '/^--alternateColorGamut / { print $2; exit }' "$gain_map_config_file")
+                set -l decoded_base_transfer (awk '/^--baseTransferFunction / { print $2; exit }' "$gain_map_config_file")
+                set -l decoded_alternate_transfer (awk '/^--alternateTransferFunction / { print $2; exit }' "$gain_map_config_file")
+
+                echo
+                echo "== ultrahdr_app 色彩信息 =="
+                if test -n "$decoded_base_color_gamut"; or test -n "$decoded_alternate_color_gamut"
+                    echo "baseColorGamut      : $decoded_base_color_gamut"
+                    echo "alternateColorGamut : $decoded_alternate_color_gamut"
+                else
+                    echo "WARN: gain map 配置未输出 color gamut 字段"
+                end
+
+                if test -n "$decoded_base_transfer"; or test -n "$decoded_alternate_transfer"
+                    echo "baseTransfer        : $decoded_base_transfer"
+                    echo "alternateTransfer   : $decoded_alternate_transfer"
+                else
+                    echo "WARN: gain map 配置未输出 transfer 字段"
+                end
 
                 if test -n "$decoded_max_content_boost"; and test -n "$decoded_hdr_capacity_max"
                     echo

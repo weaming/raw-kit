@@ -47,8 +47,10 @@ let hdrImage = normalizedHDRImage(opaqueImage, targetHeadroom: targetHeadroom)
 输出为 RGBA half float raw：
 
 ```swift
-renderHDRRawImage(... format: .RGBAh, colorSpace: extendedLinearITUR_2020)
+renderHDRRawImage(... format: .RGBAh, colorSpace: outputPreset 对应的 linear HDR 色域)
 ```
+
+P3 HDR 预设渲染为 `extendedLinearDisplayP3`，Rec.2020 HDR 预设渲染为 `extendedLinearITUR_2020`。
 
 SDR base 输入：
 
@@ -72,7 +74,7 @@ renderSDRRawImage(... format: .RGBA8, colorSpace: sRGB)
 -y sdr-rgba8.raw
 -a 4
 -b 3
--C 2
+-C <按输出预设生成>
 -c 0
 -t 0
 -R 1
@@ -91,7 +93,8 @@ renderSDRRawImage(... format: .RGBA8, colorSpace: sRGB)
 
 - `-a 4`：HDR raw 是 RGBA half float。
 - `-b 3`：SDR raw 是 RGBA8888。
-- `-C 2`：HDR intent 色域是 BT.2100。
+- `-C 1`：Display P3 HDR 预设使用 P3 HDR intent 色域。
+- `-C 2`：Rec.2020 HDR 预设使用 BT.2100 HDR intent 色域。
 - `-c 0`：SDR intent 色域是 BT.709。
 - `-t 0`：HDR intent transfer 是 linear。
 - `-R 1`：HDR intent 是 full range。

@@ -178,6 +178,7 @@ class ImageExporter {
             try exportUltraHDRJPEG(
                 exportReadyImage,
                 to: url,
+                outputPreset: outputPreset,
                 targetHeadroom: targetHDRHeadroom,
                 quality: quality,
                 compression: ultraHDRGainMapCompression,
@@ -484,6 +485,7 @@ class ImageExporter {
     private static func exportUltraHDRJPEG(
         _ image: CIImage,
         to url: URL,
+        outputPreset: ExportOutputPreset,
         targetHeadroom: Float?,
         quality: Double,
         compression: UltraHDRGainMapCompression,
@@ -533,6 +535,7 @@ class ImageExporter {
             extent: renderBounds,
             width: width,
             height: height,
+            outputPreset: outputPreset,
             context: context
         )
         try renderSDRRawImage(
@@ -553,6 +556,7 @@ class ImageExporter {
         let targetPeakNits = String(Int(min(max(Double(targetHeadroom ?? Float(defaultHDRExportHeadroom)) * 100.0, 203.0), 10_000.0).rounded()))
         let gainMapScaleFactor = String(compression.gainMapScaleFactor)
         let usesMultiChannelGainMap = compression.usesMultiChannelGainMap ? "1" : "0"
+        let hdrColorGamut = ultraHDRColorGamutValue(for: outputPreset)
 
         try runUltraHDRTool(
             toolURL,
@@ -564,7 +568,7 @@ class ImageExporter {
                 "-h", "\(height)",
                 "-a", "4",
                 "-b", "3",
-                "-C", "2",
+                "-C", hdrColorGamut,
                 "-c", "0",
                 "-t", "0",
                 "-R", "1",
@@ -600,10 +604,10 @@ class ImageExporter {
         extent: CGRect,
         width: Int,
         height: Int,
+        outputPreset: ExportOutputPreset,
         context: CIContext
     ) throws {
-        guard let colorSpace = CGColorSpace(name: CGColorSpace.extendedLinearITUR_2020) ??
-            CGColorSpace(name: CGColorSpace.linearITUR_2020) else {
+        guard let colorSpace = ultraHDRLinearColorSpace(for: outputPreset) else {
             throw ExportError.failedToRenderImage
         }
 
@@ -618,6 +622,30 @@ class ImageExporter {
             colorSpace: colorSpace,
             context: context
         )
+    }
+
+    private static func ultraHDRLinearColorSpace(for outputPreset: ExportOutputPreset) -> CGColorSpace? {
+        switch outputPreset {
+        case .displayP3HLGHDR, .displayP3PQHDR:
+            CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3)
+        case .rec2020HLGHDR, .rec2020PQHDR:
+            CGColorSpace(name: CGColorSpace.extendedLinearITUR_2020) ??
+                CGColorSpace(name: CGColorSpace.linearITUR_2020)
+        case .sdrSRGB, .displayP3SDR:
+            CGColorSpace(name: CGColorSpace.extendedLinearSRGB) ??
+                CGColorSpace(name: CGColorSpace.linearSRGB)
+        }
+    }
+
+    private static func ultraHDRColorGamutValue(for outputPreset: ExportOutputPreset) -> String {
+        switch outputPreset {
+        case .displayP3HLGHDR, .displayP3PQHDR:
+            "1"
+        case .rec2020HLGHDR, .rec2020PQHDR:
+            "2"
+        case .sdrSRGB, .displayP3SDR:
+            "0"
+        }
     }
 
     private static func renderSDRRawImage(

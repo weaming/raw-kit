@@ -6,7 +6,7 @@ RawKit 是一个 macOS 本地 RAW 图像预览和处理工具，面向需要快�
 
 ### 图像格式支持
 - RAW：ARW、X3F、CR2 / CR3、NEF、ORF、RAF、RW2、DNG 等
-- 常规图像：JPEG、PNG、TIFF
+- 常规图像：JPEG、PNG、TIFF、AVIF
 
 ### 浏览与取样
 - 主视口支持滚轮缩放、拖拽平移、双击重置缩放
