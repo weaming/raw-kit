@@ -79,6 +79,15 @@ class ImageProcessor {
         let chromaCutoff: Double
     }
 
+    private struct RawShootingMetadata {
+        let neutralTemperature: Double?
+        let neutralTint: Double?
+        let ev: Double?
+        let boost: Double?
+        let baselineExposure: Double?
+        let isVendorLensCorrectionEnabled: Bool?
+    }
+
     private enum LUTTransferMode: Int {
         case linear = 0
         case sRGB = 1
@@ -871,160 +880,6 @@ class ImageProcessor {
         return nil
     }
 
-    private static func isPreprocessedLinearSRGB(properties: [String: Any]) -> Bool {
-        guard let dngDict = properties[kCGImagePropertyDNGDictionary as String] as? [String: Any] else {
-            return false
-        }
-
-        // 方法1：检查 As Shot Neutral 是否为 [1, 1, 1]（表示已应用白平衡）
-        if let asShotNeutral = dngDict[kCGImagePropertyDNGAsShotNeutral as String] as? [NSNumber],
-           asShotNeutral.count >= 3 {
-            let r = asShotNeutral[0].doubleValue
-            let g = asShotNeutral[1].doubleValue
-            let b = asShotNeutral[2].doubleValue
-
-            // 如果 As Shot Neutral 接近 [1, 1, 1]，说明已预处理
-            let isUnity = abs(r - 1.0) < 0.01 && abs(g - 1.0) < 0.01 && abs(b - 1.0) < 0.01
-            if isUnity {
-                print("ImageProcessor: 检测到预处理 DNG（As Shot Neutral = [1, 1, 1]）")
-                return true
-            }
-        }
-
-        // 方法2：检查 Image Description 是否包含 "linear" 关键字（作为辅助判断）
-        if let tiffDict = properties[kCGImagePropertyTIFFDictionary as String] as? [String: Any],
-           let imageDesc = tiffDict[kCGImagePropertyTIFFImageDescription as String] as? String {
-            let hasLinearKeyword = imageDesc.lowercased().contains("linear srgb") ||
-                                   imageDesc.lowercased().contains("preprocessed")
-            if hasLinearKeyword {
-                print("ImageProcessor: 检测到预处理 DNG（描述：\"\(imageDesc)\"）")
-                return true
-            }
-        }
-
-        return false
-    }
-
-    private static func extractCameraCalibration1(properties: [String: Any]) -> (r: Double, g: Double, b: Double)? {
-        // 读取 Camera Calibration 1 或 ColorCalibration1 对角矩阵（X3F DNG 用它存储白平衡增益）
-        guard let dngDict = properties[kCGImagePropertyDNGDictionary as String] as? [String: Any] else {
-            return nil
-        }
-
-        // X3F DNG 使用 "ColorCalibration1" 而不是标准的 "CameraCalibration1"
-        var calibration: [NSNumber]?
-        var keyUsed: String?
-
-        if let colorCalib = dngDict["ColorCalibration1"] as? [NSNumber], colorCalib.count >= 9 {
-            calibration = colorCalib
-            keyUsed = "ColorCalibration1"
-        } else if let cameraCalib = dngDict[kCGImagePropertyDNGCameraCalibration1 as String] as? [NSNumber], cameraCalib.count >= 9 {
-            calibration = cameraCalib
-            keyUsed = "CameraCalibration1"
-        }
-
-        guard let calibration = calibration, let keyUsed = keyUsed else {
-            return nil
-        }
-
-        // 提取对角线元素 [0,0], [1,1], [2,2]（3x3 矩阵按行优先存储）
-        let r = calibration[0].doubleValue  // [0,0]
-        let g = calibration[4].doubleValue  // [1,1]
-        let b = calibration[8].doubleValue  // [2,2]
-
-        print("ImageProcessor: 读取 \(keyUsed) 对角线: R=\(String(format: "%.4f", r)), G=\(String(format: "%.4f", g)), B=\(String(format: "%.4f", b))")
-
-        // 归一化到 G=1.0
-        let normalizedR = r / g
-        let normalizedG = 1.0
-        let normalizedB = b / g
-
-        print("ImageProcessor: \(keyUsed) 增益（归一化到 G=1.0）: R=\(String(format: "%.4f", normalizedR)), G=\(String(format: "%.4f", normalizedG)), B=\(String(format: "%.4f", normalizedB))")
-
-        return (r: normalizedR, g: normalizedG, b: normalizedB)
-    }
-
-    private static func extractAsShotNeutralGains(from url: URL) -> (r: Double, g: Double, b: Double)? {
-        guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil) else {
-            print("ImageProcessor: ✗ 无法创建 CGImageSource")
-            return nil
-        }
-
-        guard let properties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [String: Any] else {
-            print("ImageProcessor: ✗ 无法读取图像属性")
-            return nil
-        }
-
-        // 检查是否是预处理的线性 sRGB DNG
-        if isPreprocessedLinearSRGB(properties: properties) {
-            print("ImageProcessor: 预处理的线性 sRGB，跳过白平衡调整")
-            return nil
-        }
-
-        guard let dngDict = properties[kCGImagePropertyDNGDictionary as String] as? [String: Any] else {
-            print("ImageProcessor: ⚠️ 未找到 DNG 字典")
-            return nil
-        }
-
-        // 从 As Shot Neutral 计算白平衡
-        if let asShotNeutral = dngDict[kCGImagePropertyDNGAsShotNeutral as String] as? [NSNumber],
-           asShotNeutral.count >= 3 {
-
-            let asShotR = asShotNeutral[0].doubleValue
-            let asShotG = asShotNeutral[1].doubleValue
-            let asShotB = asShotNeutral[2].doubleValue
-
-            print("ImageProcessor: 读取 As Shot Neutral: R=\(asShotR), G=\(asShotG), B=\(asShotB)")
-
-            // 检查是否接近 [1, 1, 1]（误差 < 0.01）
-            let isNeutral = abs(asShotR - 1.0) < 0.01 && abs(asShotG - 1.0) < 0.01 && abs(asShotB - 1.0) < 0.01
-            if isNeutral {
-                print("ImageProcessor: As Shot Neutral ≈ [1,1,1]，已应用白平衡，跳过调整")
-                return nil
-            }
-
-            // 计算 RGB 增益：gain = 1.0 / asShotNeutral
-            let rGain = 1.0 / asShotR
-            let gGain = 1.0 / asShotG
-            let bGain = 1.0 / asShotB
-
-            // 归一化到 G=1.0
-            let normalizedR = rGain / gGain
-            let normalizedG = 1.0
-            let normalizedB = bGain / gGain
-
-            print("ImageProcessor: 计算白平衡增益（归一化到 G=1.0）: R=\(String(format: "%.4f", normalizedR)), G=\(String(format: "%.4f", normalizedG)), B=\(String(format: "%.4f", normalizedB))")
-
-            return (r: normalizedR, g: normalizedG, b: normalizedB)
-        }
-
-        print("ImageProcessor: ⚠️ 未找到 As Shot Neutral 数据")
-        return nil
-    }
-
-    private static func asShotNeutralToChromaticity(asShotR: Double, asShotG: Double, asShotB: Double) -> (x: Double, y: Double)? {
-        // As Shot Neutral 是相机认为应该显示为中性的 XYZ 归一化值
-        // 我们需要将其转换为 CIE xy 色度坐标
-
-        // As Shot Neutral 已经是 XYZ 的归一化值
-        let x = asShotR
-        let y = asShotG
-        let z = asShotB
-
-        // 计算 XYZ 总和
-        let sum = x + y + z
-
-        guard sum > 0 else {
-            return nil
-        }
-
-        // 转换为 CIE xy 色度坐标
-        let chromaticityX = x / sum
-        let chromaticityY = y / sum
-
-        return (x: chromaticityX, y: chromaticityY)
-    }
-
     static func calculateAutoWhiteBalance(from ciImage: CIImage) -> (temperature: Double, tint: Double)? {
         guard let samples = extractAutoWhiteBalanceSamples(from: ciImage, maxDimension: 256),
               samples.count >= 64 else {
@@ -1632,108 +1487,21 @@ class ImageProcessor {
     }
 
     private static func loadRawWithFilter(from url: URL) -> CIImage? {
-        print("ImageProcessor: 使用线性空间加载 RAW")
+        print("ImageProcessor: 使用拍摄元信息加载 RAW")
         print("ImageProcessor: 输入文件: \(url.path)")
 
-        // 读取 As Shot Neutral 创建白平衡 filter
-        var linearSpaceFilter: CIFilter?
-
-        if let asShotGains = extractAsShotNeutralGains(from: url) {
-            print("ImageProcessor: 创建 As Shot 白平衡 filter: R=\(String(format: "%.4f", asShotGains.r)), G=\(String(format: "%.4f", asShotGains.g)), B=\(String(format: "%.4f", asShotGains.b))")
-
-            // 创建应用 As Shot 增益的 CIColorMatrix
-            if let matrixFilter = CIFilter(name: "CIColorMatrix") {
-                matrixFilter.setValue(
-                    CIVector(x: asShotGains.r, y: 0, z: 0, w: 0),
-                    forKey: "inputRVector"
-                )
-                matrixFilter.setValue(
-                    CIVector(x: 0, y: asShotGains.g, z: 0, w: 0),
-                    forKey: "inputGVector"
-                )
-                matrixFilter.setValue(
-                    CIVector(x: 0, y: 0, z: asShotGains.b, w: 0),
-                    forKey: "inputBVector"
-                )
-                matrixFilter.setValue(
-                    CIVector(x: 0, y: 0, z: 0, w: 1),
-                    forKey: "inputAVector"
-                )
-                matrixFilter.setValue(
-                    CIVector(x: 0, y: 0, z: 0, w: 0),
-                    forKey: "inputBiasVector"
-                )
-
-                linearSpaceFilter = matrixFilter
-                print("ImageProcessor: ✓ 已创建 As Shot 白平衡 filter")
-            }
-        }
-
-        // 如果无法创建 As Shot filter，使用单位矩阵（identity filter）
-        if linearSpaceFilter == nil {
-            print("ImageProcessor: 使用单位矩阵（无白平衡调整）")
-            if let identityFilter = CIFilter(name: "CIColorMatrix") {
-                identityFilter.setValue(CIVector(x: 1, y: 0, z: 0, w: 0), forKey: "inputRVector")
-                identityFilter.setValue(CIVector(x: 0, y: 1, z: 0, w: 0), forKey: "inputGVector")
-                identityFilter.setValue(CIVector(x: 0, y: 0, z: 1, w: 0), forKey: "inputBVector")
-                identityFilter.setValue(CIVector(x: 0, y: 0, z: 0, w: 1), forKey: "inputAVector")
-                identityFilter.setValue(CIVector(x: 0, y: 0, z: 0, w: 0), forKey: "inputBiasVector")
-                linearSpaceFilter = identityFilter
-            }
-        }
-
-        // 创建 RAW filter
         guard let rawFilter = CIFilter(imageURL: url, options: [:]) else {
             print("ImageProcessor: ✗ 无法创建 RAW 过滤器")
             return nil
         }
 
-        // 设置线性空间 filter（会在线性空间应用 As Shot 增益）
-        if let filter = linearSpaceFilter {
-            rawFilter.setValue(filter, forKey: "inputLinearSpaceFilter")
-            print("ImageProcessor: ✓ 已设置 linearSpaceFilter")
-        }
-
-        // 设置中性白平衡 D65（作为基准）
-        rawFilter.setValue(6500.0, forKey: "inputNeutralTemperature")
-        rawFilter.setValue(0.0, forKey: "inputNeutralTint")
-        print("ImageProcessor: ✓ 已设置 D65 白平衡")
+        let shootingMetadata = readRawShootingMetadata(from: rawFilter)
+        applyRawShootingMetadata(shootingMetadata, to: rawFilter)
+        logRawShootingMetadata(shootingMetadata)
 
         if rawFilter.inputKeys.contains("inputDraftMode") {
             rawFilter.setValue(false, forKey: "inputDraftMode")
             print("ImageProcessor: ✓ 禁用草稿模式")
-        }
-
-        if rawFilter.inputKeys.contains("inputEV") {
-            rawFilter.setValue(0.0, forKey: "inputEV")
-        }
-
-        if rawFilter.inputKeys.contains("inputBoost") {
-            rawFilter.setValue(1.0, forKey: "inputBoost")
-        }
-
-        if rawFilter.inputKeys.contains("inputBaselineExposure") {
-            rawFilter.setValue(0.0, forKey: "inputBaselineExposure")
-        }
-
-        if rawFilter.inputKeys.contains("inputEnableSharpening") {
-            rawFilter.setValue(false, forKey: "inputEnableSharpening")
-        }
-
-        if rawFilter.inputKeys.contains("inputEnableNoiseTracking") {
-            rawFilter.setValue(false, forKey: "inputEnableNoiseTracking")
-        }
-
-        if rawFilter.inputKeys.contains("inputLuminanceNoiseReductionAmount") {
-            rawFilter.setValue(0.0, forKey: "inputLuminanceNoiseReductionAmount")
-        }
-
-        if rawFilter.inputKeys.contains("inputColorNoiseReductionAmount") {
-            rawFilter.setValue(0.0, forKey: "inputColorNoiseReductionAmount")
-        }
-
-        if rawFilter.inputKeys.contains("inputEnableVendorLensCorrection") {
-            rawFilter.setValue(false, forKey: "inputEnableVendorLensCorrection")
         }
 
         if rawFilter.inputKeys.contains("inputIgnoreOrientation") {
@@ -1752,6 +1520,85 @@ class ImageProcessor {
         }
 
         return outputImage
+    }
+
+    private static func readRawShootingMetadata(from rawFilter: CIFilter) -> RawShootingMetadata {
+        RawShootingMetadata(
+            neutralTemperature: doubleFilterValue("inputNeutralTemperature", in: rawFilter),
+            neutralTint: doubleFilterValue("inputNeutralTint", in: rawFilter),
+            ev: doubleFilterValue("inputEV", in: rawFilter),
+            boost: doubleFilterValue("inputBoost", in: rawFilter),
+            baselineExposure: doubleFilterValue("inputBaselineExposure", in: rawFilter),
+            isVendorLensCorrectionEnabled: boolFilterValue(
+                "inputEnableVendorLensCorrection",
+                in: rawFilter
+            )
+        )
+    }
+
+    private static func applyRawShootingMetadata(
+        _ metadata: RawShootingMetadata,
+        to rawFilter: CIFilter
+    ) {
+        setFilterValue(metadata.neutralTemperature, forKey: "inputNeutralTemperature", in: rawFilter)
+        setFilterValue(metadata.neutralTint, forKey: "inputNeutralTint", in: rawFilter)
+        setFilterValue(metadata.ev, forKey: "inputEV", in: rawFilter)
+        setFilterValue(metadata.boost, forKey: "inputBoost", in: rawFilter)
+        setFilterValue(metadata.baselineExposure, forKey: "inputBaselineExposure", in: rawFilter)
+        setFilterValue(
+            metadata.isVendorLensCorrectionEnabled,
+            forKey: "inputEnableVendorLensCorrection",
+            in: rawFilter
+        )
+    }
+
+    private static func logRawShootingMetadata(_ metadata: RawShootingMetadata) {
+        let temperatureText = metadata.neutralTemperature.map { "\(Int($0))K" } ?? "无"
+        let tintText = metadata.neutralTint.map { String(format: "%.2f", $0) } ?? "无"
+        let evText = metadata.ev.map { String(format: "%.2f", $0) } ?? "无"
+        let boostText = metadata.boost.map { String(format: "%.2f", $0) } ?? "无"
+        let baselineExposureText = metadata.baselineExposure.map { String(format: "%.2f", $0) } ?? "无"
+        let lensCorrectionText = metadata.isVendorLensCorrectionEnabled.map { $0 ? "开" : "关" } ?? "无"
+
+        print(
+            "ImageProcessor: RAW 拍摄元信息 - 白平衡 \(temperatureText), 色调 \(tintText), EV \(evText), Boost \(boostText), BaselineExposure \(baselineExposureText), 镜头校正 \(lensCorrectionText)"
+        )
+    }
+
+    private static func doubleFilterValue(_ key: String, in filter: CIFilter) -> Double? {
+        guard filter.inputKeys.contains(key) else {
+            return nil
+        }
+
+        return (filter.value(forKey: key) as? NSNumber)?.doubleValue
+    }
+
+    private static func boolFilterValue(_ key: String, in filter: CIFilter) -> Bool? {
+        guard filter.inputKeys.contains(key) else {
+            return nil
+        }
+
+        return (filter.value(forKey: key) as? NSNumber)?.boolValue
+    }
+
+    private static func setFilterValue(_ value: Double?, forKey key: String, in filter: CIFilter) {
+        guard filter.inputKeys.contains(key),
+              let value
+        else {
+            return
+        }
+
+        filter.setValue(value, forKey: key)
+    }
+
+    private static func setFilterValue(_ value: Bool?, forKey key: String, in filter: CIFilter) {
+        guard filter.inputKeys.contains(key),
+              let value
+        else {
+            return
+        }
+
+        filter.setValue(value, forKey: key)
     }
 
     private static func loadWithX3fExtract(from url: URL) async -> NSImage? {
