@@ -102,6 +102,18 @@ struct ImageDetailView: View {
         ImageAdjustments.sourceHDRBaseline(headroom: imageInfo.hdrHeadroom)
     }
 
+    private var histogramRangeMax: Double {
+        guard isDisplayedImageHDR else {
+            return 1.0
+        }
+
+        if showOriginal {
+            return max(imageInfo.hdrHeadroom ?? 1.0, 1.0)
+        }
+
+        return max(editingState.adjustments.hdrHeadroom, 1.0)
+    }
+
     init(
         imageInfo: ImageInfo,
         session: ImageEditingSession,
@@ -138,6 +150,7 @@ struct ImageDetailView: View {
                     adjustedCIImage: adjustedCIImage ?? originalCIImage,
                     previewCIImage: previewCIImage,
                     previewRevision: previewRevision,
+                    histogramRangeMax: histogramRangeMax,
                     resetBaseline: resetBaseline,
                     width: $sidebarWidth,
                     whiteBalancePickMode: $whiteBalancePickMode

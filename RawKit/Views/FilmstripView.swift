@@ -48,6 +48,7 @@ struct FilmstripView: View {
 
                             ThumbnailItemView(
                                 imageInfo: imageInfo,
+                                baseThumbnail: thumbnailManager.baseThumbnails[imageInfo.id],
                                 adjustedThumbnail: thumbnailManager.adjustedThumbnails[imageInfo.id],
                                 isHDREnabled: adjustments.isHDREnabled,
                                 isSelected: selectedIndices.contains(index),
@@ -63,6 +64,10 @@ struct FilmstripView: View {
                                 }
                             }
                             .onAppear {
+                                if imageInfo.thumbnail == nil || imageInfo.fileType == .raw(.x3f) {
+                                    thumbnailManager.generateBaseThumbnail(for: imageInfo)
+                                }
+
                                 if adjustments.hasAdjustments || adjustments.lutURL != nil {
                                     thumbnailManager.generateAdjustedThumbnail(
                                         for: imageInfo,
@@ -193,6 +198,7 @@ private final class HorizontalWheelScrollView: NSScrollView {
 // 缩略图项
 struct ThumbnailItemView: View {
     let imageInfo: ImageInfo
+    let baseThumbnail: NSImage?
     let adjustedThumbnail: NSImage?
     let isHDREnabled: Bool
     let isSelected: Bool
@@ -200,7 +206,7 @@ struct ThumbnailItemView: View {
     let size: CGFloat
 
     var displayThumbnail: NSImage? {
-        adjustedThumbnail ?? imageInfo.thumbnail
+        adjustedThumbnail ?? baseThumbnail ?? imageInfo.thumbnail
     }
 
     var body: some View {

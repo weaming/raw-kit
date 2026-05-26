@@ -695,6 +695,14 @@ class ImageProcessor {
         return NSImage(contentsOf: url)
     }
 
+    static func loadX3FPreviewImage(from url: URL) async -> NSImage? {
+        guard url.pathExtension.lowercased() == "x3f" else {
+            return nil
+        }
+
+        return await loadWithX3fExtract(from: url)
+    }
+
     static func loadCIImage(from url: URL) async -> CIImage? {
         guard FileManager.default.fileExists(atPath: url.path) else {
             return nil

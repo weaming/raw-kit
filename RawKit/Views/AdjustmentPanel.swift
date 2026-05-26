@@ -1,4 +1,5 @@
 import AppKit
+import CoreImage
 import SwiftUI
 
 private struct HistogramData: Sendable {
@@ -6,6 +7,8 @@ private struct HistogramData: Sendable {
     let green: [Int]
     let blue: [Int]
     let luminance: [Int]
+    let rangeMax: Double
+
 }
 
 private struct DisplayHDRInfo: Equatable {
@@ -151,6 +154,7 @@ struct ResizableAdjustmentPanel: View, Equatable {
     let adjustedCIImage: CIImage?
     let previewCIImage: CIImage?
     let previewRevision: Int
+    let histogramRangeMax: Double
     let resetBaseline: ImageAdjustments
     @Binding var width: CGFloat
     @Binding var whiteBalancePickMode: CurveAdjustmentView.PickMode
@@ -162,6 +166,7 @@ struct ResizableAdjustmentPanel: View, Equatable {
         lhs.width == rhs.width &&
         lhs.whiteBalancePickMode == rhs.whiteBalancePickMode &&
         lhs.previewRevision == rhs.previewRevision &&
+        lhs.histogramRangeMax == rhs.histogramRangeMax &&
         lhs.resetBaseline == rhs.resetBaseline &&
         (lhs.originalCIImage != nil) == (rhs.originalCIImage != nil)
     }
@@ -198,6 +203,7 @@ struct ResizableAdjustmentPanel: View, Equatable {
                 adjustedCIImage: adjustedCIImage,
                 previewCIImage: previewCIImage,
                 previewRevision: previewRevision,
+                histogramRangeMax: histogramRangeMax,
                 resetBaseline: resetBaseline,
                 whiteBalancePickMode: $whiteBalancePickMode
             )
@@ -210,9 +216,12 @@ struct AdjustmentPanel: View {
     private struct HistogramInput: @unchecked Sendable {
         let image: CIImage
         let revision: Int
+        let rangeMax: Double
     }
 
     private nonisolated static let defaultAutoHDRBrightness = 0.35
+    private nonisolated static let sdrHistogramBinCount = 256
+    private nonisolated static let hdrHistogramBinCount = 512
 
     @Binding var adjustments: ImageAdjustments
     @Binding var curvePickSamples: CurvePickSamples
@@ -220,6 +229,7 @@ struct AdjustmentPanel: View {
     let adjustedCIImage: CIImage?
     let previewCIImage: CIImage?
     let previewRevision: Int
+    let histogramRangeMax: Double
     let resetBaseline: ImageAdjustments
     @Binding var whiteBalancePickMode: CurveAdjustmentView.PickMode
     @State private var expandedSections: Set<AdjustmentSection> = [.basic, .hdr, .color, .detail]
@@ -341,6 +351,9 @@ struct AdjustmentPanel: View {
         .onChange(of: previewRevision) { _, _ in
             scheduleHistogramLoad()
         }
+        .onChange(of: histogramRangeMax) { _, _ in
+            scheduleHistogramLoad()
+        }
         .onChange(of: displayHDRInfo) { _, _ in
             updateAutoHDRBrightness()
         }
@@ -383,20 +396,28 @@ struct AdjustmentPanel: View {
         }
 
         histogramTask?.cancel()
-        let input = HistogramInput(image: previewCIImage, revision: previewRevision)
+        let input = HistogramInput(
+            image: previewCIImage,
+            revision: previewRevision,
+            rangeMax: max(histogramRangeMax, 1.0)
+        )
 
         histogramTask = Task {
             try? await Task.sleep(nanoseconds: 80_000_000)
             guard !Task.isCancelled else { return }
 
             let newHistogram = await Task.detached(priority: .utility) {
-                Self.calculateHistogram(from: input.image)
+                Self.calculateHistogram(
+                    from: input.image,
+                    rangeMax: input.rangeMax
+                )
             }.value
 
             guard !Task.isCancelled else { return }
 
             await MainActor.run {
-                guard previewRevision == input.revision else { return }
+                guard previewRevision == input.revision,
+                      abs(histogramRangeMax - input.rangeMax) < 0.0001 else { return }
                 histogram = newHistogram
                 updateAutoHDRBrightness(using: newHistogram)
             }
@@ -419,8 +440,15 @@ struct AdjustmentPanel: View {
         CIContextManager.shared.getHistogramContext()
     }
 
-    private nonisolated static func prepareDisplayHistogramImage(_ image: CIImage) -> CIImage {
-        image
+    private nonisolated static func prepareDisplayHistogramImage(
+        _ image: CIImage,
+        rangeMax: Double
+    ) -> CIImage {
+        if rangeMax > 1.01 {
+            return normalizeHDRHistogramImage(image, rangeMax: rangeMax)
+        }
+
+        return image
             .applyingFilter("CILinearToSRGBToneCurve")
             .applyingFilter(
                 "CIColorClamp",
@@ -431,10 +459,38 @@ struct AdjustmentPanel: View {
             )
     }
 
-    private nonisolated static func renderHistogram(from histogramImage: CIImage) -> (
-        red: [Int], green: [Int], blue: [Int]
-    )? {
-        let bins = 256
+    private nonisolated static func normalizeHDRHistogramImage(
+        _ image: CIImage,
+        rangeMax: Double
+    ) -> CIImage {
+        let scale = 1.0 / max(rangeMax, 1.0)
+
+        let scaledImage = image.applyingFilter(
+            "CIColorMatrix",
+            parameters: [
+                "inputRVector": CIVector(x: scale, y: 0, z: 0, w: 0),
+                "inputGVector": CIVector(x: 0, y: scale, z: 0, w: 0),
+                "inputBVector": CIVector(x: 0, y: 0, z: scale, w: 0),
+                "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1),
+                "inputBiasVector": CIVector(x: 0, y: 0, z: 0, w: 0),
+            ]
+        )
+
+        return scaledImage
+            .applyingFilter("CILinearToSRGBToneCurve")
+            .applyingFilter(
+                "CIColorClamp",
+                parameters: [
+                    "inputMinComponents": CIVector(x: 0, y: 0, z: 0, w: 0),
+                    "inputMaxComponents": CIVector(x: 1, y: 1, z: 1, w: 1),
+                ]
+            )
+    }
+
+    private nonisolated static func renderHistogram(
+        from histogramImage: CIImage,
+        binCount: Int
+    ) -> (red: [Int], green: [Int], blue: [Int])? {
         let scaledExtent = histogramImage.extent
 
         // 创建直方图计算滤镜
@@ -444,7 +500,7 @@ struct AdjustmentPanel: View {
                 parameters: [
                     kCIInputImageKey: histogramImage,
                     kCIInputExtentKey: CIVector(cgRect: scaledExtent),
-                    "inputCount": bins,
+                    "inputCount": binCount,
                     "inputScale": 1.0,
                 ]
             ),
@@ -454,35 +510,38 @@ struct AdjustmentPanel: View {
             return nil
         }
 
-        // 渲染直方图数据 - CIAreaHistogram 输出的是 256x1 的图像，每个像素是 RGBA 格式
-        var bitmap = [Float](repeating: 0, count: bins * 4)
+        // 渲染直方图数据 - CIAreaHistogram 输出的是 binCount x 1 的 RGBA 图像
+        var bitmap = [Float](repeating: 0, count: binCount * 4)
         // 优化：使用专用的静态 context，避免每次创建
         Self.histogramContext.render(
             outputImage,
             toBitmap: &bitmap,
-            rowBytes: bins * 4 * MemoryLayout<Float>.size,
-            bounds: CGRect(x: 0, y: 0, width: bins, height: 1),
+            rowBytes: binCount * 4 * MemoryLayout<Float>.size,
+            bounds: CGRect(x: 0, y: 0, width: binCount, height: 1),
             format: .RGBAf,
             colorSpace: nil
         )
 
         // 提取各通道数据并转换为整数
-        var red = [Int](repeating: 0, count: bins)
-        var green = [Int](repeating: 0, count: bins)
-        var blue = [Int](repeating: 0, count: bins)
+        var red = [Int](repeating: 0, count: binCount)
+        var green = [Int](repeating: 0, count: binCount)
+        var blue = [Int](repeating: 0, count: binCount)
 
-        for i in 0 ..< bins {
+        for i in 0 ..< binCount {
             red[i] = Int(bitmap[i * 4] * 10_000_000)
             green[i] = Int(bitmap[i * 4 + 1] * 10_000_000)
             blue[i] = Int(bitmap[i * 4 + 2] * 10_000_000)
         }
 
-        print("直方图计算完成: R前5个值=\(Array(red.prefix(5))), max=\(red.max() ?? 0)")
+        print("直方图计算完成: bins=\(binCount), R前5个值=\(Array(red.prefix(5))), max=\(red.max() ?? 0)")
 
         return (red: red, green: green, blue: blue)
     }
 
-    private nonisolated static func calculateHistogram(from ciImage: CIImage) -> HistogramData? {
+    private nonisolated static func calculateHistogram(
+        from ciImage: CIImage,
+        rangeMax: Double
+    ) -> HistogramData? {
         let extent = ciImage.extent
 
         // 优化：采样尺寸从 2048 降低到 1024（速度提升 4 倍，精度足够）
@@ -497,14 +556,18 @@ struct AdjustmentPanel: View {
             scaledImage = ciImage
         }
 
-        let displayImage = Self.prepareDisplayHistogramImage(scaledImage)
+        let displayImage = Self.prepareDisplayHistogramImage(
+            scaledImage,
+            rangeMax: rangeMax
+        )
+        let binCount = rangeMax > 1.01 ? Self.hdrHistogramBinCount : Self.sdrHistogramBinCount
         let luminanceImage = displayImage.applyingFilter(
             "CIColorControls",
             parameters: [kCIInputSaturationKey: 0.0]
         )
 
-        guard let rgbHistogram = Self.renderHistogram(from: displayImage),
-              let luminanceHistogram = Self.renderHistogram(from: luminanceImage) else {
+        guard let rgbHistogram = Self.renderHistogram(from: displayImage, binCount: binCount),
+              let luminanceHistogram = Self.renderHistogram(from: luminanceImage, binCount: binCount) else {
             return nil
         }
 
@@ -512,7 +575,8 @@ struct AdjustmentPanel: View {
             red: rgbHistogram.red,
             green: rgbHistogram.green,
             blue: rgbHistogram.blue,
-            luminance: luminanceHistogram.red
+            luminance: luminanceHistogram.red,
+            rangeMax: rangeMax
         )
     }
 
@@ -1388,10 +1452,9 @@ private struct HistogramView: View {
         size: CGSize
     ) -> some View {
         Path { path in
-            guard maxValue > 0, histogram.count == 256 else { return }
+            guard maxValue > 0, !histogram.isEmpty else { return }
 
-            // 每个 bin 对应一个 x 位置（0-255）
-            let barWidth = size.width / 256.0
+            let barWidth = size.width / CGFloat(histogram.count)
 
             for (index, value) in histogram.enumerated() {
                 guard value > 0 else { continue }
