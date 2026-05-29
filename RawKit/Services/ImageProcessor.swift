@@ -787,7 +787,6 @@ class ImageProcessor {
 
         let options: [CIImageOption: Any] = [
             .applyOrientationProperty: true,
-            .properties: [:],
             .toneMapHDRtoSDR: false,
             .expandToHDR: true,
         ]
@@ -829,7 +828,28 @@ class ImageProcessor {
         }
 
         print("ImageProcessor: ✓ CGImageSource 加载成功")
-        return CIImage(cgImage: cgImage)
+        return applyImageOrientation(to: CIImage(cgImage: cgImage), from: imageSource)
+    }
+
+    private static func applyImageOrientation(to image: CIImage, from imageSource: CGImageSource) -> CIImage {
+        guard let orientation = readImageOrientation(from: imageSource) else {
+            return image
+        }
+
+        return image.oriented(orientation)
+    }
+
+    private static func readImageOrientation(from imageSource: CGImageSource) -> CGImagePropertyOrientation? {
+        guard
+            let properties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any],
+            let orientationNumber = properties[kCGImagePropertyOrientation] as? NSNumber,
+            let orientationValue = UInt32(exactly: orientationNumber),
+            let orientation = CGImagePropertyOrientation(rawValue: orientationValue)
+        else {
+            return nil
+        }
+
+        return orientation
     }
 
     private static func loadHDRGainMapImage(
