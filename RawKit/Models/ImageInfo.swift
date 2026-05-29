@@ -68,23 +68,12 @@ struct ImageInfo: Identifiable {
             return nil
         }
 
-        let options: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: 120,
-        ]
-
-        guard let imageSource = CGImageSourceCreateWithURL(sourceURL as CFURL, nil),
-              let cgImage = CGImageSourceCreateThumbnailAtIndex(
-                  imageSource,
-                  0,
-                  options as CFDictionary
-              )
-        else {
+        guard let thumbnail = ImageProcessor.loadSquareThumbnail(from: sourceURL, maxPixelSize: 120),
+              let image = ImageProcessor.convertToNSImage(thumbnail) else {
             return nil
         }
 
-        return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+        return image
     }
 
     private static func getSameNameJpeg(for x3fURL: URL) -> URL? {

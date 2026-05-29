@@ -85,7 +85,7 @@ class ThumbnailManager: ObservableObject {
             return await ImageProcessor.loadX3FPreviewImage(from: url)
         }
 
-        guard let thumbnailImage = ImageProcessor.loadThumbnail(from: url) else {
+        guard let thumbnailImage = ImageProcessor.loadSquareThumbnail(from: url) else {
             return nil
         }
 
@@ -116,6 +116,8 @@ class ThumbnailManager: ObservableObject {
             )
         }
 
+        thumbnailImage = ImageProcessor.cropToCenteredSquare(thumbnailImage)
+
         let cgImage = if adjustments.isHDREnabled {
             ImageProcessor.convertToDisplayCGImage(thumbnailImage, adjustments: adjustments)
         } else {
@@ -126,18 +128,9 @@ class ThumbnailManager: ObservableObject {
             return nil
         }
 
-        let extent = thumbnailImage.extent
-        let maxDimension = max(extent.width, extent.height)
-        guard maxDimension > 0 else {
-            return nil
-        }
-
-        let scale = thumbnailSize / maxDimension
-        let size = NSSize(
-            width: max(extent.width * scale, 1),
-            height: max(extent.height * scale, 1)
+        return NSImage(
+            cgImage: cgImage,
+            size: NSSize(width: thumbnailSize, height: thumbnailSize)
         )
-
-        return NSImage(cgImage: cgImage, size: size)
     }
 }

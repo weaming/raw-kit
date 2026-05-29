@@ -642,6 +642,84 @@ class ImageProcessor {
         return CIImage(cgImage: thumbnail)
     }
 
+    static func loadSquareThumbnail(from url: URL, maxPixelSize: CGFloat = 512) -> CIImage? {
+        let fileExtension = url.pathExtension.lowercased()
+        let thumbnail: CIImage?
+
+        if fileExtension == "dng" || isRawFormat(fileExtension) {
+            thumbnail = loadThumbnail(from: url)
+        } else {
+            thumbnail = loadFullImageThumbnail(from: url, maxPixelSize: maxPixelSize)
+        }
+
+        guard let thumbnail else {
+            return nil
+        }
+
+        let squareImage = cropToCenteredSquare(thumbnail)
+        let extent = squareImage.extent
+        let maxDimension = max(extent.width, extent.height)
+
+        guard maxDimension > 0, maxPixelSize > 0 else {
+            return squareImage
+        }
+
+        let scale = min(1.0, maxPixelSize / maxDimension)
+        guard scale < 1.0 else {
+            return squareImage
+        }
+
+        return squareImage.transformed(
+            by: CGAffineTransform(scaleX: scale, y: scale),
+            highQualityDownsample: true
+        )
+    }
+
+    private static func loadFullImageThumbnail(from url: URL, maxPixelSize: CGFloat) -> CIImage? {
+        guard FileManager.default.fileExists(atPath: url.path),
+              let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil) else {
+            return nil
+        }
+
+        let thumbnailOptions: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: max(maxPixelSize * 2, maxPixelSize),
+        ]
+
+        guard let thumbnail = CGImageSourceCreateThumbnailAtIndex(
+            imageSource,
+            0,
+            thumbnailOptions as CFDictionary
+        ) else {
+            return nil
+        }
+
+        return CIImage(cgImage: thumbnail)
+    }
+
+    static func cropToCenteredSquare(_ image: CIImage) -> CIImage {
+        let extent = image.extent
+        let sideLength = min(extent.width, extent.height)
+
+        guard sideLength > 0,
+              extent.isEmpty == false,
+              extent.isInfinite == false else {
+            return image
+        }
+
+        let cropRect = CGRect(
+            x: extent.midX - sideLength / 2,
+            y: extent.midY - sideLength / 2,
+            width: sideLength,
+            height: sideLength
+        )
+
+        return image
+            .cropped(to: cropRect)
+            .transformed(by: CGAffineTransform(translationX: -cropRect.origin.x, y: -cropRect.origin.y))
+    }
+
     static func loadMediumResolution(from url: URL) -> CIImage? {
         guard FileManager.default.fileExists(atPath: url.path) else {
             return nil
