@@ -465,7 +465,7 @@ struct AdjustmentPanel: View {
     ) -> CIImage {
         let scale = 1.0 / max(rangeMax, 1.0)
 
-        let scaledImage = image.applyingFilter(
+        return image.applyingFilter(
             "CIColorMatrix",
             parameters: [
                 "inputRVector": CIVector(x: scale, y: 0, z: 0, w: 0),
@@ -475,16 +475,13 @@ struct AdjustmentPanel: View {
                 "inputBiasVector": CIVector(x: 0, y: 0, z: 0, w: 0),
             ]
         )
-
-        return scaledImage
-            .applyingFilter("CILinearToSRGBToneCurve")
-            .applyingFilter(
-                "CIColorClamp",
-                parameters: [
-                    "inputMinComponents": CIVector(x: 0, y: 0, z: 0, w: 0),
-                    "inputMaxComponents": CIVector(x: 1, y: 1, z: 1, w: 1),
-                ]
-            )
+        .applyingFilter(
+            "CIColorClamp",
+            parameters: [
+                "inputMinComponents": CIVector(x: 0, y: 0, z: 0, w: 0),
+                "inputMaxComponents": CIVector(x: 1, y: 1, z: 1, w: 1),
+            ]
+        )
     }
 
     private nonisolated static func renderHistogram(
