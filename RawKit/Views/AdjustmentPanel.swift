@@ -8,7 +8,63 @@ private struct HistogramData: Sendable {
     let blue: [Int]
     let luminance: [Int]
     let rangeMax: Double
+    let scale: HDRHistogramScale
 
+}
+
+private enum HDRHistogramScale: Sendable {
+    case linear
+    case pq
+    case hlg
+
+    static let current: HDRHistogramScale = .pq
+
+    var kernelMode: CGFloat {
+        switch self {
+        case .linear:
+            0
+        case .pq:
+            1
+        case .hlg:
+            2
+        }
+    }
+
+    func map(_ normalizedValue: Double) -> Double {
+        let value = min(max(normalizedValue, 0.0), 1.0)
+
+        switch self {
+        case .linear:
+            return value
+        case .pq:
+            return Self.encodePQ(value)
+        case .hlg:
+            return Self.encodeHLG(value)
+        }
+    }
+
+    private static func encodePQ(_ value: Double) -> Double {
+        let m1 = 0.159_301_757_812_5
+        let m2 = 78.843_75
+        let c1 = 0.835_937_5
+        let c2 = 18.851_562_5
+        let c3 = 18.687_5
+        let powered = pow(max(value, 0.0), m1)
+        let numerator = c1 + c2 * powered
+        let denominator = 1.0 + c3 * powered
+
+        return pow(numerator / denominator, m2)
+    }
+
+    private static func encodeHLG(_ value: Double) -> Double {
+        let positiveValue = max(value, 0.0)
+
+        if positiveValue <= 1.0 / 12.0 {
+            return sqrt(3.0 * positiveValue)
+        }
+
+        return 0.178_832_77 * log(12.0 * positiveValue - 0.284_668_92) + 0.559_910_73
+    }
 }
 
 private struct DisplayHDRInfo: Equatable {
@@ -222,6 +278,61 @@ struct AdjustmentPanel: View {
     private nonisolated static let defaultAutoHDRBrightness = 0.35
     private nonisolated static let sdrHistogramBinCount = 256
     private nonisolated static let hdrHistogramBinCount = 512
+    private nonisolated static let hdrHistogramScaleKernel: CIColorKernel? = {
+        let source = """
+        #include <CoreImage/CoreImage.h>
+        using namespace metal;
+        extern "C" namespace coreimage {
+        float encodePQ(float value) {
+            float m1 = 0.1593017578125;
+            float m2 = 78.84375;
+            float c1 = 0.8359375;
+            float c2 = 18.8515625;
+            float c3 = 18.6875;
+            float powered = pow(max(value, 0.0), m1);
+            float numerator = c1 + c2 * powered;
+            float denominator = 1.0 + c3 * powered;
+            return pow(numerator / denominator, m2);
+        }
+
+        float encodeHLG(float value) {
+            float positiveValue = max(value, 0.0);
+            if (positiveValue <= (1.0 / 12.0)) {
+                return sqrt(3.0 * positiveValue);
+            }
+            return 0.17883277 * log(12.0 * positiveValue - 0.28466892) + 0.55991073;
+        }
+
+        float mapValue(float value, float mode) {
+            float clampedValue = clamp(value, 0.0, 1.0);
+            if (mode < 0.5) {
+                return clampedValue;
+            }
+            if (mode < 1.5) {
+                return encodePQ(clampedValue);
+            }
+            return encodeHLG(clampedValue);
+        }
+
+        [[ stitchable ]] float4 hdrHistogramScale(sample_t image, float mode) {
+            return float4(
+                mapValue(image.r, mode),
+                mapValue(image.g, mode),
+                mapValue(image.b, mode),
+                image.a
+            );
+        }
+        }
+        """
+
+        do {
+            let kernels = try CIKernel.kernels(withMetalString: source)
+            return kernels.first { $0.name == "hdrHistogramScale" } as? CIColorKernel
+        } catch {
+            print("AdjustmentPanel: HDR 直方图映射 kernel 编译失败: \(error)")
+            return nil
+        }
+    }()
 
     @Binding var adjustments: ImageAdjustments
     @Binding var curvePickSamples: CurvePickSamples
@@ -442,10 +553,15 @@ struct AdjustmentPanel: View {
 
     private nonisolated static func prepareDisplayHistogramImage(
         _ image: CIImage,
-        rangeMax: Double
+        rangeMax: Double,
+        scale: HDRHistogramScale
     ) -> CIImage {
         if rangeMax > 1.01 {
-            return normalizeHDRHistogramImage(image, rangeMax: rangeMax)
+            return normalizeHDRHistogramImage(
+                image,
+                rangeMax: rangeMax,
+                scale: scale
+            )
         }
 
         return image
@@ -461,11 +577,12 @@ struct AdjustmentPanel: View {
 
     private nonisolated static func normalizeHDRHistogramImage(
         _ image: CIImage,
-        rangeMax: Double
+        rangeMax: Double,
+        scale histogramScale: HDRHistogramScale
     ) -> CIImage {
         let scale = 1.0 / max(rangeMax, 1.0)
 
-        return image.applyingFilter(
+        let normalizedImage = image.applyingFilter(
             "CIColorMatrix",
             parameters: [
                 "inputRVector": CIVector(x: scale, y: 0, z: 0, w: 0),
@@ -482,6 +599,18 @@ struct AdjustmentPanel: View {
                 "inputMaxComponents": CIVector(x: 1, y: 1, z: 1, w: 1),
             ]
         )
+
+        guard let hdrHistogramScaleKernel else {
+            return normalizedImage
+        }
+
+        return hdrHistogramScaleKernel.apply(
+            extent: normalizedImage.extent,
+            arguments: [
+                normalizedImage,
+                histogramScale.kernelMode,
+            ]
+        ) ?? normalizedImage
     }
 
     private nonisolated static func renderHistogram(
@@ -555,7 +684,8 @@ struct AdjustmentPanel: View {
 
         let displayImage = Self.prepareDisplayHistogramImage(
             scaledImage,
-            rangeMax: rangeMax
+            rangeMax: rangeMax,
+            scale: HDRHistogramScale.current
         )
         let binCount = rangeMax > 1.01 ? Self.hdrHistogramBinCount : Self.sdrHistogramBinCount
         let luminanceImage = displayImage.applyingFilter(
@@ -573,7 +703,8 @@ struct AdjustmentPanel: View {
             green: rgbHistogram.green,
             blue: rgbHistogram.blue,
             luminance: luminanceHistogram.red,
-            rangeMax: rangeMax
+            rangeMax: rangeMax,
+            scale: HDRHistogramScale.current
         )
     }
 
@@ -1410,6 +1541,8 @@ private struct HistogramView: View {
             )
 
             ZStack {
+                drawReferenceLines(size: size)
+
                 // 绘制综合亮度直方图（灰色）
                 drawHistogramBars(
                     histogram: histogram.luminance,
@@ -1439,6 +1572,80 @@ private struct HistogramView: View {
                 )
             }
         }
+    }
+
+    private func drawReferenceLines(size: CGSize) -> some View {
+        Canvas { context, size in
+            let rangeMax = histogram.rangeMax
+            guard rangeMax > 1.01, size.width > 0, size.height > 0 else {
+                return
+            }
+
+            drawVerticalReferenceLine(
+                in: &context,
+                size: size,
+                value: 1.0,
+                rangeMax: rangeMax,
+                color: .white.opacity(0.65),
+                label: "SDR"
+            )
+
+            for stopValue in hdrStopValues(upTo: rangeMax) {
+                drawVerticalReferenceLine(
+                    in: &context,
+                    size: size,
+                    value: stopValue,
+                    rangeMax: rangeMax,
+                    color: .yellow.opacity(0.38),
+                    label: "\(Int(stopValue))x"
+                )
+            }
+        }
+        .allowsHitTesting(false)
+    }
+
+    private func hdrStopValues(upTo rangeMax: Double) -> [Double] {
+        [2.0, 4.0, 8.0, 16.0, 32.0].filter { $0 < rangeMax - 0.0001 }
+    }
+
+    private func drawVerticalReferenceLine(
+        in context: inout GraphicsContext,
+        size: CGSize,
+        value: Double,
+        rangeMax: Double,
+        color: Color,
+        label: String
+    ) {
+        let position = histogram.scale.map(value / max(rangeMax, 1.0))
+        guard position > 0.0, position < 1.0 else {
+            return
+        }
+
+        let x = CGFloat(position) * size.width
+        var path = Path()
+        path.move(to: CGPoint(x: x, y: 0))
+        path.addLine(to: CGPoint(x: x, y: size.height))
+
+        context.stroke(
+            path,
+            with: .color(color),
+            style: StrokeStyle(lineWidth: 1, dash: label == "SDR" ? [] : [3, 3])
+        )
+
+        guard size.width >= 180, size.height >= 48 else {
+            return
+        }
+
+        let text = Text(label)
+            .font(.system(size: 9, weight: label == "SDR" ? .semibold : .regular))
+            .foregroundStyle(color)
+        let labelX = min(max(x + 3, 12), size.width - 16)
+
+        context.draw(
+            text,
+            at: CGPoint(x: labelX, y: 9),
+            anchor: .center
+        )
     }
 
     // 绘制单个通道的直方图柱状图
