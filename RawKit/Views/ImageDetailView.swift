@@ -242,14 +242,16 @@ struct ImageDetailView: View {
             return
         }
 
-        // 大图：缩略图 → 完整分辨率（跳过中等分辨率）
-        print("ImageDetailView: 大图片（\(Int(maxDimension))px），缩略图 → 完整分辨率")
+        // 大图：RAW 保留缩略图预览；普通照片等待完整首帧，避免内嵌缩略图黑边闪烁。
+        print("ImageDetailView: 大图片（\(Int(maxDimension))px），完整分辨率加载")
 
-        loadingStage = .thumbnail
-        if let thumbnail = ImageProcessor.loadThumbnail(from: imageInfo.url) {
-            displayImage = ImageProcessor.convertToNSImage(thumbnail)
-            displayImageID = UUID()
-            isLoading = false
+        if imageInfo.fileType.isRaw {
+            loadingStage = .thumbnail
+            if let thumbnail = ImageProcessor.loadThumbnail(from: imageInfo.url) {
+                displayImage = ImageProcessor.convertToNSImage(thumbnail)
+                displayImageID = UUID()
+                isLoading = false
+            }
         }
 
         loadingStage = .fullResolution
