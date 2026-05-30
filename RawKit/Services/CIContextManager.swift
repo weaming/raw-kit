@@ -36,13 +36,17 @@ actor CIContextManager {
 
         renderContext = CIContext(options: renderOptions)
 
-        // 创建直方图 Context
         var histogramOptions: [CIContextOption: Any] = [
-            .workingColorSpace: NSNull(),
             .useSoftwareRenderer: false,
             .cacheIntermediates: false,
             .priorityRequestLow: true,
         ]
+
+        if let extendedLinearSRGB = CGColorSpace(name: CGColorSpace.extendedLinearSRGB) {
+            histogramOptions[.workingColorSpace] = extendedLinearSRGB
+        } else if let linearSRGB = CGColorSpace(name: CGColorSpace.linearSRGB) {
+            histogramOptions[.workingColorSpace] = linearSRGB
+        }
 
         #if DEBUG
             histogramOptions[.name] = "RawKit-HistogramContext"
