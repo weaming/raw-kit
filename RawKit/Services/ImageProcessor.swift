@@ -453,6 +453,17 @@ class ImageProcessor {
         );
     }
 
+    float lutHDRCompressionScale(float maxComponent, float preserveHDRHighlights) {
+        if (preserveHDRHighlights <= 0.5) {
+            return 1.0;
+        }
+
+        float value = max(maxComponent, 0.0);
+        float targetScale = max(value, 1.0);
+        float compressionWeight = smoothstep(0.72, 1.18, value);
+        return mix(1.0, targetScale, compressionWeight);
+    }
+
     vec3 encodeTransfer(vec3 color, float mode) {
         return vec3(
             encodeTransferValue(color.r, mode),
@@ -510,16 +521,21 @@ class ImageProcessor {
     using namespace metal;
     extern "C" namespace coreimage {
     """ + colorKernelHelpers + """
-    [[ stitchable ]] float4 lutInputTransform(sample_t image, float3 row0, float3 row1, float3 row2, float transferMode) {
+    [[ stitchable ]] float4 lutInputTransform(sample_t image, float3 row0, float3 row1, float3 row2, float transferMode, float preserveHDRHighlights) {
         float3 linearColor = applyMatrix(image.rgb, row0, row1, row2);
-        float3 encodedColor = encodeTransfer(linearColor, transferMode);
+        float maxComponent = max(linearColor.r, max(linearColor.g, linearColor.b));
+        float scale = lutHDRCompressionScale(maxComponent, preserveHDRHighlights);
+        float3 normalizedColor = linearColor / scale;
+        float3 encodedColor = encodeTransfer(normalizedColor, transferMode);
         return float4(encodedColor, image.a);
     }
 
-    [[ stitchable ]] float4 lutOutputTransform(sample_t image, float3 row0, float3 row1, float3 row2, float transferMode) {
+    [[ stitchable ]] float4 lutOutputTransform(sample_t image, sample_t originalImage, float3 row0, float3 row1, float3 row2, float transferMode, float preserveHDRHighlights) {
         float3 linearColor = decodeTransfer(image.rgb, transferMode);
         float3 workingColor = applyMatrix(linearColor, row0, row1, row2);
-        return float4(workingColor, image.a);
+        float maxComponent = max(originalImage.r, max(originalImage.g, originalImage.b));
+        float highlightScale = lutHDRCompressionScale(maxComponent, preserveHDRHighlights);
+        return float4(workingColor * highlightScale, originalImage.a);
     }
 
     [[ stitchable ]] float4 perceptualLuminanceShift(sample_t image, float amount, float pivot, float focusSigma, float maxShift) {
@@ -1867,23 +1883,29 @@ class ImageProcessor {
             result = applySharpness(to: result, value: adjustments.sharpness)
         }
 
+        var hasAppliedHDRAdjustments = false
+
         if let lutURL = adjustments.lutURL {
+            if adjustments.isHDREnabled {
+                result = applyHDRAdjustmentsIfNeeded(to: result, adjustments: adjustments)
+                hasAppliedHDRAdjustments = true
+            }
+
             result = applyLUT(
                 to: result,
                 lutURL: lutURL,
                 alpha: adjustments.lutAlpha,
-                profile: adjustments.lutColorProfile
+                profile: adjustments.lutColorProfile,
+                isHDRPreserving: adjustments.isHDREnabled
             )
+
+            if hasAppliedHDRAdjustments, #available(macOS 16.0, *) {
+                result = result.settingContentHeadroom(Float(adjustments.hdrHeadroom))
+            }
         }
 
-        if adjustments.isHDREnabled,
-           adjustments.isHDRAutoAdjustmentEnabled ||
-           abs(adjustments.hdrBrightness) > 0.0001 ||
-           abs(adjustments.hdrHighlights) > 0.0001 ||
-           abs(adjustments.hdrWhites) > 0.0001 {
-            result = applyHDRDisplayBoost(to: result, adjustments: adjustments)
-        } else if adjustments.isHDREnabled, #available(macOS 16.0, *) {
-            result = result.settingContentHeadroom(Float(adjustments.hdrHeadroom))
+        if !hasAppliedHDRAdjustments {
+            result = applyHDRAdjustmentsIfNeeded(to: result, adjustments: adjustments)
         }
 
         return result
@@ -2000,6 +2022,26 @@ class ImageProcessor {
         }
 
         return output
+    }
+
+    private static func applyHDRAdjustmentsIfNeeded(to image: CIImage, adjustments: ImageAdjustments) -> CIImage {
+        guard adjustments.isHDREnabled else {
+            return image
+        }
+
+        if adjustments.isHDRAutoAdjustmentEnabled ||
+            abs(adjustments.hdrBrightness) > 0.0001 ||
+            abs(adjustments.hdrHighlights) > 0.0001 ||
+            abs(adjustments.hdrWhites) > 0.0001
+        {
+            return applyHDRDisplayBoost(to: image, adjustments: adjustments)
+        }
+
+        if #available(macOS 16.0, *) {
+            return image.settingContentHeadroom(Float(adjustments.hdrHeadroom))
+        }
+
+        return image
     }
 
     // Photoshop 风格的对比度调整
@@ -2290,7 +2332,8 @@ class ImageProcessor {
         to image: CIImage,
         lutURL: URL,
         alpha: Double,
-        profile: LUTColorProfile
+        profile: LUTColorProfile,
+        isHDRPreserving: Bool
     ) -> CIImage {
         guard let (data, size) = cachedLUTData(from: lutURL) else {
             return image
@@ -2308,7 +2351,8 @@ class ImageProcessor {
         guard let imageInLUTSpace = applyLUTInputTransform(
             to: image,
             gamutTransform: workingToInputGamut,
-            transferFunction: profile.inputTransfer
+            transferFunction: profile.inputTransfer,
+            isHDRPreserving: isHDRPreserving
         ) else {
             print("ImageProcessor: ⚠️ 无法创建 LUT 输入变换，跳过 LUT")
             return image
@@ -2328,8 +2372,10 @@ class ImageProcessor {
 
         guard let lutApplied = applyLUTOutputTransform(
             to: lutAppliedInLUTSpace,
+            originalImage: image,
             gamutTransform: outputToWorkingGamut,
-            transferFunction: profile.outputTransfer
+            transferFunction: profile.outputTransfer,
+            isHDRPreserving: isHDRPreserving
         ) else {
             print("ImageProcessor: ⚠️ 无法创建 LUT 输出变换，跳过 LUT")
             return image
@@ -2751,7 +2797,8 @@ class ImageProcessor {
     private static func applyLUTInputTransform(
         to image: CIImage,
         gamutTransform: simd_double3x3,
-        transferFunction: LUTTransferFunction
+        transferFunction: LUTTransferFunction,
+        isHDRPreserving: Bool
     ) -> CIImage? {
         guard let kernel = lutInputTransformKernel else {
             return nil
@@ -2766,14 +2813,17 @@ class ImageProcessor {
                 rows.1,
                 rows.2,
                 LUTTransferMode(transferFunction).kernelValue,
+                isHDRPreserving ? 1.0 : 0.0,
             ]
         )
     }
 
     private static func applyLUTOutputTransform(
         to image: CIImage,
+        originalImage: CIImage,
         gamutTransform: simd_double3x3,
-        transferFunction: LUTTransferFunction
+        transferFunction: LUTTransferFunction,
+        isHDRPreserving: Bool
     ) -> CIImage? {
         guard let kernel = lutOutputTransformKernel else {
             return nil
@@ -2784,10 +2834,12 @@ class ImageProcessor {
             extent: image.extent,
             arguments: [
                 image,
+                originalImage,
                 rows.0,
                 rows.1,
                 rows.2,
                 LUTTransferMode(transferFunction).kernelValue,
+                isHDRPreserving ? 1.0 : 0.0,
             ]
         )
     }
