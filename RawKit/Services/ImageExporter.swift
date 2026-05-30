@@ -160,6 +160,7 @@ class ImageExporter {
                 exportReadyImage,
                 to: url,
                 colorSpace: cgColorSpace,
+                outputPreset: outputPreset,
                 quality: quality,
                 targetHeadroom: targetHDRHeadroom,
                 context: context
@@ -325,6 +326,7 @@ class ImageExporter {
         _ image: CIImage,
         to url: URL,
         colorSpace: CGColorSpace,
+        outputPreset: ExportOutputPreset,
         quality: Double,
         targetHeadroom: Float?,
         context: CIContext
@@ -339,6 +341,8 @@ class ImageExporter {
                 kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: quality,
             ]
         )
+
+        try patchHEIFMetadata(at: url, outputPreset: outputPreset)
     }
 
     private static func exportAVIF(
@@ -435,6 +439,286 @@ class ImageExporter {
             "9/18/9"
         case .rec2020PQHDR:
             "9/16/9"
+        }
+    }
+
+    private struct HEIFCICPValue {
+        let colorPrimaries: UInt16
+        let transferCharacteristics: UInt16
+        let matrixCoefficients: UInt16
+    }
+
+    private static func heifCICPValue(for outputPreset: ExportOutputPreset) -> HEIFCICPValue {
+        switch outputPreset {
+        case .sdrSRGB:
+            HEIFCICPValue(colorPrimaries: 1, transferCharacteristics: 13, matrixCoefficients: 1)
+        case .displayP3SDR:
+            HEIFCICPValue(colorPrimaries: 12, transferCharacteristics: 13, matrixCoefficients: 1)
+        case .displayP3HLGHDR:
+            HEIFCICPValue(colorPrimaries: 12, transferCharacteristics: 18, matrixCoefficients: 1)
+        case .displayP3PQHDR:
+            HEIFCICPValue(colorPrimaries: 12, transferCharacteristics: 16, matrixCoefficients: 1)
+        case .rec2020HLGHDR:
+            HEIFCICPValue(colorPrimaries: 9, transferCharacteristics: 18, matrixCoefficients: 9)
+        case .rec2020PQHDR:
+            HEIFCICPValue(colorPrimaries: 9, transferCharacteristics: 16, matrixCoefficients: 9)
+        }
+    }
+
+    private struct ISOBMFFBox {
+        let type: String
+        let payloadStart: Int
+        let payloadEnd: Int
+        let nextOffset: Int
+    }
+
+    private struct HEIFMetadataPatchResult {
+        var colorBoxCount = 0
+        var hevcConfigurationCount = 0
+        var imageDescriptionCount = 0
+    }
+
+    private static func patchHEIFMetadata(at url: URL, outputPreset: ExportOutputPreset) throws {
+        var fileData = try Data(contentsOf: url)
+        let removedImageDescriptionCount = removeHEIFImageDescriptions(in: &fileData)
+
+        guard outputPreset.isHDR else {
+            if removedImageDescriptionCount > 0 {
+                try fileData.write(to: url, options: .atomic)
+            }
+            return
+        }
+
+        let cicpValue = heifCICPValue(for: outputPreset)
+        var patchResult = patchHEIFColorBoxes(
+            in: &fileData,
+            start: 0,
+            end: fileData.count,
+            cicpValue: cicpValue
+        )
+        patchResult.imageDescriptionCount = removedImageDescriptionCount
+
+        guard patchResult.colorBoxCount > 0 else {
+            throw ExportError.failedHEIFMetadataPatch("未找到可修正的 nclx color box")
+        }
+
+        try fileData.write(to: url, options: .atomic)
+    }
+
+    private static func removeHEIFImageDescriptions(in data: inout Data) -> Int {
+        let exifHeader = Data("Exif\u{0}\u{0}".utf8)
+        var offset = 0
+        var removedCount = 0
+
+        while let range = data[offset...].range(of: exifHeader) {
+            let tiffStart = range.lowerBound + exifHeader.count
+            if removeTIFFTag(in: &data, tiffStart: tiffStart, tag: 0x010e) {
+                removedCount += 1
+            }
+
+            offset = range.upperBound
+        }
+
+        return removedCount
+    }
+
+    private static func removeTIFFTag(in data: inout Data, tiffStart: Int, tag: UInt16) -> Bool {
+        guard tiffStart + 8 <= data.count else { return false }
+
+        let byteOrder: TIFFByteOrder
+        if data[tiffStart] == 0x4d, data[tiffStart + 1] == 0x4d {
+            byteOrder = .bigEndian
+        } else if data[tiffStart] == 0x49, data[tiffStart + 1] == 0x49 {
+            byteOrder = .littleEndian
+        } else {
+            return false
+        }
+
+        guard readUInt16(data, at: tiffStart + 2, byteOrder: byteOrder) == 42,
+              let ifdOffset = readUInt32(data, at: tiffStart + 4, byteOrder: byteOrder) else {
+            return false
+        }
+
+        let ifdStart = tiffStart + Int(ifdOffset)
+        guard ifdStart + 2 <= data.count,
+              let entryCount = readUInt16(data, at: ifdStart, byteOrder: byteOrder),
+              entryCount > 0 else {
+            return false
+        }
+
+        let entriesStart = ifdStart + 2
+        let nextIFDOffsetStart = entriesStart + Int(entryCount) * 12
+        let ifdEnd = nextIFDOffsetStart + 4
+        guard ifdEnd <= data.count else { return false }
+
+        for entryIndex in 0 ..< Int(entryCount) {
+            let entryStart = entriesStart + entryIndex * 12
+            guard readUInt16(data, at: entryStart, byteOrder: byteOrder) == tag else { continue }
+
+            let shiftedRangeStart = entryStart + 12
+            if shiftedRangeStart < ifdEnd {
+                data.replaceSubrange(entryStart ..< ifdEnd - 12, with: data[shiftedRangeStart ..< ifdEnd])
+            }
+
+            data[(ifdEnd - 12) ..< ifdEnd] = Data(repeating: 0, count: 12)
+            writeUInt16(&data, at: ifdStart, value: entryCount - 1, byteOrder: byteOrder)
+            return true
+        }
+
+        return false
+    }
+
+    private static func patchHEIFColorBoxes(
+        in data: inout Data,
+        start: Int,
+        end: Int,
+        cicpValue: HEIFCICPValue
+    ) -> HEIFMetadataPatchResult {
+        var offset = start
+        var patchResult = HEIFMetadataPatchResult()
+
+        while offset + 8 <= end {
+            guard let box = readISOBMFFBox(in: data, at: offset, limit: end) else { break }
+
+            if box.type == "colr" {
+                if patchHEIFColorBox(in: &data, payloadStart: box.payloadStart, payloadEnd: box.payloadEnd, cicpValue: cicpValue) {
+                    patchResult.colorBoxCount += 1
+                }
+            } else if box.type == "hvcC" {
+                patchResult.hevcConfigurationCount += patchHEIFHEVCConfiguration(
+                    in: &data,
+                    payloadStart: box.payloadStart,
+                    payloadEnd: box.payloadEnd,
+                    cicpValue: cicpValue
+                )
+            } else if isHEIFContainerBox(box.type) {
+                let childStart = box.type == "meta" ? box.payloadStart + 4 : box.payloadStart
+                if childStart <= box.payloadEnd {
+                    let childPatchResult = patchHEIFColorBoxes(
+                        in: &data,
+                        start: childStart,
+                        end: box.payloadEnd,
+                        cicpValue: cicpValue
+                    )
+                    patchResult.colorBoxCount += childPatchResult.colorBoxCount
+                    patchResult.hevcConfigurationCount += childPatchResult.hevcConfigurationCount
+                }
+            }
+
+            offset = box.nextOffset
+        }
+
+        return patchResult
+    }
+
+    private static func patchHEIFColorBox(
+        in data: inout Data,
+        payloadStart: Int,
+        payloadEnd: Int,
+        cicpValue: HEIFCICPValue
+    ) -> Bool {
+        guard payloadStart + 11 <= payloadEnd else { return false }
+        guard data[payloadStart ..< payloadStart + 4].elementsEqual(Data("nclx".utf8)) else {
+            return false
+        }
+
+        writeUInt16(&data, at: payloadStart + 4, value: cicpValue.colorPrimaries, byteOrder: .bigEndian)
+        writeUInt16(
+            &data,
+            at: payloadStart + 6,
+            value: cicpValue.transferCharacteristics,
+            byteOrder: .bigEndian
+        )
+        writeUInt16(&data, at: payloadStart + 8, value: cicpValue.matrixCoefficients, byteOrder: .bigEndian)
+
+        return true
+    }
+
+    private static func patchHEIFHEVCConfiguration(
+        in data: inout Data,
+        payloadStart: Int,
+        payloadEnd: Int,
+        cicpValue: HEIFCICPValue
+    ) -> Int {
+        guard cicpValue.colorPrimaries <= UInt16(UInt8.max),
+              cicpValue.transferCharacteristics <= UInt16(UInt8.max),
+              cicpValue.matrixCoefficients <= UInt16(UInt8.max) else {
+            return 0
+        }
+
+        let colorPrimaries = UInt8(cicpValue.colorPrimaries)
+        let transferCharacteristics = UInt8(cicpValue.transferCharacteristics)
+        let matrixCoefficients = UInt8(cicpValue.matrixCoefficients)
+        var patchedCount = 0
+        var offset = payloadStart
+
+        while offset + 2 < payloadEnd {
+            let hasMatchingColorDescription = data[offset] == colorPrimaries &&
+                data[offset + 1] == transferCharacteristics
+
+            if hasMatchingColorDescription {
+                if data[offset + 2] != matrixCoefficients {
+                    data[offset + 2] = matrixCoefficients
+                    patchedCount += 1
+                }
+
+                offset += 3
+                continue
+            }
+
+            offset += 1
+        }
+
+        return patchedCount
+    }
+
+    private static func readISOBMFFBox(in data: Data, at offset: Int, limit: Int) -> ISOBMFFBox? {
+        guard offset >= 0, offset + 8 <= limit else { return nil }
+        guard let size32 = readUInt32(data, at: offset, byteOrder: .bigEndian) else { return nil }
+
+        let typeStart = offset + 4
+        let typeEnd = typeStart + 4
+        guard let type = String(data: data[typeStart ..< typeEnd], encoding: .ascii) else {
+            return nil
+        }
+
+        let headerSize: Int
+        let boxSize: UInt64
+        if size32 == 1 {
+            guard let largeSize = readUInt64(data, at: offset + 8, byteOrder: .bigEndian) else {
+                return nil
+            }
+
+            headerSize = 16
+            boxSize = largeSize
+        } else if size32 == 0 {
+            headerSize = 8
+            boxSize = UInt64(limit - offset)
+        } else {
+            headerSize = 8
+            boxSize = UInt64(size32)
+        }
+
+        guard boxSize >= UInt64(headerSize) else { return nil }
+        guard boxSize <= UInt64(Int.max) else { return nil }
+
+        let nextOffset = offset + Int(boxSize)
+        guard nextOffset <= limit else { return nil }
+
+        return ISOBMFFBox(
+            type: type,
+            payloadStart: offset + headerSize,
+            payloadEnd: nextOffset,
+            nextOffset: nextOffset
+        )
+    }
+
+    private static func isHEIFContainerBox(_ type: String) -> Bool {
+        switch type {
+        case "meta", "iprp", "ipco", "grpl":
+            return true
+        default:
+            return false
         }
     }
 
@@ -1359,12 +1643,49 @@ class ImageExporter {
         }
     }
 
+    private static func readUInt64(_ data: Data, at offset: Int, byteOrder: TIFFByteOrder) -> UInt64? {
+        guard offset >= 0, offset + 7 < data.count else { return nil }
+
+        var value: UInt64 = 0
+
+        switch byteOrder {
+        case .bigEndian:
+            for index in 0 ..< 8 {
+                value = (value << 8) | UInt64(data[offset + index])
+            }
+        case .littleEndian:
+            for index in stride(from: 7, through: 0, by: -1) {
+                value = (value << 8) | UInt64(data[offset + index])
+            }
+        }
+
+        return value
+    }
+
     private static func readInt32(_ data: Data, at offset: Int, byteOrder: TIFFByteOrder) -> Int32? {
         guard let unsignedValue = readUInt32(data, at: offset, byteOrder: byteOrder) else {
             return nil
         }
 
         return Int32(bitPattern: unsignedValue)
+    }
+
+    private static func writeUInt16(
+        _ data: inout Data,
+        at offset: Int,
+        value: UInt16,
+        byteOrder: TIFFByteOrder
+    ) {
+        guard offset >= 0, offset + 1 < data.count else { return }
+
+        switch byteOrder {
+        case .bigEndian:
+            data[offset] = UInt8((value >> 8) & 0xff)
+            data[offset + 1] = UInt8(value & 0xff)
+        case .littleEndian:
+            data[offset] = UInt8(value & 0xff)
+            data[offset + 1] = UInt8((value >> 8) & 0xff)
+        }
     }
 
     private static func writeUInt32(
@@ -1527,6 +1848,7 @@ enum ExportError: LocalizedError {
     case failedToFinalizeExport
     case invalidImageExtent
     case missingAVIFTool
+    case failedHEIFMetadataPatch(String)
     case failedAVIFSourceRender(String)
     case failedAVIFEncoding(String)
     case missingUltraHDRTool
@@ -1549,6 +1871,8 @@ enum ExportError: LocalizedError {
             "图像尺寸无效，无法导出"
         case .missingAVIFTool:
             "无法导出 AVIF：未找到 libavif 编码器 avifenc。请先安装 libavif：brew install libavif"
+        case let .failedHEIFMetadataPatch(message):
+            "HEIF 元数据修复失败：\(message)"
         case let .failedAVIFSourceRender(message):
             message.isEmpty ? "AVIF 中间图渲染失败" : "AVIF 中间图渲染失败：\(message)"
         case let .failedAVIFEncoding(message):
