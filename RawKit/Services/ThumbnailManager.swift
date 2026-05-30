@@ -102,7 +102,7 @@ class ThumbnailManager: ObservableObject {
         if fileExtension == "x3f" {
             thumbnailSource = await ImageProcessor.loadCIImage(from: url)
         } else {
-            thumbnailSource = ImageProcessor.loadThumbnail(from: url)
+            thumbnailSource = ImageProcessor.loadFullImageThumbnail(from: url, maxPixelSize: 512)
         }
 
         guard var thumbnailImage = thumbnailSource else {

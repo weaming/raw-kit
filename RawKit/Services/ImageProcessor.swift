@@ -691,7 +691,7 @@ class ImageProcessor {
         )
     }
 
-    private static func loadFullImageThumbnail(from url: URL, maxPixelSize: CGFloat) -> CIImage? {
+    static func loadFullImageThumbnail(from url: URL, maxPixelSize: CGFloat) -> CIImage? {
         guard FileManager.default.fileExists(atPath: url.path),
               let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil) else {
             return nil
