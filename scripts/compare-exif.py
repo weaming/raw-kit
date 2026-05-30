@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 from collections import defaultdict
@@ -14,6 +15,8 @@ KEY_TAGS = [
     'File:FileType',
     'File:MIMEType',
     'System:FileSize',
+    'File:ImageWidth',
+    'File:ImageHeight',
     'Composite:ImageSize',
     'IFD0:ImageWidth',
     'IFD0:ImageHeight',
@@ -21,6 +24,8 @@ KEY_TAGS = [
     'ExifIFD:ExifImageHeight',
     'QuickTime:ImageWidth',
     'QuickTime:ImageHeight',
+    'QuickTime:MajorBrand',
+    'QuickTime:CompatibleBrands',
     'IFD0:Make',
     'IFD0:Model',
     'ExifIFD:LensModel',
@@ -41,9 +46,30 @@ KEY_TAGS = [
     'QuickTime:VideoFullRangeFlag',
     'QuickTime:MaxContentLightLevel',
     'QuickTime:MaxPicAverageLightLevel',
+    'QuickTime:ImageSpatialExtent',
+    'QuickTime:ImagePixelDepth',
+    'QuickTime:ChromaFormat',
+    'QuickTime:BitDepthLuma',
+    'QuickTime:BitDepthChroma',
+    'FFProbe:Width',
+    'FFProbe:Height',
+    'FFProbe:PixelFormat',
+    'FFProbe:ColorRange',
+    'FFProbe:ColorSpace',
+    'FFProbe:ColorTransfer',
+    'FFProbe:ColorPrimaries',
+    'Check:FFProbe',
+    'Check:HEVCBitstreamColorSpace',
+    'Check:HEVCBitstreamTransfer',
+    'Check:HEVCBitstreamPrimaries',
+    'Meta:PrimaryItemReference',
+    'Meta:MetaImageSize',
     'IFD0:ImageDescription',
     'IFD0:Software',
+    'IFD0:TileWidth',
+    'IFD0:TileLength',
     'XMP:XMPToolkit',
+    'ExifTool:Warning',
 ]
 
 GROUP_ORDER = [
@@ -54,6 +80,9 @@ GROUP_ORDER = [
     'EXIF',
     'ICC_Profile',
     'QuickTime',
+    'FFProbe',
+    'Check',
+    'Meta',
     'XMP',
     'MakerNotes',
     'Composite',
@@ -116,6 +145,99 @@ def run_exiftool(path: Path) -> dict[str, Any]:
         return {}
 
     return payload[0]
+
+
+def run_ffprobe(path: Path) -> dict[str, str]:
+    if shutil.which('ffprobe') is None:
+        return {}
+
+    command = [
+        'ffprobe',
+        '-hide_banner',
+        '-v',
+        'error',
+        '-select_streams',
+        'v:0',
+        '-show_entries',
+        'stream=pix_fmt,color_range,color_space,color_transfer,color_primaries,width,height',
+        '-of',
+        'json',
+        str(path),
+    ]
+    result = subprocess.run(command, check=False, text=True, capture_output=True)
+    if result.returncode != 0:
+        return {'Check:FFProbe': f'读取失败: {result.stderr.strip() or result.stdout.strip()}'}
+
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return {'Check:FFProbe': 'JSON 解析失败'}
+
+    streams = payload.get('streams')
+    if not isinstance(streams, list) or not streams:
+        return {}
+
+    stream = streams[0]
+    return {
+        'FFProbe:Width': normalize_value(stream.get('width', '')),
+        'FFProbe:Height': normalize_value(stream.get('height', '')),
+        'FFProbe:PixelFormat': normalize_value(stream.get('pix_fmt', '')),
+        'FFProbe:ColorRange': normalize_value(stream.get('color_range', '')),
+        'FFProbe:ColorSpace': normalize_value(stream.get('color_space', '')),
+        'FFProbe:ColorTransfer': normalize_value(stream.get('color_transfer', '')),
+        'FFProbe:ColorPrimaries': normalize_value(stream.get('color_primaries', '')),
+    }
+
+
+def add_hevc_bitstream_checks(metadata: dict[str, str]) -> None:
+    color_primaries = metadata.get('QuickTime:ColorPrimaries', '')
+    transfer_characteristics = metadata.get('QuickTime:TransferCharacteristics', '')
+    color_space = metadata.get('FFProbe:ColorSpace', '')
+    color_transfer = metadata.get('FFProbe:ColorTransfer', '')
+    bitstream_primaries = metadata.get('FFProbe:ColorPrimaries', '')
+
+    has_bt2020_primaries = 'bt.2020' in color_primaries.lower()
+    has_hdr_transfer = any(
+        token in transfer_characteristics.lower()
+        for token in ['hlg', 'pq', '2084', 'arib']
+    )
+
+    if color_space == 'bt2020nc':
+        if has_bt2020_primaries:
+            metadata['Check:HEVCBitstreamColorSpace'] = 'OK: HEVC bitstream color_space 是 bt2020nc'
+        else:
+            metadata['Check:HEVCBitstreamColorSpace'] = (
+                'WARN: HEVC bitstream color_space 是 bt2020nc，但容器 primaries 不是 BT.2020'
+            )
+    elif color_space == 'bt709':
+        if has_bt2020_primaries and has_hdr_transfer:
+            metadata['Check:HEVCBitstreamColorSpace'] = (
+                'BAD: HEVC bitstream color_space 是 bt709，Rec.2020 HDR 兼容风险高'
+            )
+        else:
+            metadata['Check:HEVCBitstreamColorSpace'] = 'OK: HEVC bitstream color_space 是 bt709，适合 sRGB/P3'
+    elif color_space:
+        metadata['Check:HEVCBitstreamColorSpace'] = f'WARN: HEVC bitstream color_space 未确认: {color_space}'
+
+    if color_transfer == 'smpte2084':
+        metadata['Check:HEVCBitstreamTransfer'] = 'OK: HEVC bitstream transfer 是 PQ'
+    elif color_transfer == 'arib-std-b67':
+        metadata['Check:HEVCBitstreamTransfer'] = 'OK: HEVC bitstream transfer 是 HLG'
+    elif color_transfer == 'iec61966-2-1':
+        metadata['Check:HEVCBitstreamTransfer'] = 'OK: HEVC bitstream transfer 是 sRGB'
+    elif color_transfer:
+        metadata['Check:HEVCBitstreamTransfer'] = f'WARN: HEVC bitstream transfer 未确认: {color_transfer}'
+
+    if bitstream_primaries == 'bt2020':
+        metadata['Check:HEVCBitstreamPrimaries'] = 'OK: HEVC bitstream primaries 是 bt2020'
+    elif bitstream_primaries == 'smpte432':
+        metadata['Check:HEVCBitstreamPrimaries'] = 'OK: HEVC bitstream primaries 是 Display P3/smpte432'
+    elif bitstream_primaries == 'bt709':
+        metadata['Check:HEVCBitstreamPrimaries'] = 'OK: HEVC bitstream primaries 是 bt709'
+    elif bitstream_primaries:
+        metadata['Check:HEVCBitstreamPrimaries'] = (
+            f'WARN: HEVC bitstream primaries 未确认: {bitstream_primaries}'
+        )
 
 
 def normalize_value(value: Any) -> str:
@@ -219,6 +341,10 @@ def main() -> int:
     right_raw = run_exiftool(arguments.right_file)
     left = {key: normalize_value(value) for key, value in left_raw.items()}
     right = {key: normalize_value(value) for key, value in right_raw.items()}
+    left.update(run_ffprobe(arguments.left_file))
+    right.update(run_ffprobe(arguments.right_file))
+    add_hevc_bitstream_checks(left)
+    add_hevc_bitstream_checks(right)
 
     print('== 文件 ==')
     print(f'左图: {arguments.left_file}')

@@ -646,30 +646,461 @@ class ImageExporter {
             return 0
         }
 
-        let colorPrimaries = UInt8(cicpValue.colorPrimaries)
-        let transferCharacteristics = UInt8(cicpValue.transferCharacteristics)
-        let matrixCoefficients = UInt8(cicpValue.matrixCoefficients)
         var patchedCount = 0
-        var offset = payloadStart
+        var offset = payloadStart + 23
 
-        while offset + 2 < payloadEnd {
-            let hasMatchingColorDescription = data[offset] == colorPrimaries &&
-                data[offset + 1] == transferCharacteristics
+        guard payloadStart + 23 <= payloadEnd else { return 0 }
 
-            if hasMatchingColorDescription {
-                if data[offset + 2] != matrixCoefficients {
-                    data[offset + 2] = matrixCoefficients
+        let arrayCount = Int(data[payloadStart + 22])
+        for _ in 0 ..< arrayCount {
+            guard offset + 3 <= payloadEnd else { return patchedCount }
+
+            let nalUnitType = data[offset] & 0x3f
+            let nalUnitCountOffset = offset + 1
+            guard let nalUnitCount = readUInt16(data, at: nalUnitCountOffset, byteOrder: .bigEndian) else {
+                return patchedCount
+            }
+
+            offset += 3
+            for _ in 0 ..< Int(nalUnitCount) {
+                guard offset + 2 <= payloadEnd,
+                      let nalUnitLength = readUInt16(data, at: offset, byteOrder: .bigEndian) else {
+                    return patchedCount
+                }
+
+                offset += 2
+                let nalUnitEnd = offset + Int(nalUnitLength)
+                guard nalUnitEnd <= payloadEnd else { return patchedCount }
+
+                if nalUnitType == 33,
+                   patchHEVCSPSNALUnit(in: &data, start: offset, end: nalUnitEnd, cicpValue: cicpValue) {
                     patchedCount += 1
                 }
 
-                offset += 3
-                continue
+                offset = nalUnitEnd
             }
-
-            offset += 1
         }
 
         return patchedCount
+    }
+
+    private static func patchHEVCSPSNALUnit(
+        in data: inout Data,
+        start: Int,
+        end: Int,
+        cicpValue: HEIFCICPValue
+    ) -> Bool {
+        guard start + 2 < end else { return false }
+
+        let rbspStart = start + 2
+        let rbspData = makeRBSPData(from: data, start: rbspStart, end: end)
+        var parser = HEVCSPSParser(rbsp: rbspData.bytes)
+
+        guard let colorDescriptionBitOffset = parser.findVUIColorDescriptionBitOffset() else {
+            return false
+        }
+
+        var writer = HEVCNALBitWriter(data: data, byteMapping: rbspData.byteMapping)
+        var didPatch = false
+        didPatch = writer.writeUInt8(
+            UInt8(cicpValue.colorPrimaries),
+            rbspBitOffset: colorDescriptionBitOffset
+        ) || didPatch
+        didPatch = writer.writeUInt8(
+            UInt8(cicpValue.transferCharacteristics),
+            rbspBitOffset: colorDescriptionBitOffset + 8
+        ) || didPatch
+        didPatch = writer.writeUInt8(
+            UInt8(cicpValue.matrixCoefficients),
+            rbspBitOffset: colorDescriptionBitOffset + 16
+        ) || didPatch
+
+        data = writer.data
+        return didPatch
+    }
+
+    private struct HEVCRBSPData {
+        let bytes: [UInt8]
+        let byteMapping: [Int]
+    }
+
+    private static func makeRBSPData(from data: Data, start: Int, end: Int) -> HEVCRBSPData {
+        var rbspBytes: [UInt8] = []
+        var byteMapping: [Int] = []
+        var zeroCount = 0
+        var offset = start
+
+        while offset < end {
+            let byte = data[offset]
+            if zeroCount >= 2, byte == 0x03 {
+                zeroCount = 0
+                offset += 1
+                continue
+            }
+
+            rbspBytes.append(byte)
+            byteMapping.append(offset)
+            zeroCount = byte == 0x00 ? zeroCount + 1 : 0
+            offset += 1
+        }
+
+        return HEVCRBSPData(bytes: rbspBytes, byteMapping: byteMapping)
+    }
+
+    private struct HEVCNALBitWriter {
+        var data: Data
+        let byteMapping: [Int]
+
+        mutating func writeUInt8(_ value: UInt8, rbspBitOffset: Int) -> Bool {
+            var didPatch = false
+
+            for bitIndex in 0 ..< 8 {
+                let rbspBitIndex = rbspBitOffset + bitIndex
+                let rbspByteIndex = rbspBitIndex / 8
+                guard rbspByteIndex < byteMapping.count else { return didPatch }
+
+                let originalOffset = byteMapping[rbspByteIndex]
+                let bitShift = 7 - (rbspBitIndex % 8)
+                let bitMask = UInt8(1 << bitShift)
+                let bitValue = (value >> UInt8(7 - bitIndex)) & 0x01
+                let patchedByte = bitValue == 1 ? data[originalOffset] | bitMask : data[originalOffset] & ~bitMask
+
+                if patchedByte != data[originalOffset] {
+                    data[originalOffset] = patchedByte
+                    didPatch = true
+                }
+            }
+
+            return didPatch
+        }
+    }
+
+    private struct HEVCSPSParser {
+        let rbsp: [UInt8]
+        var bitOffset = 0
+
+        mutating func findVUIColorDescriptionBitOffset() -> Int? {
+            guard skipBits(4),
+                  let maxSubLayersMinus1 = readBits(3),
+                  skipBits(1) else {
+                return nil
+            }
+
+            guard parseProfileTierLevel(maxSubLayersMinus1: Int(maxSubLayersMinus1)),
+                  readUnsignedExpGolomb() != nil,
+                  let chromaFormatIDC = readUnsignedExpGolomb() else {
+                return nil
+            }
+
+            if chromaFormatIDC == 3, !skipBits(1) {
+                return nil
+            }
+
+            guard readUnsignedExpGolomb() != nil,
+                  readUnsignedExpGolomb() != nil,
+                  let hasConformanceWindow = readBool() else {
+                return nil
+            }
+
+            if hasConformanceWindow {
+                guard skipUnsignedExpGolomb(count: 4) else { return nil }
+            }
+
+            guard readUnsignedExpGolomb() != nil,
+                  readUnsignedExpGolomb() != nil,
+                  let log2MaxPicOrderCntLSBMinus4 = readUnsignedExpGolomb(),
+                  let hasSubLayerOrderingInfo = readBool() else {
+                return nil
+            }
+
+            let orderingInfoStart = hasSubLayerOrderingInfo ? 0 : Int(maxSubLayersMinus1)
+            for _ in orderingInfoStart ... Int(maxSubLayersMinus1) {
+                guard skipUnsignedExpGolomb(count: 3) else { return nil }
+            }
+
+            guard skipUnsignedExpGolomb(count: 6),
+                  let hasScalingList = readBool() else {
+                return nil
+            }
+
+            if hasScalingList {
+                guard let hasScalingListData = readBool() else { return nil }
+                if hasScalingListData, !parseScalingListData() {
+                    return nil
+                }
+            }
+
+            guard skipBits(2),
+                  let hasPCM = readBool() else {
+                return nil
+            }
+
+            if hasPCM {
+                guard skipBits(8),
+                      skipUnsignedExpGolomb(count: 2),
+                      skipBits(1) else {
+                    return nil
+                }
+            }
+
+            guard let shortTermRefPicSetCount = readUnsignedExpGolomb() else { return nil }
+            var refPicSetDeltaCounts: [Int] = []
+            for refPicSetIndex in 0 ..< Int(shortTermRefPicSetCount) {
+                guard let deltaCount = parseShortTermRefPicSet(
+                    index: refPicSetIndex,
+                    setCount: Int(shortTermRefPicSetCount),
+                    previousDeltaCounts: refPicSetDeltaCounts
+                ) else {
+                    return nil
+                }
+
+                refPicSetDeltaCounts.append(deltaCount)
+            }
+
+            guard let hasLongTermRefPics = readBool() else { return nil }
+            if hasLongTermRefPics {
+                guard let longTermRefPicCount = readUnsignedExpGolomb() else { return nil }
+                let pocLSBBitCount = Int(log2MaxPicOrderCntLSBMinus4) + 4
+                for _ in 0 ..< Int(longTermRefPicCount) {
+                    guard skipBits(pocLSBBitCount),
+                          skipBits(1) else {
+                        return nil
+                    }
+                }
+            }
+
+            guard skipBits(2),
+                  let hasVUIParameters = readBool() else {
+                return nil
+            }
+
+            guard hasVUIParameters else { return nil }
+            return parseVUIColorDescriptionBitOffset()
+        }
+
+        mutating func parseProfileTierLevel(maxSubLayersMinus1: Int) -> Bool {
+            guard skipBits(96) else { return false }
+
+            var profilePresentFlags: [Bool] = []
+            var levelPresentFlags: [Bool] = []
+            for _ in 0 ..< maxSubLayersMinus1 {
+                guard let hasProfile = readBool(),
+                      let hasLevel = readBool() else {
+                    return false
+                }
+
+                profilePresentFlags.append(hasProfile)
+                levelPresentFlags.append(hasLevel)
+            }
+
+            if maxSubLayersMinus1 > 0 {
+                for _ in maxSubLayersMinus1 ..< 8 {
+                    guard skipBits(2) else { return false }
+                }
+            }
+
+            for index in 0 ..< maxSubLayersMinus1 {
+                if profilePresentFlags[index], !skipBits(88) {
+                    return false
+                }
+
+                if levelPresentFlags[index], !skipBits(8) {
+                    return false
+                }
+            }
+
+            return true
+        }
+
+        mutating func parseScalingListData() -> Bool {
+            for sizeID in 0 ..< 4 {
+                let matrixCount = sizeID == 3 ? 2 : 6
+                for _ in 0 ..< matrixCount {
+                    guard let hasPredictionMode = readBool() else { return false }
+
+                    if !hasPredictionMode {
+                        guard readUnsignedExpGolomb() != nil else { return false }
+                        continue
+                    }
+
+                    let coefficientCount = min(64, 1 << (4 + (sizeID << 1)))
+                    if sizeID > 1, readSignedExpGolomb() == nil {
+                        return false
+                    }
+
+                    for _ in 0 ..< coefficientCount {
+                        guard readSignedExpGolomb() != nil else { return false }
+                    }
+                }
+            }
+
+            return true
+        }
+
+        mutating func parseShortTermRefPicSet(
+            index: Int,
+            setCount: Int,
+            previousDeltaCounts: [Int]
+        ) -> Int? {
+            var hasInterRefPicPrediction = false
+            if index != 0 {
+                guard let flag = readBool() else { return nil }
+                hasInterRefPicPrediction = flag
+            }
+
+            if hasInterRefPicPrediction {
+                let deltaIDXMinus1: UInt32
+                if index == setCount {
+                    guard let value = readUnsignedExpGolomb() else { return nil }
+                    deltaIDXMinus1 = value
+                } else {
+                    deltaIDXMinus1 = 0
+                }
+
+                let refPicSetIndex = index - Int(deltaIDXMinus1) - 1
+                guard refPicSetIndex >= 0, refPicSetIndex < previousDeltaCounts.count else {
+                    return nil
+                }
+
+                guard skipBits(1),
+                      readUnsignedExpGolomb() != nil else {
+                    return nil
+                }
+
+                var deltaCount = 0
+                for _ in 0 ... previousDeltaCounts[refPicSetIndex] {
+                    guard let isUsedByCurrentPic = readBool() else { return nil }
+                    if !isUsedByCurrentPic {
+                        guard let usesDelta = readBool() else { return nil }
+                        if usesDelta {
+                            deltaCount += 1
+                        }
+                    } else {
+                        deltaCount += 1
+                    }
+                }
+
+                return deltaCount
+            }
+
+            guard let negativePictureCount = readUnsignedExpGolomb(),
+                  let positivePictureCount = readUnsignedExpGolomb() else {
+                return nil
+            }
+
+            for _ in 0 ..< Int(negativePictureCount) {
+                guard readUnsignedExpGolomb() != nil,
+                      skipBits(1) else {
+                    return nil
+                }
+            }
+
+            for _ in 0 ..< Int(positivePictureCount) {
+                guard readUnsignedExpGolomb() != nil,
+                      skipBits(1) else {
+                    return nil
+                }
+            }
+
+            return Int(negativePictureCount + positivePictureCount)
+        }
+
+        mutating func parseVUIColorDescriptionBitOffset() -> Int? {
+            guard let hasAspectRatioInfo = readBool() else { return nil }
+            if hasAspectRatioInfo {
+                guard let aspectRatioIDC = readBits(8) else { return nil }
+                if aspectRatioIDC == 255 {
+                    guard skipBits(32) else { return nil }
+                }
+            }
+
+            guard let hasOverscanInfo = readBool() else { return nil }
+            if hasOverscanInfo, !skipBits(1) {
+                return nil
+            }
+
+            guard let hasVideoSignalType = readBool() else { return nil }
+            guard hasVideoSignalType else { return nil }
+
+            guard skipBits(4),
+                  let hasColourDescription = readBool() else {
+                return nil
+            }
+
+            guard hasColourDescription else { return nil }
+            return bitOffset
+        }
+
+        mutating func skipUnsignedExpGolomb(count: Int) -> Bool {
+            for _ in 0 ..< count {
+                guard readUnsignedExpGolomb() != nil else { return false }
+            }
+
+            return true
+        }
+
+        mutating func readSignedExpGolomb() -> Int32? {
+            guard let codeNumber = readUnsignedExpGolomb() else { return nil }
+
+            let signedValue = Int32((codeNumber + 1) / 2)
+            return codeNumber.isMultiple(of: 2) ? -signedValue : signedValue
+        }
+
+        mutating func readUnsignedExpGolomb() -> UInt32? {
+            var leadingZeroCount = 0
+            while true {
+                guard let bit = readBit() else { return nil }
+                if bit == 1 {
+                    break
+                }
+
+                leadingZeroCount += 1
+                if leadingZeroCount > 31 {
+                    return nil
+                }
+            }
+
+            if leadingZeroCount == 0 {
+                return 0
+            }
+
+            guard let suffix = readBits(leadingZeroCount) else { return nil }
+            return (UInt32(1) << UInt32(leadingZeroCount)) - 1 + suffix
+        }
+
+        mutating func readBool() -> Bool? {
+            guard let bit = readBit() else { return nil }
+
+            return bit == 1
+        }
+
+        mutating func readBits(_ count: Int) -> UInt32? {
+            guard count >= 0, count <= 32 else { return nil }
+
+            var value: UInt32 = 0
+            for _ in 0 ..< count {
+                guard let bit = readBit() else { return nil }
+                value = (value << 1) | UInt32(bit)
+            }
+
+            return value
+        }
+
+        mutating func readBit() -> UInt8? {
+            guard bitOffset >= 0, bitOffset < rbsp.count * 8 else { return nil }
+
+            let byte = rbsp[bitOffset / 8]
+            let bitShift = 7 - (bitOffset % 8)
+            bitOffset += 1
+            return (byte >> UInt8(bitShift)) & 0x01
+        }
+
+        mutating func skipBits(_ count: Int) -> Bool {
+            guard count >= 0, bitOffset + count <= rbsp.count * 8 else { return false }
+
+            bitOffset += count
+            return true
+        }
     }
 
     private static func readISOBMFFBox(in data: Data, at offset: Int, limit: Int) -> ISOBMFFBox? {

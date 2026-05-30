@@ -73,6 +73,8 @@ set -l bit_depth_chroma (exiftool -a -s -s -s -BitDepthChroma "$file")
 set -l max_content_light_level (exiftool -a -s -s -s -MaxContentLightLevel "$file")
 set -l max_pic_average_light_level (exiftool -a -s -s -s -MaxPicAverageLightLevel "$file")
 set -l image_description (exiftool -a -s -s -s -ImageDescription "$file")
+set -l xmp_fields (exiftool -a -G1 -s -XMP:all "$file")
+set -l icc_profile_description (exiftool -a -s -s -s -ICC_Profile:ProfileDescription "$file")
 
 echo "== 色彩信令摘要 =="
 echo "Profiles  : "(joined_or_none $color_profiles)
@@ -266,23 +268,21 @@ end
 
 if command -q strings
     echo
-    echo "== 多余结构扫描 =="
+    echo "== 附加结构扫描 =="
     set -l string_metadata (strings "$file")
-    set -l xmp_hits (string match -ri ".*xmp.*" -- $string_metadata)
-    set -l icc_hits (string match -ri ".*icc|iCCP.*" -- $string_metadata)
     set -l gain_map_hits (string match -ri ".*gain.?map|hdrgm.*" -- $string_metadata)
     set -l mpf_hits (string match -r ".*MPF.*" -- $string_metadata)
 
-    if test (count $xmp_hits) -gt 0
-        echo "WARN: 看到 XMP 字符串: "(count $xmp_hits)
+    if test (count $xmp_fields) -gt 0
+        echo "INFO: 包含普通 XMP 元数据: "(count $xmp_fields)" 项"
     else
-        echo "OK: 未看到 XMP 字符串"
+        echo "OK: 未看到 XMP 元数据"
     end
 
-    if test (count $icc_hits) -gt 0
-        echo "WARN: 看到 ICC 字符串: "(count $icc_hits)
+    if test (count $icc_profile_description) -gt 0
+        echo "WARN: 包含 ICC Profile: "(joined_or_none $icc_profile_description)
     else
-        echo "OK: 未看到 ICC 字符串"
+        echo "OK: 未看到 ICC Profile"
     end
 
     if test (count $gain_map_hits) -gt 0
