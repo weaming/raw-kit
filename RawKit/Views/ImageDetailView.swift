@@ -38,6 +38,7 @@ struct ImageDetailView: View {
         let viewportSize: CGSize
         let adjustments: ImageAdjustments
         let showOriginal: Bool
+        let isCropPreview: Bool
     }
 
     private struct RenderOutput: @unchecked Sendable {
@@ -46,6 +47,7 @@ struct ImageDetailView: View {
         let cgImage: CGImage?
         let adjustments: ImageAdjustments
         let showOriginal: Bool
+        let isCropPreview: Bool
     }
 
     let imageInfo: ImageInfo
@@ -74,6 +76,11 @@ struct ImageDetailView: View {
     @State private var curvePickSamples = CurvePickSamples()
     @State private var showingSyncDialog = false
     @State private var selectedSyncGroups = Set(AdjustmentSyncGroup.allCases)
+    @State private var isCropModeEnabled = false
+    @State private var draftCropLeft = 0.0
+    @State private var draftCropTop = 0.0
+    @State private var draftCropRight = 0.0
+    @State private var draftCropBottom = 0.0
 
     // Before/After 缓存
     @State private var cachedAdjustedImage: NSImage?  // 缓存的调整后图像
@@ -159,6 +166,8 @@ struct ImageDetailView: View {
             }
         }
         .task(id: imageInfo.id) {
+            isCropModeEnabled = false
+            syncDraftCropFromAdjustments(editingState.adjustments)
             ensureRenderQueue()
             await loadImageProgressively()
         }
@@ -167,6 +176,10 @@ struct ImageDetailView: View {
                 cachedAdjustedImage = nil
                 cachedAdjustments = nil
                 print("Before/After: 在原图模式下修改参数，清空缓存")
+            }
+
+            if !isCropModeEnabled {
+                syncDraftCropFromAdjustments(newValue)
             }
 
             enqueueRender(newValue)
@@ -322,7 +335,8 @@ struct ImageDetailView: View {
                 sourceHDRHeadroom: imageInfo.hdrHeadroom,
                 viewportSize: viewportSize,
                 adjustments: request.adjustments,
-                showOriginal: showOriginal
+                showOriginal: showOriginal,
+                isCropPreview: isCropModeEnabled
             )
         }) else {
             return
@@ -345,9 +359,11 @@ struct ImageDetailView: View {
             if !output.showOriginal {
                 adjustedCIImage = output.image
 
-                if let displayImage {
+                if let displayImage, !output.isCropPreview {
                     cachedAdjustedImage = displayImage
                     cachedAdjustments = output.adjustments
+                    self.displayImage = displayImage
+                } else if let displayImage {
                     self.displayImage = displayImage
                 }
             } else if let displayImage {
@@ -423,9 +439,12 @@ struct ImageDetailView: View {
             viewportSize: snapshot.viewportSize
         )
         let scaledImage = scaleImageToDisplay(snapshot.originalImage, targetSize: renderSize)
+        let previewAdjustments = snapshot.isCropPreview
+            ? snapshot.adjustments.withoutCrop()
+            : snapshot.adjustments
         let outputImage = snapshot.showOriginal
             ? scaledImage
-            : ImageProcessor.applyAdjustments(to: scaledImage, adjustments: snapshot.adjustments)
+            : ImageProcessor.applyAdjustments(to: scaledImage, adjustments: previewAdjustments)
         let displayAdjustments = snapshot.showOriginal
             ? ImageAdjustments.sourceHDRBaseline(headroom: snapshot.sourceHDRHeadroom)
             : snapshot.adjustments
@@ -438,7 +457,8 @@ struct ImageDetailView: View {
                 adjustments: displayAdjustments
             ),
             adjustments: snapshot.adjustments,
-            showOriginal: snapshot.showOriginal
+            showOriginal: snapshot.showOriginal,
+            isCropPreview: snapshot.isCropPreview
         )
     }
 
@@ -612,7 +632,13 @@ struct ImageDetailView: View {
                     pickMode: whiteBalancePickMode,
                     onColorPick: whiteBalancePickMode != .none ? handleColorPick : nil,
                     onCancelPickMode: cancelWhiteBalancePickMode,
-                    onFilesDrop: onFilesDrop
+                    onFilesDrop: onFilesDrop,
+                    isCropModeEnabled: isCropModeEnabled && !showOriginal,
+                    cropLeft: $draftCropLeft,
+                    cropTop: $draftCropTop,
+                    cropRight: $draftCropRight,
+                    cropBottom: $draftCropBottom,
+                    cropAspectRatio: editingState.adjustments.cropAspectRatio
                 )
                 .clipped()
                 .id(displayImageID) // 使用 displayImageID 强制刷新
@@ -627,6 +653,9 @@ struct ImageDetailView: View {
             if newSize != .zero {
                 enqueueRender(editingState.adjustments)
             }
+        }
+        .onChange(of: isCropModeEnabled) { _, _ in
+            enqueueRender(editingState.adjustments)
         }
         .background(
             GeometryReader { geo in
@@ -650,11 +679,48 @@ struct ImageDetailView: View {
             curvePickSamples: $curvePickSamples,
             showAdjustmentPanel: $showAdjustmentPanel,
             showOriginal: $showOriginal,
+            isCropModeEnabled: $isCropModeEnabled,
+            draftCropLeft: $draftCropLeft,
+            draftCropTop: $draftCropTop,
+            draftCropRight: $draftCropRight,
+            draftCropBottom: $draftCropBottom,
             resetBaseline: resetBaseline,
             pixelInfo: currentPixelInfo,
             syncTargetCount: syncTargetCount,
-            onSync: syncTargetCount > 0 ? openSyncDialog : nil
+            onSync: syncTargetCount > 0 ? openSyncDialog : nil,
+            onStartCrop: startCropMode,
+            onApplyCrop: applyCropDraft,
+            onCancelCrop: cancelCropMode
         )
+    }
+
+    private func syncDraftCropFromAdjustments(_ adjustments: ImageAdjustments) {
+        draftCropLeft = adjustments.cropLeft
+        draftCropTop = adjustments.cropTop
+        draftCropRight = adjustments.cropRight
+        draftCropBottom = adjustments.cropBottom
+    }
+
+    private func startCropMode() {
+        showOriginal = false
+        cancelWhiteBalancePickMode()
+        syncDraftCropFromAdjustments(editingState.adjustments)
+        isCropModeEnabled = true
+    }
+
+    private func applyCropDraft() {
+        var updatedAdjustments = editingState.adjustments
+        updatedAdjustments.cropLeft = draftCropLeft
+        updatedAdjustments.cropTop = draftCropTop
+        updatedAdjustments.cropRight = draftCropRight
+        updatedAdjustments.cropBottom = draftCropBottom
+        editingState.adjustments = updatedAdjustments
+        isCropModeEnabled = false
+    }
+
+    private func cancelCropMode() {
+        syncDraftCropFromAdjustments(editingState.adjustments)
+        isCropModeEnabled = false
     }
 
     private func cancelWhiteBalancePickMode() {
@@ -686,10 +752,30 @@ struct ImageInfoBar: View {
     @Binding var curvePickSamples: CurvePickSamples
     @Binding var showAdjustmentPanel: Bool
     @Binding var showOriginal: Bool
+    @Binding var isCropModeEnabled: Bool
+    @Binding var draftCropLeft: Double
+    @Binding var draftCropTop: Double
+    @Binding var draftCropRight: Double
+    @Binding var draftCropBottom: Double
     let resetBaseline: ImageAdjustments
     let pixelInfo: PixelInfo?
     let syncTargetCount: Int
     let onSync: (() -> Void)?
+    let onStartCrop: () -> Void
+    let onApplyCrop: () -> Void
+    let onCancelCrop: () -> Void
+
+    private var hasCropDraftOrApplied: Bool {
+        draftCropLeft > 0.0001 ||
+            draftCropTop > 0.0001 ||
+            draftCropRight > 0.0001 ||
+            draftCropBottom > 0.0001 ||
+            adjustments.cropLeft > 0.0001 ||
+            adjustments.cropTop > 0.0001 ||
+            adjustments.cropRight > 0.0001 ||
+            adjustments.cropBottom > 0.0001 ||
+            adjustments.cropAspectRatio != .free
+    }
 
     var body: some View {
         HStack(spacing: 12) {
@@ -782,8 +868,14 @@ struct ImageInfoBar: View {
                 var newAdj = resetBaseline
                 // 保留变换设置
                 newAdj.rotation = adjustments.rotation
+                newAdj.straightenAngle = adjustments.straightenAngle
                 newAdj.flipHorizontal = adjustments.flipHorizontal
                 newAdj.flipVertical = adjustments.flipVertical
+                newAdj.cropLeft = adjustments.cropLeft
+                newAdj.cropTop = adjustments.cropTop
+                newAdj.cropRight = adjustments.cropRight
+                newAdj.cropBottom = adjustments.cropBottom
+                newAdj.cropAspectRatio = adjustments.cropAspectRatio
                 adjustments = newAdj
                 curvePickSamples.reset()
             }) {
@@ -811,7 +903,37 @@ struct ImageInfoBar: View {
                 .frame(width: 16)
 
             // 变换按钮组
-            HStack(spacing: 4) {
+            HStack(spacing: 8) {
+                if isCropModeEnabled {
+                    Button(action: onCancelCrop) {
+                        Image(systemName: "xmark")
+                            .font(.body)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("取消裁切")
+                    .keyboardShortcut(.escape, modifiers: [])
+
+                    Button(action: onApplyCrop) {
+                        Image(systemName: "checkmark")
+                            .font(.body)
+                            .foregroundColor(.blue)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("应用裁切")
+                    .keyboardShortcut(.return, modifiers: [])
+                } else {
+                    Button(action: onStartCrop) {
+                        Image(systemName: "crop")
+                            .font(.body)
+                            .foregroundColor(hasCropDraftOrApplied ? .blue : .secondary)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("裁切")
+                }
+
+                Spacer()
+                    .frame(width: 8)
+
                 Button(action: {
                     adjustments.rotation = (adjustments.rotation + 90) % 360
                 }) {

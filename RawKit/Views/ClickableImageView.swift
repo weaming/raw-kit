@@ -308,6 +308,12 @@ struct ClickableImageView: View {
     let onColorPick: ((CGPoint, CGSize) -> Void)?
     let onCancelPickMode: (() -> Void)?
     let onFilesDrop: (([URL]) -> Void)?
+    let isCropModeEnabled: Bool
+    @Binding var cropLeft: Double
+    @Binding var cropTop: Double
+    @Binding var cropRight: Double
+    @Binding var cropBottom: Double
+    let cropAspectRatio: CropAspectRatio
 
     @State private var offset: CGSize = .zero
     @State private var lastOffset: CGSize = .zero
@@ -350,6 +356,22 @@ struct ClickableImageView: View {
                     )
                     .position(loupePosition(for: loupeState.viewLocation, in: geometry.size))
                     .allowsHitTesting(false)
+                    .transition(.opacity)
+                }
+            }
+            .overlay {
+                if isCropModeEnabled {
+                    CropOverlayView(
+                        imageSize: image.size,
+                        viewportSize: geometry.size,
+                        scale: scale,
+                        offset: offset,
+                        cropLeft: $cropLeft,
+                        cropTop: $cropTop,
+                        cropRight: $cropRight,
+                        cropBottom: $cropBottom,
+                        aspectRatio: cropAspectRatio
+                    )
                     .transition(.opacity)
                 }
             }
@@ -553,6 +575,312 @@ struct ClickableImageView: View {
             scale = 1.0
             offset = .zero
             lastOffset = .zero
+        }
+    }
+}
+
+private struct CropOverlayView: View {
+    private enum Handle: CaseIterable {
+        case topLeft
+        case top
+        case topRight
+        case right
+        case bottomRight
+        case bottom
+        case bottomLeft
+        case left
+        case move
+    }
+
+    private struct DragStart {
+        let cropRect: CGRect
+    }
+
+    let imageSize: CGSize
+    let viewportSize: CGSize
+    let scale: CGFloat
+    let offset: CGSize
+    @Binding var cropLeft: Double
+    @Binding var cropTop: Double
+    @Binding var cropRight: Double
+    @Binding var cropBottom: Double
+    let aspectRatio: CropAspectRatio
+
+    @State private var activeHandle: Handle?
+    @State private var dragStart: DragStart?
+
+    private var displayedRect: CGRect {
+        ViewportImageGeometry(imageSize: imageSize, viewportSize: viewportSize)
+            .displayedRect(scale: scale, offset: offset)
+    }
+
+    private var cropRect: CGRect {
+        normalizedCropRect(in: displayedRect)
+    }
+
+    var body: some View {
+        ZStack {
+            dimmingMask
+
+            cropGrid
+
+            ForEach(Handle.allCases.filter { $0 != .move }, id: \.self) { handle in
+                handleView(for: handle)
+            }
+        }
+        .contentShape(Rectangle())
+        .gesture(moveGesture)
+    }
+
+    private var dimmingMask: some View {
+        Path { path in
+            path.addRect(CGRect(origin: .zero, size: viewportSize))
+            path.addRect(cropRect)
+        }
+        .fill(Color.black.opacity(0.46), style: FillStyle(eoFill: true))
+        .allowsHitTesting(false)
+    }
+
+    private var cropGrid: some View {
+        ZStack {
+            Rectangle()
+                .stroke(Color.white, lineWidth: 1.4)
+
+            Path { path in
+                let thirdWidth = cropRect.width / 3
+                let thirdHeight = cropRect.height / 3
+
+                for index in 1 ... 2 {
+                    let x = CGFloat(index) * thirdWidth
+                    path.move(to: CGPoint(x: x, y: 0))
+                    path.addLine(to: CGPoint(x: x, y: cropRect.height))
+
+                    let y = CGFloat(index) * thirdHeight
+                    path.move(to: CGPoint(x: 0, y: y))
+                    path.addLine(to: CGPoint(x: cropRect.width, y: y))
+                }
+            }
+            .stroke(Color.white.opacity(0.58), lineWidth: 0.8)
+        }
+        .frame(width: cropRect.width, height: cropRect.height)
+        .position(x: cropRect.midX, y: cropRect.midY)
+        .gesture(dragGesture(for: .move))
+    }
+
+    private var moveGesture: some Gesture {
+        DragGesture(minimumDistance: 1)
+            .onChanged { value in
+                guard cropRect.contains(value.startLocation) else { return }
+                updateCrop(handle: .move, translation: value.translation)
+            }
+            .onEnded { _ in
+                activeHandle = nil
+                dragStart = nil
+            }
+    }
+
+    private func handleView(for handle: Handle) -> some View {
+        RoundedRectangle(cornerRadius: 2)
+            .fill(Color.white)
+            .shadow(color: Color.black.opacity(0.35), radius: 2, x: 0, y: 1)
+            .frame(width: handleSize(for: handle).width, height: handleSize(for: handle).height)
+            .position(handlePosition(for: handle))
+            .gesture(dragGesture(for: handle))
+    }
+
+    private func dragGesture(for handle: Handle) -> some Gesture {
+        DragGesture(minimumDistance: 1)
+            .onChanged { value in
+                updateCrop(handle: handle, translation: value.translation)
+            }
+            .onEnded { _ in
+                activeHandle = nil
+                dragStart = nil
+            }
+    }
+
+    private func updateCrop(handle: Handle, translation: CGSize) {
+        if activeHandle != handle || dragStart == nil {
+            activeHandle = handle
+            dragStart = DragStart(cropRect: cropRect)
+        }
+
+        guard let dragStart else { return }
+
+        let constrainedRect = constrainedCropRect(
+            proposedRect(for: handle, startRect: dragStart.cropRect, translation: translation),
+            fixedHandle: handle
+        )
+        writeCropRect(constrainedRect)
+    }
+
+    private func proposedRect(for handle: Handle, startRect: CGRect, translation: CGSize) -> CGRect {
+        var rect = startRect
+
+        switch handle {
+        case .topLeft:
+            rect.origin.x += translation.width
+            rect.size.width -= translation.width
+            rect.origin.y += translation.height
+            rect.size.height -= translation.height
+        case .top:
+            rect.origin.y += translation.height
+            rect.size.height -= translation.height
+        case .topRight:
+            rect.size.width += translation.width
+            rect.origin.y += translation.height
+            rect.size.height -= translation.height
+        case .right:
+            rect.size.width += translation.width
+        case .bottomRight:
+            rect.size.width += translation.width
+            rect.size.height += translation.height
+        case .bottom:
+            rect.size.height += translation.height
+        case .bottomLeft:
+            rect.origin.x += translation.width
+            rect.size.width -= translation.width
+            rect.size.height += translation.height
+        case .left:
+            rect.origin.x += translation.width
+            rect.size.width -= translation.width
+        case .move:
+            rect.origin.x += translation.width
+            rect.origin.y += translation.height
+        }
+
+        return rect
+    }
+
+    private func constrainedCropRect(_ proposed: CGRect, fixedHandle: Handle) -> CGRect {
+        let bounds = displayedRect
+        let minLength: CGFloat = 48
+        var rect = proposed.standardized
+
+        if let ratio = aspectRatio.resolvedValue(for: imageSize), fixedHandle != .move {
+            rect = applyAspectRatio(ratio, to: rect, fixedHandle: fixedHandle)
+        }
+
+        if rect.width < minLength {
+            rect.size.width = minLength
+        }
+
+        if rect.height < minLength {
+            rect.size.height = minLength
+        }
+
+        if rect.width > bounds.width {
+            rect.size.width = bounds.width
+        }
+
+        if rect.height > bounds.height {
+            rect.size.height = bounds.height
+        }
+
+        if rect.minX < bounds.minX {
+            rect.origin.x = bounds.minX
+        }
+
+        if rect.minY < bounds.minY {
+            rect.origin.y = bounds.minY
+        }
+
+        if rect.maxX > bounds.maxX {
+            rect.origin.x -= rect.maxX - bounds.maxX
+        }
+
+        if rect.maxY > bounds.maxY {
+            rect.origin.y -= rect.maxY - bounds.maxY
+        }
+
+        return rect.intersection(bounds)
+    }
+
+    private func applyAspectRatio(_ ratio: Double, to rect: CGRect, fixedHandle: Handle) -> CGRect {
+        let aspect = CGFloat(ratio)
+        guard aspect > 0 else { return rect }
+
+        var result = rect
+        let currentAspect = rect.width / max(rect.height, 1)
+
+        if currentAspect > aspect {
+            result.size.width = rect.height * aspect
+        } else {
+            result.size.height = rect.width / aspect
+        }
+
+        switch fixedHandle {
+        case .topLeft:
+            result.origin.x = rect.maxX - result.width
+            result.origin.y = rect.maxY - result.height
+        case .top, .topRight:
+            result.origin.y = rect.maxY - result.height
+        case .left, .bottomLeft:
+            result.origin.x = rect.maxX - result.width
+        case .move, .right, .bottomRight, .bottom:
+            break
+        }
+
+        return result
+    }
+
+    private func normalizedCropRect(in rect: CGRect) -> CGRect {
+        let left = CGFloat(min(max(cropLeft, 0.0), 0.95))
+        let top = CGFloat(min(max(cropTop, 0.0), 0.95))
+        let right = CGFloat(min(max(cropRight, 0.0), 0.95))
+        let bottom = CGFloat(min(max(cropBottom, 0.0), 0.95))
+
+        return CGRect(
+            x: rect.minX + rect.width * left,
+            y: rect.minY + rect.height * top,
+            width: rect.width * max(0.02, 1.0 - left - right),
+            height: rect.height * max(0.02, 1.0 - top - bottom)
+        )
+    }
+
+    private func writeCropRect(_ rect: CGRect) {
+        let bounds = displayedRect
+        guard bounds.width > 0, bounds.height > 0 else { return }
+
+        cropLeft = Double((rect.minX - bounds.minX) / bounds.width)
+        cropTop = Double((rect.minY - bounds.minY) / bounds.height)
+        cropRight = Double((bounds.maxX - rect.maxX) / bounds.width)
+        cropBottom = Double((bounds.maxY - rect.maxY) / bounds.height)
+    }
+
+    private func handlePosition(for handle: Handle) -> CGPoint {
+        switch handle {
+        case .topLeft:
+            return CGPoint(x: cropRect.minX, y: cropRect.minY)
+        case .top:
+            return CGPoint(x: cropRect.midX, y: cropRect.minY)
+        case .topRight:
+            return CGPoint(x: cropRect.maxX, y: cropRect.minY)
+        case .right:
+            return CGPoint(x: cropRect.maxX, y: cropRect.midY)
+        case .bottomRight:
+            return CGPoint(x: cropRect.maxX, y: cropRect.maxY)
+        case .bottom:
+            return CGPoint(x: cropRect.midX, y: cropRect.maxY)
+        case .bottomLeft:
+            return CGPoint(x: cropRect.minX, y: cropRect.maxY)
+        case .left:
+            return CGPoint(x: cropRect.minX, y: cropRect.midY)
+        case .move:
+            return CGPoint(x: cropRect.midX, y: cropRect.midY)
+        }
+    }
+
+    private func handleSize(for handle: Handle) -> CGSize {
+        switch handle {
+        case .top, .bottom:
+            return CGSize(width: 34, height: 7)
+        case .left, .right:
+            return CGSize(width: 7, height: 34)
+        case .move:
+            return .zero
+        default:
+            return CGSize(width: 12, height: 12)
         }
     }
 }

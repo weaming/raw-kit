@@ -146,7 +146,7 @@ final class ImageEditingSession: Identifiable {
     }
 
     private func syncThumbnail(with adjustments: ImageAdjustments) {
-        if adjustments.hasAdjustments || adjustments.lutURL != nil {
+        if adjustments.hasAdjustments || adjustments.hasTransformAdjustments || adjustments.lutURL != nil {
             thumbnailManager.generateAdjustedThumbnail(
                 for: imageInfo,
                 with: adjustments

@@ -1794,13 +1794,34 @@ class ImageProcessor {
     static func applyAdjustments(to image: CIImage, adjustments: ImageAdjustments) -> CIImage {
         var result = image
 
-        // 首先应用变换（旋转和镜像）
-        if adjustments.rotation != 0 || adjustments.flipHorizontal || adjustments.flipVertical {
+        // 首先应用构图变换，再按变换后的画面裁切。
+        if adjustments.rotation != 0 ||
+            abs(adjustments.straightenAngle) > 0.0001 ||
+            adjustments.flipHorizontal ||
+            adjustments.flipVertical
+        {
             result = applyTransform(
                 to: result,
                 rotation: adjustments.rotation,
+                straightenAngle: adjustments.straightenAngle,
                 flipHorizontal: adjustments.flipHorizontal,
                 flipVertical: adjustments.flipVertical
+            )
+        }
+
+        if adjustments.cropLeft > 0.0001 ||
+            adjustments.cropTop > 0.0001 ||
+            adjustments.cropRight > 0.0001 ||
+            adjustments.cropBottom > 0.0001 ||
+            adjustments.cropAspectRatio != .free
+        {
+            result = applyCrop(
+                to: result,
+                left: adjustments.cropLeft,
+                top: adjustments.cropTop,
+                right: adjustments.cropRight,
+                bottom: adjustments.cropBottom,
+                aspectRatio: adjustments.cropAspectRatio
             )
         }
 
@@ -2644,6 +2665,7 @@ class ImageProcessor {
     private static func applyTransform(
         to image: CIImage,
         rotation: Int,
+        straightenAngle: Double,
         flipHorizontal: Bool,
         flipVertical: Bool
     ) -> CIImage {
@@ -2689,7 +2711,122 @@ class ImageProcessor {
             result = result.transformed(by: finalTransform)
         }
 
+        if abs(straightenAngle) > 0.0001 {
+            result = applyStraighten(to: result, angle: straightenAngle)
+        }
+
         return result
+    }
+
+    private static func applyStraighten(to image: CIImage, angle: Double) -> CIImage {
+        let extent = image.extent
+        guard extent.width > 0, extent.height > 0 else { return image }
+
+        let center = CGPoint(x: extent.midX, y: extent.midY)
+        let radians = angle * .pi / 180.0
+        let transform = CGAffineTransform(translationX: center.x, y: center.y)
+            .rotated(by: radians)
+            .translatedBy(x: -center.x, y: -center.y)
+        let rotatedImage = image.transformed(by: transform)
+        let cropSize = largestCenteredCropSize(
+            width: extent.width,
+            height: extent.height,
+            radians: radians
+        )
+        let rotatedExtent = rotatedImage.extent
+        let cropRect = CGRect(
+            x: rotatedExtent.midX - cropSize.width * 0.5,
+            y: rotatedExtent.midY - cropSize.height * 0.5,
+            width: cropSize.width,
+            height: cropSize.height
+        )
+
+        return rotatedImage
+            .cropped(to: cropRect)
+            .transformed(by: CGAffineTransform(translationX: -cropRect.minX, y: -cropRect.minY))
+    }
+
+    private static func largestCenteredCropSize(
+        width: CGFloat,
+        height: CGFloat,
+        radians: Double
+    ) -> CGSize {
+        let angle = abs(radians).truncatingRemainder(dividingBy: .pi)
+        let normalizedAngle = angle > .pi / 2 ? .pi - angle : angle
+        let sinAngle = CGFloat(abs(sin(normalizedAngle)))
+        let cosAngle = CGFloat(abs(cos(normalizedAngle)))
+
+        if sinAngle < 0.0001 {
+            return CGSize(width: width, height: height)
+        }
+
+        let longSide = max(width, height)
+        let shortSide = min(width, height)
+        let cropWidth: CGFloat
+        let cropHeight: CGFloat
+
+        if shortSide <= 2.0 * sinAngle * cosAngle * longSide {
+            let halfShortSide = shortSide * 0.5
+            if width >= height {
+                cropWidth = halfShortSide / sinAngle
+                cropHeight = halfShortSide / cosAngle
+            } else {
+                cropWidth = halfShortSide / cosAngle
+                cropHeight = halfShortSide / sinAngle
+            }
+        } else {
+            let cosDoubleAngle = cosAngle * cosAngle - sinAngle * sinAngle
+            cropWidth = (width * cosAngle - height * sinAngle) / cosDoubleAngle
+            cropHeight = (height * cosAngle - width * sinAngle) / cosDoubleAngle
+        }
+
+        return CGSize(
+            width: min(max(cropWidth, 1.0), width),
+            height: min(max(cropHeight, 1.0), height)
+        )
+    }
+
+    private static func applyCrop(
+        to image: CIImage,
+        left: Double,
+        top: Double,
+        right: Double,
+        bottom: Double,
+        aspectRatio: CropAspectRatio
+    ) -> CIImage {
+        let extent = image.extent
+        guard extent.width > 1, extent.height > 1 else { return image }
+
+        let clampedLeft = min(max(left, 0.0), 0.95)
+        let clampedTop = min(max(top, 0.0), 0.95)
+        let clampedRight = min(max(right, 0.0), 0.95)
+        let clampedBottom = min(max(bottom, 0.0), 0.95)
+        let horizontalInset = min(clampedLeft + clampedRight, 0.98)
+        let verticalInset = min(clampedTop + clampedBottom, 0.98)
+        let leftScale = horizontalInset > 0 ? clampedLeft / max(clampedLeft + clampedRight, 0.0001) : 0.0
+        let topScale = verticalInset > 0 ? clampedTop / max(clampedTop + clampedBottom, 0.0001) : 0.0
+        let effectiveLeft = horizontalInset * leftScale
+        let effectiveRight = horizontalInset - effectiveLeft
+        let effectiveTop = verticalInset * topScale
+        let effectiveBottom = verticalInset - effectiveTop
+        var cropRect = CGRect(
+            x: extent.minX + extent.width * effectiveLeft,
+            y: extent.minY + extent.height * effectiveBottom,
+            width: extent.width * (1.0 - effectiveLeft - effectiveRight),
+            height: extent.height * (1.0 - effectiveTop - effectiveBottom)
+        )
+
+        if let targetAspectRatio = aspectRatio.resolvedValue(for: extent.size) {
+            cropRect = cropRect.constrained(toAspectRatio: CGFloat(targetAspectRatio))
+        }
+
+        cropRect = cropRect.integral
+
+        guard cropRect.width > 1, cropRect.height > 1 else { return image }
+
+        return image
+            .cropped(to: cropRect)
+            .transformed(by: CGAffineTransform(translationX: -cropRect.minX, y: -cropRect.minY))
     }
 
     private static func gamutTransformMatrix(
@@ -2865,5 +3002,27 @@ class ImageProcessor {
             z: CGFloat(matrix[2].z)
         )
         return (row0, row1, row2)
+    }
+}
+
+private extension CGRect {
+    func constrained(toAspectRatio aspectRatio: CGFloat) -> CGRect {
+        guard aspectRatio > 0, width > 1, height > 1 else { return self }
+
+        let currentAspectRatio = width / height
+        let targetSize: CGSize
+
+        if currentAspectRatio > aspectRatio {
+            targetSize = CGSize(width: height * aspectRatio, height: height)
+        } else {
+            targetSize = CGSize(width: width, height: width / aspectRatio)
+        }
+
+        return CGRect(
+            x: midX - targetSize.width * 0.5,
+            y: midY - targetSize.height * 0.5,
+            width: targetSize.width,
+            height: targetSize.height
+        )
     }
 }

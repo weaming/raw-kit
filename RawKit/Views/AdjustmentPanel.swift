@@ -343,7 +343,7 @@ struct AdjustmentPanel: View {
     let histogramRangeMax: Double
     let resetBaseline: ImageAdjustments
     @Binding var whiteBalancePickMode: CurveAdjustmentView.PickMode
-    @State private var expandedSections: Set<AdjustmentSection> = [.basic, .hdr, .color, .detail]
+    @State private var expandedSections: Set<AdjustmentSection> = [.transform, .basic, .hdr, .color, .detail]
     @State private var histogram: HistogramData?
     @State private var histogramTask: Task<Void, Never>?
     @State private var autoHDRBrightness = Self.defaultAutoHDRBrightness
@@ -395,6 +395,16 @@ struct AdjustmentPanel: View {
 
             ScrollView {
                 VStack(spacing: 0) {
+                    CollapsibleSection(
+                        section: .transform,
+                        isExpanded: expandedSections.contains(.transform),
+                        hasChanges: adjustments.hasTransformAdjustments,
+                        onToggle: { toggleSection(.transform) },
+                        onReset: { adjustments.resetTransform() }
+                    ) {
+                        TransformAdjustmentsView(adjustments: $adjustments)
+                    }
+
                     CollapsibleSection(
                         section: .basic,
                         isExpanded: expandedSections.contains(.basic),
@@ -854,6 +864,7 @@ struct CollapsibleSection<Content: View>: View {
 }
 
 enum AdjustmentSection: Hashable {
+    case transform
     case basic
     case hdr
     case color
@@ -861,6 +872,7 @@ enum AdjustmentSection: Hashable {
 
     var title: String {
         switch self {
+        case .transform: "构图"
         case .basic: "基础"
         case .hdr: "HDR"
         case .color: "色彩"
