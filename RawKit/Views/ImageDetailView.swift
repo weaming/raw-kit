@@ -57,6 +57,7 @@ struct ImageDetailView: View {
     @ObservedObject var editingState: ImageEditingState
     @ObservedObject private var history: AdjustmentHistory
     @Binding var sidebarWidth: CGFloat
+    @Binding var adjustmentPanelExpandedSections: Set<AdjustmentSection>
     let syncTargetCount: Int
     let onSyncAdjustments: ((Set<AdjustmentSyncGroup>) -> Void)?
     let onFilesDrop: (([URL]) -> Void)?
@@ -128,6 +129,7 @@ struct ImageDetailView: View {
         session: ImageEditingSession,
         editingState: ImageEditingState,
         sidebarWidth: Binding<CGFloat>,
+        adjustmentPanelExpandedSections: Binding<Set<AdjustmentSection>>,
         syncTargetCount: Int,
         onSyncAdjustments: ((Set<AdjustmentSyncGroup>) -> Void)?,
         onFilesDrop: (([URL]) -> Void)?
@@ -137,6 +139,7 @@ struct ImageDetailView: View {
         self._editingState = ObservedObject(wrappedValue: editingState)
         self._history = ObservedObject(wrappedValue: session.history)
         self._sidebarWidth = sidebarWidth
+        self._adjustmentPanelExpandedSections = adjustmentPanelExpandedSections
         self.syncTargetCount = syncTargetCount
         self.onSyncAdjustments = onSyncAdjustments
         self.onFilesDrop = onFilesDrop
@@ -162,6 +165,7 @@ struct ImageDetailView: View {
                     histogramRangeMax: histogramRangeMax,
                     resetBaseline: resetBaseline,
                     width: $sidebarWidth,
+                    expandedSections: $adjustmentPanelExpandedSections,
                     whiteBalancePickMode: $whiteBalancePickMode
                 )
                 .equatable()

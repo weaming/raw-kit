@@ -213,6 +213,7 @@ struct ResizableAdjustmentPanel: View, Equatable {
     let histogramRangeMax: Double
     let resetBaseline: ImageAdjustments
     @Binding var width: CGFloat
+    @Binding var expandedSections: Set<AdjustmentSection>
     @Binding var whiteBalancePickMode: CurveAdjustmentView.PickMode
     @State private var isDragging = false
 
@@ -220,6 +221,7 @@ struct ResizableAdjustmentPanel: View, Equatable {
         lhs.adjustments == rhs.adjustments &&
         lhs.curvePickSamples == rhs.curvePickSamples &&
         lhs.width == rhs.width &&
+        lhs.expandedSections == rhs.expandedSections &&
         lhs.whiteBalancePickMode == rhs.whiteBalancePickMode &&
         lhs.previewRevision == rhs.previewRevision &&
         lhs.histogramRangeMax == rhs.histogramRangeMax &&
@@ -261,7 +263,8 @@ struct ResizableAdjustmentPanel: View, Equatable {
                 previewRevision: previewRevision,
                 histogramRangeMax: histogramRangeMax,
                 resetBaseline: resetBaseline,
-                whiteBalancePickMode: $whiteBalancePickMode
+                whiteBalancePickMode: $whiteBalancePickMode,
+                expandedSections: $expandedSections
             )
             .frame(width: width)
         }
@@ -343,7 +346,7 @@ struct AdjustmentPanel: View {
     let histogramRangeMax: Double
     let resetBaseline: ImageAdjustments
     @Binding var whiteBalancePickMode: CurveAdjustmentView.PickMode
-    @State private var expandedSections = AdjustmentSection.defaultExpandedSections
+    @Binding var expandedSections: Set<AdjustmentSection>
     @State private var histogram: HistogramData?
     @State private var histogramTask: Task<Void, Never>?
     @State private var autoHDRBrightness = Self.defaultAutoHDRBrightness
