@@ -457,17 +457,48 @@ struct ContentView: View {
     }
 
     private func handleDelete(indices: Set<Int>) {
-        let sortedIndices = indices.sorted(by: >)
+        let imageCountBeforeDelete = imageManager.images.count
+        let validDeletedIndices = Set(
+            indices.filter { index in
+                index >= 0 && index < imageCountBeforeDelete
+            }
+        )
+        guard !validDeletedIndices.isEmpty else { return }
+
+        let nextDisplayIndex = displayIndexAfterDelete(
+            deletedIndices: validDeletedIndices,
+            imageCountBeforeDelete: imageCountBeforeDelete
+        )
+        let sortedIndices = validDeletedIndices.sorted(by: >)
 
         for index in sortedIndices {
             imageManager.removeImage(at: index)
         }
 
-        selectedIndices.removeAll()
+        displayedIndex = nextDisplayIndex
+        selectedIndices = nextDisplayIndex.map { [$0] } ?? []
+    }
 
-        if let currentDisplay = displayedIndex, indices.contains(currentDisplay) {
-            displayedIndex = nil
+    private func displayIndexAfterDelete(
+        deletedIndices: Set<Int>,
+        imageCountBeforeDelete: Int
+    ) -> Int? {
+        let imageCountAfterDelete = imageCountBeforeDelete - deletedIndices.count
+        guard imageCountAfterDelete > 0 else { return nil }
+
+        guard let currentDisplay = displayedIndex,
+              currentDisplay >= 0,
+              currentDisplay < imageCountBeforeDelete else {
+            let firstDeletedIndex = deletedIndices.min() ?? 0
+            return min(firstDeletedIndex, imageCountAfterDelete - 1)
         }
+
+        if deletedIndices.contains(currentDisplay) {
+            return min(currentDisplay, imageCountAfterDelete - 1)
+        }
+
+        let deletedBeforeCurrent = deletedIndices.filter { $0 < currentDisplay }.count
+        return currentDisplay - deletedBeforeCurrent
     }
 
     private func handleUndo() {
