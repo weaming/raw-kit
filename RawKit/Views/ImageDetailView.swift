@@ -29,6 +29,8 @@ struct ImageDetailView: View {
     private struct RenderRequest: Sendable {
         let id: Int
         let adjustments: ImageAdjustments
+        let showOriginal: Bool
+        let isCropPreview: Bool
     }
 
     private struct RenderSnapshot: @unchecked Sendable {
@@ -196,7 +198,7 @@ struct ImageDetailView: View {
                 // 切换回调整效果：检查缓存是否有效
                 if let cached = cachedAdjustedImage, editingState.adjustments == cachedAdjustments {
                     // 缓存有效，直接使用缓存图像（无需重新渲染）
-                    displayImage = cached
+                    setDisplayImage(cached)
                     if let adjustedCIImage {
                         commitPreviewImage(adjustedCIImage)
                     }
@@ -261,8 +263,9 @@ struct ImageDetailView: View {
         if imageInfo.fileType.isRaw {
             loadingStage = .thumbnail
             if let thumbnail = ImageProcessor.loadThumbnail(from: imageInfo.url) {
-                displayImage = ImageProcessor.convertToNSImage(thumbnail)
-                displayImageID = UUID()
+                if let thumbnailImage = ImageProcessor.convertToNSImage(thumbnail) {
+                    setDisplayImage(thumbnailImage)
+                }
                 isLoading = false
             }
         }
@@ -311,7 +314,12 @@ struct ImageDetailView: View {
             }
 
             nextRenderRequestID += 1
-            let request = RenderRequest(id: nextRenderRequestID, adjustments: editingState.adjustments)
+            let request = RenderRequest(
+                id: nextRenderRequestID,
+                adjustments: editingState.adjustments,
+                showOriginal: showOriginal,
+                isCropPreview: isCropModeEnabled
+            )
             latestRenderRequestID = request.id
             return request
         }) else {
@@ -335,8 +343,8 @@ struct ImageDetailView: View {
                 sourceHDRHeadroom: imageInfo.hdrHeadroom,
                 viewportSize: viewportSize,
                 adjustments: request.adjustments,
-                showOriginal: showOriginal,
-                isCropPreview: isCropModeEnabled
+                showOriginal: request.showOriginal,
+                isCropPreview: request.isCropPreview
             )
         }) else {
             return
@@ -362,12 +370,12 @@ struct ImageDetailView: View {
                 if let displayImage, !output.isCropPreview {
                     cachedAdjustedImage = displayImage
                     cachedAdjustments = output.adjustments
-                    self.displayImage = displayImage
+                    setDisplayImage(displayImage)
                 } else if let displayImage {
-                    self.displayImage = displayImage
+                    setDisplayImage(displayImage)
                 }
             } else if let displayImage {
-                self.displayImage = displayImage
+                setDisplayImage(displayImage)
             }
 
             commitPreviewImage(output.image)
@@ -590,12 +598,23 @@ struct ImageDetailView: View {
     private func enqueueRender(_ adjustments: ImageAdjustments) {
         ensureRenderQueue()
         nextRenderRequestID += 1
-        let request = RenderRequest(id: nextRenderRequestID, adjustments: adjustments)
+        let request = RenderRequest(
+            id: nextRenderRequestID,
+            adjustments: adjustments,
+            showOriginal: showOriginal,
+            isCropPreview: isCropModeEnabled
+        )
         latestRenderRequestID = request.id
 
         Task {
             await renderQueue?.enqueue(request)
         }
+    }
+
+    @MainActor
+    private func setDisplayImage(_ image: NSImage) {
+        displayImage = image
+        displayImageID = UUID()
     }
 
     @MainActor
