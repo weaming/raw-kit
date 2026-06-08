@@ -465,6 +465,8 @@ extension ImageAdjustments {
     static let sharpnessRange: ClosedRange<Double> = -1.0 ... 2.0
     static let straightenAngleRange: ClosedRange<Double> = -45.0 ... 45.0
     static let cropInsetRange: ClosedRange<Double> = 0.0 ... 0.95
+    static let cropCoordinateRange: ClosedRange<Double> = 0.0 ... 1.0
+    static let minimumCropVisibleFraction: Double = 0.05
     static let hdrBrightnessRange: ClosedRange<Double> = -2.0 ... 2.0
     static let hdrHighlightsRange: ClosedRange<Double> = -1.0 ... 1.0
     static let hdrWhitesRange: ClosedRange<Double> = -1.0 ... 1.0

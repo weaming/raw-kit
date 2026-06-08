@@ -68,17 +68,9 @@ struct TransformAdjustmentsView: View {
             VStack(spacing: 10) {
                 SimpleSlider(
                     title: "左",
-                    value: $adjustments.cropLeft,
-                    range: cropLeftRange,
-                    step: 0.001,
-                    defaultValue: 0.0,
-                    valueFormatter: percentFormatter
-                )
-
-                SimpleSlider(
-                    title: "上",
-                    value: $adjustments.cropTop,
-                    range: cropTopRange,
+                    value: cropStartBinding(\.cropLeft, oppositeEnd: \.cropRight),
+                    range: ImageAdjustments.cropCoordinateRange,
+                    validRange: cropStartValidRange(oppositeEnd: adjustments.cropRight),
                     step: 0.001,
                     defaultValue: 0.0,
                     valueFormatter: percentFormatter
@@ -86,8 +78,19 @@ struct TransformAdjustmentsView: View {
 
                 SimpleSlider(
                     title: "右",
-                    value: $adjustments.cropRight,
-                    range: cropRightRange,
+                    value: cropEndBinding(\.cropRight, oppositeStart: \.cropLeft),
+                    range: ImageAdjustments.cropCoordinateRange,
+                    validRange: cropEndValidRange(oppositeStart: adjustments.cropLeft),
+                    step: 0.001,
+                    defaultValue: 1.0,
+                    valueFormatter: percentFormatter
+                )
+
+                SimpleSlider(
+                    title: "上",
+                    value: cropStartBinding(\.cropTop, oppositeEnd: \.cropBottom),
+                    range: ImageAdjustments.cropCoordinateRange,
+                    validRange: cropStartValidRange(oppositeEnd: adjustments.cropBottom),
                     step: 0.001,
                     defaultValue: 0.0,
                     valueFormatter: percentFormatter
@@ -95,10 +98,11 @@ struct TransformAdjustmentsView: View {
 
                 SimpleSlider(
                     title: "下",
-                    value: $adjustments.cropBottom,
-                    range: cropBottomRange,
+                    value: cropEndBinding(\.cropBottom, oppositeStart: \.cropTop),
+                    range: ImageAdjustments.cropCoordinateRange,
+                    validRange: cropEndValidRange(oppositeStart: adjustments.cropTop),
                     step: 0.001,
-                    defaultValue: 0.0,
+                    defaultValue: 1.0,
                     valueFormatter: percentFormatter
                 )
             }
@@ -131,20 +135,65 @@ struct TransformAdjustmentsView: View {
             adjustments.cropAspectRatio != .free
     }
 
-    private var cropLeftRange: ClosedRange<Double> {
-        0.0 ... max(0.0, 0.95 - adjustments.cropRight)
+    private func cropStartBinding(
+        _ keyPath: WritableKeyPath<ImageAdjustments, Double>,
+        oppositeEnd oppositeKeyPath: KeyPath<ImageAdjustments, Double>
+    ) -> Binding<Double> {
+        Binding(
+            get: {
+                adjustments[keyPath: keyPath]
+            },
+            set: { newValue in
+                let endValue = 1.0 - adjustments[keyPath: oppositeKeyPath]
+                let maximumValue = max(0.0, endValue - ImageAdjustments.minimumCropVisibleFraction)
+                let clampedValue = min(
+                    max(newValue, ImageAdjustments.cropCoordinateRange.lowerBound),
+                    maximumValue
+                )
+
+                adjustments[keyPath: keyPath] = clampedValue
+            }
+        )
     }
 
-    private var cropTopRange: ClosedRange<Double> {
-        0.0 ... max(0.0, 0.95 - adjustments.cropBottom)
+    private func cropEndBinding(
+        _ keyPath: WritableKeyPath<ImageAdjustments, Double>,
+        oppositeStart oppositeKeyPath: KeyPath<ImageAdjustments, Double>
+    ) -> Binding<Double> {
+        Binding(
+            get: {
+                1.0 - adjustments[keyPath: keyPath]
+            },
+            set: { newValue in
+                let startValue = adjustments[keyPath: oppositeKeyPath]
+                let minimumValue = min(1.0, startValue + ImageAdjustments.minimumCropVisibleFraction)
+                let clampedValue = min(
+                    max(newValue, minimumValue),
+                    ImageAdjustments.cropCoordinateRange.upperBound
+                )
+
+                adjustments[keyPath: keyPath] = 1.0 - clampedValue
+            }
+        )
     }
 
-    private var cropRightRange: ClosedRange<Double> {
-        0.0 ... max(0.0, 0.95 - adjustments.cropLeft)
+    private func cropStartValidRange(oppositeEnd cropEndInset: Double) -> ClosedRange<Double> {
+        let endValue = 1.0 - cropEndInset
+        let upperBound = max(
+            ImageAdjustments.cropCoordinateRange.lowerBound,
+            endValue - ImageAdjustments.minimumCropVisibleFraction
+        )
+
+        return ImageAdjustments.cropCoordinateRange.lowerBound ... upperBound
     }
 
-    private var cropBottomRange: ClosedRange<Double> {
-        0.0 ... max(0.0, 0.95 - adjustments.cropTop)
+    private func cropEndValidRange(oppositeStart startValue: Double) -> ClosedRange<Double> {
+        let lowerBound = min(
+            ImageAdjustments.cropCoordinateRange.upperBound,
+            startValue + ImageAdjustments.minimumCropVisibleFraction
+        )
+
+        return lowerBound ... ImageAdjustments.cropCoordinateRange.upperBound
     }
 
     private func rotateLeft() {
