@@ -343,7 +343,7 @@ struct AdjustmentPanel: View {
     let histogramRangeMax: Double
     let resetBaseline: ImageAdjustments
     @Binding var whiteBalancePickMode: CurveAdjustmentView.PickMode
-    @State private var expandedSections: Set<AdjustmentSection> = [.transform, .basic, .hdr, .color, .detail]
+    @State private var expandedSections = AdjustmentSection.defaultExpandedSections
     @State private var histogram: HistogramData?
     @State private var histogramTask: Task<Void, Never>?
     @State private var autoHDRBrightness = Self.defaultAutoHDRBrightness
@@ -869,6 +869,8 @@ enum AdjustmentSection: Hashable {
     case hdr
     case color
     case detail
+
+    static let defaultExpandedSections: Set<AdjustmentSection> = [.transform, .basic, .hdr, .color, .detail]
 
     var title: String {
         switch self {

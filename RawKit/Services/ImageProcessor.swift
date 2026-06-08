@@ -495,6 +495,18 @@ class ImageProcessor {
         return v / max(1.0 - v, 1e-5);
     }
 
+    float boundedShiftedLuminance(float originalLuminance, float shiftedLuminance) {
+        float safeShiftedLuminance = isfinite(shiftedLuminance) ? shiftedLuminance : originalLuminance;
+        float upperBound = max(64.0, originalLuminance * 4.0 + 4.0);
+        return clamp(safeShiftedLuminance, 0.0, upperBound);
+    }
+
+    float safeLuminanceScale(float originalLuminance, float shiftedLuminance) {
+        float boundedLuminance = boundedShiftedLuminance(originalLuminance, shiftedLuminance);
+        float scale = boundedLuminance / max(originalLuminance, 1e-6);
+        return isfinite(scale) ? scale : 1.0;
+    }
+
     float logitValue(float value) {
         float v = clamp(value, 1e-4, 0.9999);
         return log(v / (1.0 - v));
@@ -552,7 +564,7 @@ class ImageProcessor {
         float shiftedDisplayLuma = logisticValue(logitValue(displayLuma) + amount * maxShift * weight);
         float shiftedCompressedLuma = decodeSRGBValue(shiftedDisplayLuma);
         float shiftedLuminance = expandPerceptualLuminance(shiftedCompressedLuma);
-        float scale = shiftedLuminance / max(luminance, 1e-6);
+        float scale = safeLuminanceScale(luminance, shiftedLuminance);
 
         return float4(safeColor * scale, image.a);
     }
@@ -572,7 +584,7 @@ class ImageProcessor {
         float shiftedDisplayLuma = logisticValue((logitValue(displayLuma) - logitValue(pivot)) * contrastScale + logitValue(pivot));
         float shiftedCompressedLuma = decodeSRGBValue(shiftedDisplayLuma);
         float shiftedLuminance = expandPerceptualLuminance(shiftedCompressedLuma);
-        float scale = shiftedLuminance / max(luminance, 1e-6);
+        float scale = safeLuminanceScale(luminance, shiftedLuminance);
 
         return float4(safeColor * scale, image.a);
     }
@@ -604,7 +616,7 @@ class ImageProcessor {
         float shiftedDisplayLuma = logisticValue(logitValue(displayLuma) + shift);
         float shiftedCompressedLuma = decodeSRGBValue(shiftedDisplayLuma);
         float shiftedLuminance = expandPerceptualLuminance(shiftedCompressedLuma);
-        float scale = shiftedLuminance / max(luminance, 1e-6);
+        float scale = safeLuminanceScale(luminance, shiftedLuminance);
 
         return float4(safeColor * scale, image.a);
     }
