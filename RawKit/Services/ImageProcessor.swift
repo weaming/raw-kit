@@ -557,6 +557,72 @@ class ImageProcessor {
         return float4(safeColor * scale, image.a);
     }
 
+    [[ stitchable ]] float4 hdrContrastAdjust(sample_t image, float amount) {
+        float3 safeColor = max(image.rgb, float3(0.0));
+        float luminance = sceneLuminance(safeColor);
+
+        if (luminance <= 1e-6 || fabs(amount) <= 1e-6) {
+            return float4(safeColor, image.a);
+        }
+
+        float compressedLuma = compressPerceptualLuminance(luminance);
+        float displayLuma = encodeSRGBValue(compressedLuma);
+        float pivot = 0.5;
+        float contrastScale = max(0.05, 1.0 + amount * 0.58);
+        float shiftedDisplayLuma = logisticValue((logitValue(displayLuma) - logitValue(pivot)) * contrastScale + logitValue(pivot));
+        float shiftedCompressedLuma = decodeSRGBValue(shiftedDisplayLuma);
+        float shiftedLuminance = expandPerceptualLuminance(shiftedCompressedLuma);
+        float scale = shiftedLuminance / max(luminance, 1e-6);
+
+        return float4(safeColor * scale, image.a);
+    }
+
+    [[ stitchable ]] float4 hdrTonalRangeAdjust(sample_t image, float highlights, float shadows, float whites, float blacks) {
+        float3 safeColor = max(image.rgb, float3(0.0));
+        float luminance = sceneLuminance(safeColor);
+
+        if (luminance <= 1e-6) {
+            return float4(safeColor, image.a);
+        }
+
+        float compressedLuma = compressPerceptualLuminance(luminance);
+        float displayLuma = encodeSRGBValue(compressedLuma);
+        float blackWeight = 1.0 - smoothstep(0.06, 0.28, displayLuma);
+        float shadowWeight = smoothstep(0.08, 0.28, displayLuma) * (1.0 - smoothstep(0.42, 0.64, displayLuma));
+        float highlightWeight = smoothstep(0.45, 0.68, displayLuma) * (1.0 - smoothstep(0.84, 0.98, displayLuma));
+        float whiteWeight = smoothstep(0.72, 0.96, displayLuma);
+        float shift =
+            blacks * 0.80 * blackWeight +
+            shadows * 0.55 * shadowWeight +
+            (highlights - 1.0) * 0.48 * highlightWeight +
+            whites * 0.68 * whiteWeight;
+
+        if (fabs(shift) <= 1e-6) {
+            return float4(safeColor, image.a);
+        }
+
+        float shiftedDisplayLuma = logisticValue(logitValue(displayLuma) + shift);
+        float shiftedCompressedLuma = decodeSRGBValue(shiftedDisplayLuma);
+        float shiftedLuminance = expandPerceptualLuminance(shiftedCompressedLuma);
+        float scale = shiftedLuminance / max(luminance, 1e-6);
+
+        return float4(safeColor * scale, image.a);
+    }
+
+    [[ stitchable ]] float4 hdrColorfulnessAdjust(sample_t image, float saturation, float vibrance) {
+        float3 safeColor = max(image.rgb, float3(0.0));
+        float luminance = sceneLuminance(safeColor);
+        float3 grayColor = float3(luminance);
+        float maxComponent = max(safeColor.r, max(safeColor.g, safeColor.b));
+        float minComponent = min(safeColor.r, min(safeColor.g, safeColor.b));
+        float chroma = (maxComponent - minComponent) / max(maxComponent, 1e-5);
+        float vibranceWeight = 1.0 - smoothstep(0.08, 0.62, chroma);
+        float saturationScale = max(0.0, saturation + vibrance * 0.62 * vibranceWeight);
+        float3 adjustedColor = grayColor + (safeColor - grayColor) * saturationScale;
+
+        return float4(max(adjustedColor, float3(0.0)), image.a);
+    }
+
     [[ stitchable ]] float4 hdrDisplayBoost(sample_t image, float brightness, float highlights, float whites, float headroom) {
         float3 safeColor = max(image.rgb, float3(0.0));
         float luminance = sceneLuminance(safeColor);
@@ -603,6 +669,12 @@ class ImageProcessor {
     private static let lutOutputTransformKernel: CIColorKernel? = colorKernels["lutOutputTransform"]
 
     private static let perceptualLuminanceShiftKernel: CIColorKernel? = colorKernels["perceptualLuminanceShift"]
+
+    private static let hdrContrastAdjustKernel: CIColorKernel? = colorKernels["hdrContrastAdjust"]
+
+    private static let hdrTonalRangeAdjustKernel: CIColorKernel? = colorKernels["hdrTonalRangeAdjust"]
+
+    private static let hdrColorfulnessAdjustKernel: CIColorKernel? = colorKernels["hdrColorfulnessAdjust"]
 
     private static let hdrDisplayBoostKernel: CIColorKernel? = colorKernels["hdrDisplayBoost"]
 
@@ -2070,58 +2142,40 @@ class ImageProcessor {
     private static func applyContrast(to image: CIImage, value: Double) -> CIImage {
         if value == 0.0 { return image }
 
-        // Lightroom 风格的对比度算法：使用参数化 S 曲线
-        // value 范围：-1.0 (最低对比度) 到 +1.0 (最高对比度)
-        //
-        // 原理：
-        // - 对比度 > 0: 应用 S 曲线（暗部更暗，亮部更亮）
-        // - 对比度 < 0: 应用反向 S 曲线（降低对比度）
-        // - 使用锚点法：在 1/4 和 3/4 处设置控制点
+        guard let kernel = hdrContrastAdjustKernel else { return image }
 
-        // 计算控制点位置
-        // 对比度越强，S 曲线越陡峭
-        let darkPoint: CGFloat
-        let lightPoint: CGFloat
-
-        if value > 0 {
-            // 正对比度：S 曲线
-            // 暗部向下，亮部向上
-            let offset = CGFloat(value * 0.125)  // 最大偏移 12.5%
-            darkPoint = 0.25 - offset
-            lightPoint = 0.75 + offset
-        } else {
-            // 负对比度：反向 S 曲线
-            // 暗部向上，亮部向下
-            let offset = CGFloat(abs(value) * 0.125)
-            darkPoint = 0.25 + offset
-            lightPoint = 0.75 - offset
-        }
-
-        // 使用 CIToneCurve 滤镜应用自定义曲线
-        // 定义 5 个控制点：黑场(0,0)、暗部、中间、亮部、白场(1,1)
-        guard let filter = CIFilter(name: "CIToneCurve") else { return image }
-        filter.setValue(image, forKey: kCIInputImageKey)
-        filter.setValue(CIVector(x: 0, y: 0), forKey: "inputPoint0")
-        filter.setValue(CIVector(x: 0.25, y: darkPoint), forKey: "inputPoint1")
-        filter.setValue(CIVector(x: 0.5, y: 0.5), forKey: "inputPoint2")  // 中点不变
-        filter.setValue(CIVector(x: 0.75, y: lightPoint), forKey: "inputPoint3")
-        filter.setValue(CIVector(x: 1, y: 1), forKey: "inputPoint4")
-
-        return filter.outputImage ?? image
+        return kernel.apply(
+            extent: image.extent,
+            arguments: [
+                image,
+                CGFloat(value),
+            ]
+        ) ?? image
     }
 
     private static func applySaturation(to image: CIImage, value: Double) -> CIImage {
-        guard let filter = CIFilter(name: "CIColorControls") else { return image }
-        filter.setValue(image, forKey: kCIInputImageKey)
-        filter.setValue(value, forKey: kCIInputSaturationKey)
-        return filter.outputImage ?? image
+        applyColorfulness(to: image, saturation: value, vibrance: 0.0)
     }
 
     private static func applyVibrance(to image: CIImage, value: Double) -> CIImage {
-        guard let filter = CIFilter(name: "CIVibrance") else { return image }
-        filter.setValue(image, forKey: kCIInputImageKey)
-        filter.setValue(value, forKey: "inputAmount")
-        return filter.outputImage ?? image
+        applyColorfulness(to: image, saturation: 1.0, vibrance: value)
+    }
+
+    private static func applyColorfulness(
+        to image: CIImage,
+        saturation: Double,
+        vibrance: Double
+    ) -> CIImage {
+        guard let kernel = hdrColorfulnessAdjustKernel else { return image }
+
+        return kernel.apply(
+            extent: image.extent,
+            arguments: [
+                image,
+                CGFloat(saturation),
+                CGFloat(vibrance),
+            ]
+        ) ?? image
     }
 
     // Photoshop/Lightroom 风格的高光、阴影、白色、黑色调整
@@ -2138,50 +2192,18 @@ class ImageProcessor {
             return image
         }
 
-        // Lightroom PV2012 风格的曲线算法（改进版）
-        //
-        // 影响范围：
-        // - Blacks:     主要影响 0.0-0.2，对 0.2-0.35 有轻微影响
-        // - Shadows:    主要影响 0.15-0.5，中心在 0.3
-        // - Highlights: 主要影响 0.5-0.85，中心在 0.7
-        // - Whites:     主要影响 0.8-1.0，对 0.65-0.8 有轻微影响
-        //
-        // 调整系数（更接近 Lightroom 行为）：
-        // - Blacks:  0.12 （增强暗部控制力度）
-        // - Whites:  0.15 （降低亮部过曝风险，同时保持效果）
+        guard let kernel = hdrTonalRangeAdjustKernel else { return image }
 
-        guard let filter = CIFilter(name: "CIToneCurve") else { return image }
-        filter.setValue(image, forKey: kCIInputImageKey)
-
-        // 计算曲线上的关键点
-        // 黑色点 (input: 0.0, 受 blacks 影响)
-        // 增强系数到 0.12，提供更明显的暗部控制
-        let blackPoint = blacks * 0.12
-
-        // 阴影点 (input: 0.25, 受 shadows 和 blacks 影响)
-        // blacks 对阴影点的影响略微增加，使过渡更平滑
-        let shadowPoint = 0.25 + shadows * 0.2 + blacks * 0.08
-
-        // 中点 (input: 0.5, 受所有参数轻微影响)
-        let midPoint = 0.5 + (shadows * 0.06) + (highlights - 1.0) * 0.06
-
-        // 高光点 (input: 0.75, 受 highlights 和 whites 影响)
-        // whites 对高光点的影响增加，使过渡更平滑
-        let highlightPoint = 0.75 + (highlights - 1.0) * 0.18 + whites * 0.12
-
-        // 白色点 (input: 1.0, 受 whites 影响)
-        // 降低系数到 0.15，避免过度曝光，同时保持明显效果
-        let whitePoint = 1.0 + whites * 0.15
-
-        // 设置曲线的 5 个控制点
-        // 使用 clamp 确保在有效范围内
-        filter.setValue(CIVector(x: 0, y: max(0, min(1, blackPoint))), forKey: "inputPoint0")
-        filter.setValue(CIVector(x: 0.25, y: max(0, min(1, shadowPoint))), forKey: "inputPoint1")
-        filter.setValue(CIVector(x: 0.5, y: max(0, min(1, midPoint))), forKey: "inputPoint2")
-        filter.setValue(CIVector(x: 0.75, y: max(0, min(1, highlightPoint))), forKey: "inputPoint3")
-        filter.setValue(CIVector(x: 1, y: max(0, min(1, whitePoint))), forKey: "inputPoint4")
-
-        return filter.outputImage ?? image
+        return kernel.apply(
+            extent: image.extent,
+            arguments: [
+                image,
+                CGFloat(highlights),
+                CGFloat(shadows),
+                CGFloat(whites),
+                CGFloat(blacks),
+            ]
+        ) ?? image
     }
 
     private static func applyWhiteBalance(
@@ -2303,18 +2325,11 @@ class ImageProcessor {
     }
 
     private static func applyDehaze(to image: CIImage, value: Double) -> CIImage {
-        guard let filter = CIFilter(name: "CIColorControls") else { return image }
-        filter.setValue(image, forKey: kCIInputImageKey)
+        var result = applyContrast(to: image, value: value * 0.3)
+        result = applyColorfulness(to: result, saturation: 1.0 + value * 0.2, vibrance: 0.0)
+        result = applyPerceptualLuminanceShift(to: result, value: value, focusSigma: 0.0, maxShift: 0.10)
 
-        let contrastAdjust = 1.0 + (value * 0.3)
-        let saturationAdjust = 1.0 + (value * 0.2)
-        let brightnessAdjust = value * 0.1
-
-        filter.setValue(contrastAdjust, forKey: kCIInputContrastKey)
-        filter.setValue(saturationAdjust, forKey: kCIInputSaturationKey)
-        filter.setValue(brightnessAdjust, forKey: kCIInputBrightnessKey)
-
-        return filter.outputImage ?? image
+        return result
     }
 
     private static func applySharpness(to image: CIImage, value: Double) -> CIImage {
