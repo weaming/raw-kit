@@ -118,11 +118,10 @@ class ThumbnailManager: ObservableObject {
 
         thumbnailImage = ImageProcessor.cropToCenteredSquare(thumbnailImage)
 
-        let cgImage = if adjustments.isHDREnabled {
-            ImageProcessor.convertToDisplayCGImage(thumbnailImage, adjustments: adjustments)
-        } else {
-            ImageProcessor.convertToCGImage(thumbnailImage)
-        }
+        let cgImage = ImageProcessor.convertToDisplayCGImage(
+            thumbnailImage,
+            adjustments: adjustments
+        )?.cgImage
 
         guard let cgImage else {
             return nil

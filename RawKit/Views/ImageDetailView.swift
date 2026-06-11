@@ -46,7 +46,7 @@ struct ImageDetailView: View {
     private struct RenderOutput: @unchecked Sendable {
         let requestID: Int
         let image: CIImage
-        let cgImage: CGImage?
+        let displayResult: ImageProcessor.DisplayCGImageResult?
         let adjustments: ImageAdjustments
         let showOriginal: Bool
         let isCropPreview: Bool
@@ -67,6 +67,7 @@ struct ImageDetailView: View {
     @State private var previewCIImage: CIImage?
     @State private var previewRevision = 0
     @State private var displayImage: NSImage?
+    @State private var displayImageIsHDR = false
     @State private var displayImageID = UUID() // 用于强制刷新视图
     @State private var isLoading = true
     @State private var loadingStage: LoadingStage = .thumbnail
@@ -87,6 +88,7 @@ struct ImageDetailView: View {
 
     // Before/After 缓存
     @State private var cachedAdjustedImage: NSImage?  // 缓存的调整后图像
+    @State private var cachedAdjustedImageIsHDR = false
     @State private var cachedAdjustments: ImageAdjustments?  // 缓存对应的调整参数
 
     // 渲染队列（延迟初始化）
@@ -101,11 +103,7 @@ struct ImageDetailView: View {
     }
 
     private var isDisplayedImageHDR: Bool {
-        if showOriginal {
-            return (imageInfo.hdrHeadroom ?? 1.0) > 1.01
-        }
-
-        return editingState.adjustments.isHDREnabled
+        displayImageIsHDR
     }
 
     private var resetBaseline: ImageAdjustments {
@@ -180,6 +178,7 @@ struct ImageDetailView: View {
         .onChange(of: editingState.adjustments) { _, newValue in
             if showOriginal {
                 cachedAdjustedImage = nil
+                cachedAdjustedImageIsHDR = false
                 cachedAdjustments = nil
                 print("Before/After: 在原图模式下修改参数，清空缓存")
             }
@@ -196,13 +195,14 @@ struct ImageDetailView: View {
                 if editingState.adjustments == cachedAdjustments {
                     // 参数没变，保存当前显示的图像
                     cachedAdjustedImage = displayImage
+                    cachedAdjustedImageIsHDR = displayImageIsHDR
                 }
                 enqueueRender(editingState.adjustments)
             } else {
                 // 切换回调整效果：检查缓存是否有效
                 if let cached = cachedAdjustedImage, editingState.adjustments == cachedAdjustments {
                     // 缓存有效，直接使用缓存图像（无需重新渲染）
-                    setDisplayImage(cached)
+                    setDisplayImage(cached, isHDR: cachedAdjustedImageIsHDR)
                     if let adjustedCIImage {
                         commitPreviewImage(adjustedCIImage)
                     }
@@ -268,7 +268,7 @@ struct ImageDetailView: View {
             loadingStage = .thumbnail
             if let thumbnail = ImageProcessor.loadThumbnail(from: imageInfo.url) {
                 if let thumbnailImage = ImageProcessor.convertToNSImage(thumbnail) {
-                    setDisplayImage(thumbnailImage)
+                    setDisplayImage(thumbnailImage, isHDR: false)
                 }
                 isLoading = false
             }
@@ -364,22 +364,24 @@ struct ImageDetailView: View {
                 return
             }
 
-            let displayImage = output.cgImage.map {
-                NSImage(cgImage: $0, size: output.image.extent.size)
+            guard let displayResult = output.displayResult else {
+                print("ImageDetailView: display render returned nil, skipping display update")
+                return
             }
+
+            let displayImage = NSImage(cgImage: displayResult.cgImage, size: output.image.extent.size)
 
             if !output.showOriginal {
                 adjustedCIImage = output.image
 
-                if let displayImage, !output.isCropPreview {
+                if !output.isCropPreview, !displayResult.didFallbackToSDR {
                     cachedAdjustedImage = displayImage
+                    cachedAdjustedImageIsHDR = displayResult.isHDR
                     cachedAdjustments = output.adjustments
-                    setDisplayImage(displayImage)
-                } else if let displayImage {
-                    setDisplayImage(displayImage)
                 }
-            } else if let displayImage {
-                setDisplayImage(displayImage)
+                setDisplayImage(displayImage, isHDR: displayResult.isHDR)
+            } else {
+                setDisplayImage(displayImage, isHDR: displayResult.isHDR)
             }
 
             commitPreviewImage(output.image)
@@ -464,7 +466,7 @@ struct ImageDetailView: View {
         return RenderOutput(
             requestID: snapshot.requestID,
             image: outputImage,
-            cgImage: ImageProcessor.convertToDisplayCGImage(
+            displayResult: ImageProcessor.convertToDisplayCGImage(
                 outputImage,
                 adjustments: displayAdjustments
             ),
@@ -616,8 +618,9 @@ struct ImageDetailView: View {
     }
 
     @MainActor
-    private func setDisplayImage(_ image: NSImage) {
+    private func setDisplayImage(_ image: NSImage, isHDR: Bool) {
         displayImage = image
+        displayImageIsHDR = isHDR
         displayImageID = UUID()
     }
 

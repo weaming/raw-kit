@@ -5,6 +5,12 @@ import UniformTypeIdentifiers
 import simd
 
 class ImageProcessor {
+    struct DisplayCGImageResult {
+        let cgImage: CGImage
+        let isHDR: Bool
+        let didFallbackToSDR: Bool
+    }
+
     private struct LUTCacheKey: Hashable {
         let path: String
         let modificationTime: TimeInterval
@@ -2016,9 +2022,11 @@ class ImageProcessor {
         return result
     }
 
-    static func convertToDisplayCGImage(_ ciImage: CIImage, adjustments: ImageAdjustments) -> CGImage? {
+    static func convertToDisplayCGImage(_ ciImage: CIImage, adjustments: ImageAdjustments) -> DisplayCGImageResult? {
         guard adjustments.isHDREnabled else {
-            return convertToCGImage(ciImage)
+            return convertToCGImage(ciImage).map {
+                DisplayCGImageResult(cgImage: $0, isHDR: false, didFallbackToSDR: false)
+            }
         }
 
         let extent = ciImage.extent
@@ -2037,15 +2045,27 @@ class ImageProcessor {
             CGColorSpace(name: CGColorSpace.displayP3_HLG)
 
         guard let hdrColorSpace else {
-            return convertToCGImage(ciImage)
+            return convertToCGImage(ciImage).map {
+                DisplayCGImageResult(cgImage: $0, isHDR: false, didFallbackToSDR: true)
+            }
         }
 
-        return ciContext.createCGImage(
+        if let cgImage = ciContext.createCGImage(
             outputImage,
             from: extent,
             format: .RGBAh,
             colorSpace: hdrColorSpace
-        )
+        ) {
+            return DisplayCGImageResult(cgImage: cgImage, isHDR: true, didFallbackToSDR: false)
+        }
+
+        print("ImageProcessor: HDR display render failed, falling back to SDR")
+        guard let sdrCGImage = convertToCGImage(ciImage) else {
+            print("ImageProcessor: SDR fallback render also failed")
+            return nil
+        }
+
+        return DisplayCGImageResult(cgImage: sdrCGImage, isHDR: false, didFallbackToSDR: true)
     }
 
     // 摄影曝光调整 - 真实 EV 曝光
