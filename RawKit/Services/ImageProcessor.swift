@@ -2770,7 +2770,7 @@ class ImageProcessor {
         guard extent.width > 0, extent.height > 0 else { return image }
 
         let center = CGPoint(x: extent.midX, y: extent.midY)
-        let radians = angle * .pi / 180.0
+        let radians = -angle * .pi / 180.0
         let transform = CGAffineTransform(translationX: center.x, y: center.y)
             .rotated(by: radians)
             .translatedBy(x: -center.x, y: -center.y)

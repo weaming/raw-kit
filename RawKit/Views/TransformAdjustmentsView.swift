@@ -40,7 +40,7 @@ struct TransformAdjustmentsView: View {
             }
 
             SimpleSlider(
-                title: "拉直",
+                title: "旋转",
                 value: $adjustments.straightenAngle,
                 range: ImageAdjustments.straightenAngleRange,
                 step: 0.1,
