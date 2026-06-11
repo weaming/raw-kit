@@ -50,7 +50,8 @@ struct FilmstripView: View {
                                 imageInfo: imageInfo,
                                 baseThumbnail: thumbnailManager.baseThumbnails[imageInfo.id],
                                 adjustedThumbnail: thumbnailManager.adjustedThumbnails[imageInfo.id],
-                                isHDREnabled: adjustments.isHDREnabled,
+                                baseThumbnailIsHDR: thumbnailManager.baseThumbnailIsHDR[imageInfo.id] ?? false,
+                                adjustedThumbnailIsHDR: thumbnailManager.adjustedThumbnailIsHDR[imageInfo.id] ?? false,
                                 isSelected: selectedIndices.contains(index),
                                 isDisplayed: displayedIndex == index,
                                 size: thumbnailSize
@@ -200,7 +201,8 @@ struct ThumbnailItemView: View {
     let imageInfo: ImageInfo
     let baseThumbnail: NSImage?
     let adjustedThumbnail: NSImage?
-    let isHDREnabled: Bool
+    let baseThumbnailIsHDR: Bool
+    let adjustedThumbnailIsHDR: Bool
     let isSelected: Bool
     let isDisplayed: Bool
     let size: CGFloat
@@ -209,12 +211,24 @@ struct ThumbnailItemView: View {
         adjustedThumbnail ?? baseThumbnail ?? imageInfo.thumbnail
     }
 
+    var isDisplayThumbnailHDR: Bool {
+        if adjustedThumbnail != nil {
+            return adjustedThumbnailIsHDR
+        }
+
+        if baseThumbnail != nil {
+            return baseThumbnailIsHDR
+        }
+
+        return false
+    }
+
     var body: some View {
         ZStack(alignment: .topTrailing) {
             if let thumbnail = displayThumbnail {
                 DynamicRangeThumbnailImage(
                     image: thumbnail,
-                    isHDREnabled: isHDREnabled && adjustedThumbnail != nil
+                    isHDREnabled: isDisplayThumbnailHDR
                 )
                     .frame(width: size, height: size)
                     .cornerRadius(4)

@@ -56,6 +56,7 @@ struct ImageDetailView: View {
     let session: ImageEditingSession
     @ObservedObject var editingState: ImageEditingState
     @ObservedObject private var history: AdjustmentHistory
+    @ObservedObject private var thumbnailManager: ThumbnailManager
     @Binding var sidebarWidth: CGFloat
     @Binding var adjustmentPanelExpandedSections: Set<AdjustmentSection>
     let syncTargetCount: Int
@@ -126,6 +127,7 @@ struct ImageDetailView: View {
         imageInfo: ImageInfo,
         session: ImageEditingSession,
         editingState: ImageEditingState,
+        thumbnailManager: ThumbnailManager,
         sidebarWidth: Binding<CGFloat>,
         adjustmentPanelExpandedSections: Binding<Set<AdjustmentSection>>,
         syncTargetCount: Int,
@@ -136,6 +138,7 @@ struct ImageDetailView: View {
         self.session = session
         self._editingState = ObservedObject(wrappedValue: editingState)
         self._history = ObservedObject(wrappedValue: session.history)
+        self._thumbnailManager = ObservedObject(wrappedValue: thumbnailManager)
         self._sidebarWidth = sidebarWidth
         self._adjustmentPanelExpandedSections = adjustmentPanelExpandedSections
         self.syncTargetCount = syncTargetCount
@@ -380,6 +383,14 @@ struct ImageDetailView: View {
                     cachedAdjustments = output.adjustments
                 }
                 setDisplayImage(displayImage, isHDR: displayResult.isHDR)
+
+                if !output.isCropPreview {
+                    thumbnailManager.updateAdjustedThumbnail(
+                        for: imageInfo.id,
+                        from: displayResult.cgImage,
+                        isHDR: displayResult.isHDR
+                    )
+                }
             } else {
                 setDisplayImage(displayImage, isHDR: displayResult.isHDR)
             }

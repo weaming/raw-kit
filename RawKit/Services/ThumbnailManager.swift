@@ -6,9 +6,16 @@ import Foundation
 class ThumbnailManager: ObservableObject {
     @Published var baseThumbnails: [UUID: NSImage] = [:]
     @Published var adjustedThumbnails: [UUID: NSImage] = [:]
+    @Published var baseThumbnailIsHDR: [UUID: Bool] = [:]
+    @Published var adjustedThumbnailIsHDR: [UUID: Bool] = [:]
 
     private let thumbnailSize: CGFloat = 120
     private var generationTasks: [UUID: Task<Void, Never>] = [:]
+
+    private struct ThumbnailRenderResult {
+        let image: NSImage
+        let isHDR: Bool
+    }
 
     func generateAdjustedThumbnail(
         for imageInfo: ImageInfo,
@@ -30,7 +37,13 @@ class ThumbnailManager: ObservableObject {
             guard !Task.isCancelled else { return }
 
             await MainActor.run {
-                self.adjustedThumbnails[imageInfo.id] = thumbnail
+                guard let thumbnail else {
+                    print("ThumbnailManager: adjusted thumbnail render failed, keeping previous thumbnail")
+                    return
+                }
+
+                self.adjustedThumbnails[imageInfo.id] = thumbnail.image
+                self.adjustedThumbnailIsHDR[imageInfo.id] = thumbnail.isHDR
             }
         }
 
@@ -50,13 +63,17 @@ class ThumbnailManager: ObservableObject {
             try? await Task.sleep(nanoseconds: 150_000_000)
             guard !Task.isCancelled else { return }
 
-            let thumbnail = await createBaseThumbnail(from: imageInfo.url)
+            let thumbnail = await createBaseThumbnail(
+                from: imageInfo.url,
+                sourceHDRHeadroom: imageInfo.hdrHeadroom
+            )
 
             guard !Task.isCancelled else { return }
 
             await MainActor.run {
                 if let thumbnail {
-                    self.baseThumbnails[imageInfo.id] = thumbnail
+                    self.baseThumbnails[imageInfo.id] = thumbnail.image
+                    self.baseThumbnailIsHDR[imageInfo.id] = thumbnail.isHDR
                 }
             }
         }
@@ -69,6 +86,8 @@ class ThumbnailManager: ObservableObject {
         generationTasks.removeValue(forKey: id)
         baseThumbnails.removeValue(forKey: id)
         adjustedThumbnails.removeValue(forKey: id)
+        baseThumbnailIsHDR.removeValue(forKey: id)
+        adjustedThumbnailIsHDR.removeValue(forKey: id)
     }
 
     func clearAll() {
@@ -78,24 +97,48 @@ class ThumbnailManager: ObservableObject {
         generationTasks.removeAll()
         baseThumbnails.removeAll()
         adjustedThumbnails.removeAll()
+        baseThumbnailIsHDR.removeAll()
+        adjustedThumbnailIsHDR.removeAll()
     }
 
-    private func createBaseThumbnail(from url: URL) async -> NSImage? {
+    func updateAdjustedThumbnail(
+        for imageID: UUID,
+        from previewCGImage: CGImage,
+        isHDR: Bool
+    ) {
+        guard let squareCGImage = cropCGImageToCenteredSquare(previewCGImage) else {
+            return
+        }
+
+        adjustedThumbnails[imageID] = NSImage(
+            cgImage: squareCGImage,
+            size: NSSize(width: thumbnailSize, height: thumbnailSize)
+        )
+        adjustedThumbnailIsHDR[imageID] = isHDR
+    }
+
+    private func createBaseThumbnail(
+        from url: URL,
+        sourceHDRHeadroom: Double?
+    ) async -> ThumbnailRenderResult? {
         if url.pathExtension.lowercased() == "x3f" {
-            return await ImageProcessor.loadX3FPreviewImage(from: url)
+            return await ImageProcessor.loadX3FPreviewImage(from: url).map {
+                ThumbnailRenderResult(image: $0, isHDR: false)
+            }
         }
 
         guard let thumbnailImage = ImageProcessor.loadSquareThumbnail(from: url) else {
             return nil
         }
 
-        return ImageProcessor.convertToNSImage(thumbnailImage)
+        let displayAdjustments = ImageAdjustments.sourceHDRBaseline(headroom: sourceHDRHeadroom)
+        return makeThumbnailRenderResult(from: thumbnailImage, adjustments: displayAdjustments)
     }
 
     private func createAdjustedThumbnail(
         from url: URL,
         with adjustments: ImageAdjustments
-    ) async -> NSImage? {
+    ) async -> ThumbnailRenderResult? {
         let fileExtension = url.pathExtension.lowercased()
 
         let thumbnailSource: CIImage?
@@ -118,18 +161,42 @@ class ThumbnailManager: ObservableObject {
 
         thumbnailImage = ImageProcessor.cropToCenteredSquare(thumbnailImage)
 
-        let cgImage = ImageProcessor.convertToDisplayCGImage(
-            thumbnailImage,
-            adjustments: adjustments
-        )?.cgImage
+        return makeThumbnailRenderResult(from: thumbnailImage, adjustments: adjustments)
+    }
 
-        guard let cgImage else {
+    private func makeThumbnailRenderResult(
+        from image: CIImage,
+        adjustments: ImageAdjustments
+    ) -> ThumbnailRenderResult? {
+        guard let displayResult = ImageProcessor.convertToDisplayCGImage(
+            image,
+            adjustments: adjustments
+        ) else {
             return nil
         }
 
-        return NSImage(
-            cgImage: cgImage,
+        let thumbnail = NSImage(
+            cgImage: displayResult.cgImage,
             size: NSSize(width: thumbnailSize, height: thumbnailSize)
         )
+
+        return ThumbnailRenderResult(image: thumbnail, isHDR: displayResult.isHDR)
+    }
+
+    private func cropCGImageToCenteredSquare(_ image: CGImage) -> CGImage? {
+        let squareLength = min(image.width, image.height)
+        guard squareLength > 0 else {
+            return nil
+        }
+
+        let squareLengthValue = CGFloat(squareLength)
+        let cropRect = CGRect(
+            x: CGFloat(image.width - squareLength) / 2.0,
+            y: CGFloat(image.height - squareLength) / 2.0,
+            width: squareLengthValue,
+            height: squareLengthValue
+        )
+
+        return image.cropping(to: cropRect)
     }
 }

@@ -97,6 +97,7 @@ struct ContentView: View {
                         imageInfo: imageInfo,
                         session: session,
                         editingState: session.state,
+                        thumbnailManager: thumbnailManager,
                         sidebarWidth: $rightSidebarWidth,
                         adjustmentPanelExpandedSections: $adjustmentPanelExpandedSections,
                         syncTargetCount: syncTargetIndices(for: index).count,
