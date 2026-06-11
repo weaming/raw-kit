@@ -1242,7 +1242,7 @@ class ImageExporter {
         let sdrRawURL = tempDirectory.appendingPathComponent("sdr-rgba8.raw")
         let opaqueImage = makeOpaqueImageForJPEG(normalizedImage)
         let hdrImage = normalizedHDRImage(opaqueImage, targetHeadroom: targetHeadroom)
-        let sdrImage = makeOpaqueImageForJPEG(makeSDRBaseImage(from: hdrImage))
+        let sdrImage = makeSDRBaseImage(from: hdrImage)
 
         try renderHDRRawImage(
             hdrImage,
@@ -2184,19 +2184,17 @@ class ImageExporter {
         guard outputPreset.isHDR else { return nil }
 
         let sourceHeadroom = imageInfo.hdrHeadroom ?? 1.0
-        let adjustmentHeadroom = adjustments.isHDREnabled ? adjustments.hdrHeadroom : sourceHeadroom
-        let targetHeadroom = max(
-            adjustmentHeadroom,
-            sourceHeadroom,
-            Self.defaultHDRExportHeadroom
-        )
+        let targetHeadroom: Double
 
-        return Float(
-            min(
-                targetHeadroom,
-                ImageAdjustments.hdrHeadroomRange.upperBound
-            )
-        )
+        if adjustments.isHDREnabled {
+            targetHeadroom = adjustments.hdrHeadroom
+        } else if sourceHeadroom > 1.01 {
+            targetHeadroom = sourceHeadroom
+        } else {
+            targetHeadroom = Self.defaultHDRExportHeadroom
+        }
+
+        return Float(targetHeadroom.clamped(to: ImageAdjustments.hdrHeadroomRange))
     }
 
     private static func normalizedHDRImage(_ image: CIImage, targetHeadroom: Float?) -> CIImage {
