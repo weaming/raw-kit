@@ -634,8 +634,11 @@ class ImageProcessor {
         float maxComponent = max(safeColor.r, max(safeColor.g, safeColor.b));
         float minComponent = min(safeColor.r, min(safeColor.g, safeColor.b));
         float chroma = (maxComponent - minComponent) / max(maxComponent, 1e-5);
-        float vibranceWeight = 1.0 - smoothstep(0.08, 0.62, chroma);
-        float saturationScale = max(0.0, saturation + vibrance * 0.62 * vibranceWeight);
+        float lowChromaWeight = 1.0 - smoothstep(0.04, 0.78, chroma);
+        float positiveVibrance = max(vibrance, 0.0) * lowChromaWeight;
+        float negativeVibrance = min(vibrance, 0.0) * mix(0.55, 1.0, smoothstep(0.0, 0.85, chroma));
+        float vibranceScale = 1.0 + (positiveVibrance + negativeVibrance) * 1.25;
+        float saturationScale = max(0.0, saturation * vibranceScale);
         float3 adjustedColor = grayColor + (safeColor - grayColor) * saturationScale;
 
         return float4(max(adjustedColor, float3(0.0)), image.a);
