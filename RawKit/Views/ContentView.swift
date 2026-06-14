@@ -52,12 +52,19 @@ struct ContentView: View {
     @State private var selectedIndices: Set<Int> = []
     @State private var displayedIndex: Int?
     @State private var editingSessions: [UUID: ImageEditingSession] = [:]
-    @State private var rightSidebarWidth: CGFloat = 400
-    @State private var adjustmentPanelExpandedSections = AdjustmentSection.defaultExpandedSections
+    @AppStorage("RightSidebarWidth") private var rightSidebarWidth: Double = 400
+    @AppStorage("AdjustmentPanelExpandedSections") private var panelExpandedSections = PanelExpandedSections()
     @AppStorage("LeftSidebarWidth") private var leftSidebarWidth: Double = 250
     @State private var presetsExpanded = true
     @State private var lutExpanded = true
     @State private var showingExportDialog = false
+
+    private var adjustmentPanelExpandedSections: Binding<Set<AdjustmentSection>> {
+        Binding(
+            get: { self.panelExpandedSections.sections },
+            set: { self.panelExpandedSections.sections = $0 }
+        )
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -98,8 +105,11 @@ struct ContentView: View {
                         session: session,
                         editingState: session.state,
                         thumbnailManager: thumbnailManager,
-                        sidebarWidth: $rightSidebarWidth,
-                        adjustmentPanelExpandedSections: $adjustmentPanelExpandedSections,
+                        sidebarWidth: Binding<CGFloat>(
+                            get: { CGFloat(self.rightSidebarWidth) },
+                            set: { self.rightSidebarWidth = Double($0) }
+                        ),
+                        adjustmentPanelExpandedSections: adjustmentPanelExpandedSections,
                         syncTargetCount: syncTargetIndices(for: index).count,
                         onSyncAdjustments: { groups in
                             syncCurrentAdjustments(

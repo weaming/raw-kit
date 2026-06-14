@@ -316,12 +316,7 @@ struct ImageAdjustments: Equatable, Codable {
         saturation != 1.0 ||
             vibrance != 0.0 ||
             abs(temperature - AppConfig.defaultWhitePoint) > AppConfig.whitePointTolerance ||
-            tint != 0.0 ||
-            rgbCurve.hasPoints ||
-            redCurve.hasPoints ||
-            greenCurve.hasPoints ||
-            blueCurve.hasPoints ||
-            luminanceCurve.hasPoints
+            tint != 0.0
     }
 
     // 检查细节调整组是否有变化
@@ -329,6 +324,15 @@ struct ImageAdjustments: Equatable, Codable {
         sharpness != 0.0 ||
             clarity != 0.0 ||
             dehaze != 0.0
+    }
+
+    // 检查曲线调整组是否有变化
+    var hasCurveAdjustments: Bool {
+        rgbCurve.hasPoints ||
+            redCurve.hasPoints ||
+            greenCurve.hasPoints ||
+            blueCurve.hasPoints ||
+            luminanceCurve.hasPoints
     }
 
     var hasTransformAdjustments: Bool {
@@ -369,11 +373,6 @@ struct ImageAdjustments: Equatable, Codable {
         vibrance = 0.0
         temperature = AppConfig.defaultWhitePoint
         tint = 0.0
-        rgbCurve.reset()
-        redCurve.reset()
-        greenCurve.reset()
-        blueCurve.reset()
-        luminanceCurve.reset()
     }
 
     // 重置细节调整组
@@ -381,6 +380,15 @@ struct ImageAdjustments: Equatable, Codable {
         sharpness = 0.0
         clarity = 0.0
         dehaze = 0.0
+    }
+
+    // 重置曲线调整组
+    mutating func resetCurve() {
+        rgbCurve.reset()
+        redCurve.reset()
+        greenCurve.reset()
+        blueCurve.reset()
+        luminanceCurve.reset()
     }
 
     mutating func resetTransform() {
@@ -417,6 +425,7 @@ enum AdjustmentSyncGroup: String, CaseIterable, Hashable, Identifiable {
     case hdr
     case color
     case detail
+    case curve
 
     var id: Self { self }
 
@@ -428,6 +437,7 @@ enum AdjustmentSyncGroup: String, CaseIterable, Hashable, Identifiable {
         case .hdr: "HDR"
         case .color: "色彩"
         case .detail: "细节"
+        case .curve: "曲线"
         }
     }
 }
@@ -514,27 +524,26 @@ extension ImageAdjustments {
 
         case .hdr:
             isHDREnabled = source.isHDREnabled
-            hdrBrightness = source.hdrBrightness
-            hdrHighlights = source.hdrHighlights
-            hdrWhites = source.hdrWhites
-            hdrHeadroom = source.hdrHeadroom
-            isHDRAutoAdjustmentEnabled = source.isHDRAutoAdjustmentEnabled
+            isHDRAutoAdjustmentEnabled = true
+            // 不直接复制 HDR 数值，启用自动计算模式让目标图片按自身内容计算
 
         case .color:
             saturation = source.saturation
             vibrance = source.vibrance
             temperature = source.temperature
             tint = source.tint
-            rgbCurve = source.rgbCurve
-            redCurve = source.redCurve
-            greenCurve = source.greenCurve
-            blueCurve = source.blueCurve
-            luminanceCurve = source.luminanceCurve
 
         case .detail:
             sharpness = source.sharpness
             clarity = source.clarity
             dehaze = source.dehaze
+
+        case .curve:
+            rgbCurve = source.rgbCurve
+            redCurve = source.redCurve
+            greenCurve = source.greenCurve
+            blueCurve = source.blueCurve
+            luminanceCurve = source.luminanceCurve
         }
     }
 }

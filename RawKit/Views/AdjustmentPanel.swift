@@ -397,73 +397,102 @@ struct AdjustmentPanel: View {
             .background(Color(nsColor: .controlBackgroundColor))
 
             ScrollView {
-                VStack(spacing: 0) {
-                    CollapsibleSection(
-                        section: .transform,
-                        isExpanded: expandedSections.contains(.transform),
-                        hasChanges: adjustments.hasTransformAdjustments,
-                        onToggle: { toggleSection(.transform) },
-                        onReset: { adjustments.resetTransform() }
-                    ) {
-                        TransformAdjustmentsView(adjustments: $adjustments)
-                    }
-
-                    CollapsibleSection(
-                        section: .basic,
-                        isExpanded: expandedSections.contains(.basic),
-                        hasChanges: adjustments.hasBasicAdjustments,
-                        onToggle: { toggleSection(.basic) },
-                        onReset: { adjustments.resetBasic() }
-                    ) {
-                        BasicAdjustmentsView(adjustments: $adjustments)
-                            .equatable()
-                    }
-
-                    CollapsibleSection(
-                        section: .hdr,
-                        isExpanded: expandedSections.contains(.hdr),
-                        hasChanges: adjustments.hasHDRAdjustments,
-                        onToggle: { toggleSection(.hdr) },
-                        onReset: { resetHDRAdjustments() }
-                    ) {
-                        HDRAdjustmentsView(
-                            adjustments: $adjustments,
-                            displayHDRInfo: displayHDRInfo,
-                            autoHDRBrightness: autoHDRBrightness
-                        )
-                            .equatable()
-                    }
-
-                    CollapsibleSection(
-                        section: .color,
-                        isExpanded: expandedSections.contains(.color),
-                        hasChanges: adjustments.hasColorAdjustments,
-                        onToggle: { toggleSection(.color) },
-                        onReset: {
-                            adjustments.resetColor()
-                            curvePickSamples.reset()
+                ScrollViewReader { proxy in
+                    VStack(spacing: 0) {
+                        CollapsibleSection(
+                            section: .transform,
+                            isExpanded: expandedSections.contains(.transform),
+                            hasChanges: adjustments.hasTransformAdjustments,
+                            onToggle: { toggleSection(.transform) },
+                            onReset: { adjustments.resetTransform() }
+                        ) {
+                            TransformAdjustmentsView(adjustments: $adjustments)
                         }
-                    ) {
-                        ColorAdjustmentsView(
-                            adjustments: $adjustments,
-                            curvePickSamples: $curvePickSamples,
-                            originalCIImage: originalCIImage,
-                            adjustedCIImage: adjustedCIImage,
-                            previewRevision: previewRevision,
-                            whiteBalancePickMode: $whiteBalancePickMode
-                        )
-                        .equatable()
-                    }
+                        .id(AdjustmentSection.transform)
 
-                    CollapsibleSection(
-                        section: .detail,
-                        isExpanded: expandedSections.contains(.detail),
-                        hasChanges: adjustments.hasDetailAdjustments,
-                        onToggle: { toggleSection(.detail) },
-                        onReset: { adjustments.resetDetail() }
-                    ) {
-                        DetailAdjustmentsView(adjustments: $adjustments)
+                        CollapsibleSection(
+                            section: .hdr,
+                            isExpanded: expandedSections.contains(.hdr),
+                            hasChanges: adjustments.hasHDRAdjustments,
+                            onToggle: { toggleSection(.hdr) },
+                            onReset: { resetHDRAdjustments() }
+                        ) {
+                            HDRAdjustmentsView(
+                                adjustments: $adjustments,
+                                displayHDRInfo: displayHDRInfo,
+                                autoHDRBrightness: autoHDRBrightness
+                            )
+                                .equatable()
+                        }
+                        .id(AdjustmentSection.hdr)
+
+                        CollapsibleSection(
+                            section: .basic,
+                            isExpanded: expandedSections.contains(.basic),
+                            hasChanges: adjustments.hasBasicAdjustments,
+                            onToggle: { toggleSection(.basic) },
+                            onReset: { adjustments.resetBasic() }
+                        ) {
+                            BasicAdjustmentsView(adjustments: $adjustments)
+                                .equatable()
+                        }
+                        .id(AdjustmentSection.basic)
+
+                        CollapsibleSection(
+                            section: .detail,
+                            isExpanded: expandedSections.contains(.detail),
+                            hasChanges: adjustments.hasDetailAdjustments,
+                            onToggle: { toggleSection(.detail) },
+                            onReset: { adjustments.resetDetail() }
+                        ) {
+                            DetailAdjustmentsView(adjustments: $adjustments)
+                                .equatable()
+                        }
+                        .id(AdjustmentSection.detail)
+
+                        CollapsibleSection(
+                            section: .color,
+                            isExpanded: expandedSections.contains(.color),
+                            hasChanges: adjustments.hasColorAdjustments,
+                            onToggle: { toggleSection(.color) },
+                            onReset: {
+                                adjustments.resetColor()
+                            }
+                        ) {
+                            ColorAdjustmentsView(
+                                adjustments: $adjustments,
+                                originalCIImage: originalCIImage,
+                                whiteBalancePickMode: $whiteBalancePickMode
+                            )
                             .equatable()
+                        }
+                        .id(AdjustmentSection.color)
+
+                        CollapsibleSection(
+                            section: .curve,
+                            isExpanded: expandedSections.contains(.curve),
+                            hasChanges: adjustments.hasCurveAdjustments,
+                            onToggle: { toggleSection(.curve) },
+                            onReset: {
+                                adjustments.resetCurve()
+                                curvePickSamples.reset()
+                            }
+                        ) {
+                            CurveAdjustmentView(
+                                adjustments: $adjustments,
+                                ciImage: adjustedCIImage,
+                                pickMode: $whiteBalancePickMode,
+                                curvePickSamples: $curvePickSamples
+                            )
+                        }
+                        .id(AdjustmentSection.curve)
+                    }
+                    .onAppear {
+                        let scrollKey = "AdjustmentPanelScrollSection"
+                        if let saved = UserDefaults.standard.string(forKey: scrollKey),
+                           let section = AdjustmentSection(persistenceKey: saved) {
+                            proxy.scrollTo(section, anchor: .top)
+                        }
                     }
                 }
             }
@@ -500,6 +529,7 @@ struct AdjustmentPanel: View {
         } else {
             expandedSections.insert(section)
         }
+        saveScrollSection(section)
     }
 
     private func resetHDRAdjustments() {
@@ -796,6 +826,10 @@ struct AdjustmentPanel: View {
     ) -> Double {
         min(max(value, range.lowerBound), range.upperBound)
     }
+
+    private func saveScrollSection(_ section: AdjustmentSection) {
+        UserDefaults.standard.set(section.persistenceKey, forKey: "AdjustmentPanelScrollSection")
+    }
 }
 
 struct CollapsibleSection<Content: View>: View {
@@ -866,14 +900,15 @@ struct CollapsibleSection<Content: View>: View {
     }
 }
 
-enum AdjustmentSection: Hashable {
+enum AdjustmentSection: Hashable, CaseIterable {
     case transform
     case basic
     case hdr
     case color
     case detail
+    case curve
 
-    static let defaultExpandedSections: Set<AdjustmentSection> = [.transform, .basic, .hdr, .color, .detail]
+    static let defaultExpandedSections: Set<AdjustmentSection> = [.transform, .basic, .hdr, .color, .detail, .curve]
 
     var title: String {
         switch self {
@@ -882,53 +917,54 @@ enum AdjustmentSection: Hashable {
         case .hdr: "HDR"
         case .color: "色彩"
         case .detail: "细节"
+        case .curve: "曲线"
         }
     }
 
-    func view(
-        isExpanded: Bool,
-        hasChanges: Bool,
-        onToggle: @escaping () -> Void,
-        onReset: @escaping () -> Void,
-        @ViewBuilder content: () -> some View
-    ) -> some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                Button(action: onToggle) {
-                    HStack(spacing: 8) {
-                        Text(title)
-                            .font(.subheadline)
-                            .fontWeight(.medium)
+    /// 稳定的持久化标识
+    var persistenceKey: String {
+        switch self {
+        case .transform: "transform"
+        case .basic: "basic"
+        case .hdr: "hdr"
+        case .color: "color"
+        case .detail: "detail"
+        case .curve: "curve"
+        }
+    }
 
-                        Spacer()
+    init?(persistenceKey: String) {
+        let match = Self.allCases.first { $0.persistenceKey == persistenceKey }
+        guard let match else { return nil }
+        self = match
+    }
+}
 
-                        if hasChanges {
-                            Button(action: onReset) {
-                                Image(systemName: "arrow.uturn.backward")
-                                    .font(.body)
-                            }
-                            .buttonStyle(.borderless)
-                            .help("重置此组")
-                        }
+/// 支持 @AppStorage 持久化的展开状态包装
+struct PanelExpandedSections: RawRepresentable, Equatable {
+    var sections: Set<AdjustmentSection>
 
-                        Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-            .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
+    init() {
+        sections = AdjustmentSection.defaultExpandedSections
+    }
 
-            if isExpanded {
-                content()
-                    .padding(.vertical, 12)
-            }
+    init(sections: Set<AdjustmentSection>) {
+        self.sections = sections
+    }
 
-            Divider()
+    var rawValue: String {
+        sections.map(\.persistenceKey).sorted().joined(separator: ",")
+    }
+
+    init?(rawValue: String) {
+        guard !rawValue.isEmpty else {
+            self.sections = AdjustmentSection.defaultExpandedSections
+            return
+        }
+        let keys = Set(rawValue.split(separator: ",").map(String.init))
+        self.sections = Set(AdjustmentSection.allCases.filter { keys.contains($0.persistenceKey) })
+        if self.sections.isEmpty {
+            self.sections = AdjustmentSection.defaultExpandedSections
         }
     }
 }
@@ -1098,6 +1134,7 @@ private struct HDRAdjustmentsView: View, Equatable {
             guard adjustments.isHDRAutoAdjustmentEnabled else { return }
 
             applyMaximumHDRHeadroomIfNeeded()
+            applyAutoHDRBrightness(autoHDRBrightness)
         }
         .onChange(of: displayHDRInfo) { _, _ in
             guard adjustments.isHDRAutoAdjustmentEnabled else { return }
@@ -1141,10 +1178,7 @@ private struct HDRAdjustmentsView: View, Equatable {
 
 struct ColorAdjustmentsView: View, Equatable {
     @Binding var adjustments: ImageAdjustments
-    @Binding var curvePickSamples: CurvePickSamples
     let originalCIImage: CIImage?
-    let adjustedCIImage: CIImage?
-    let previewRevision: Int
     @Binding var whiteBalancePickMode: CurveAdjustmentView.PickMode
 
     static func == (lhs: ColorAdjustmentsView, rhs: ColorAdjustmentsView) -> Bool {
@@ -1152,13 +1186,7 @@ struct ColorAdjustmentsView: View, Equatable {
         lhs.adjustments.tint == rhs.adjustments.tint &&
         lhs.adjustments.saturation == rhs.adjustments.saturation &&
         lhs.adjustments.vibrance == rhs.adjustments.vibrance &&
-        lhs.adjustments.redCurve == rhs.adjustments.redCurve &&
-        lhs.adjustments.greenCurve == rhs.adjustments.greenCurve &&
-        lhs.adjustments.blueCurve == rhs.adjustments.blueCurve &&
-        lhs.adjustments.rgbCurve == rhs.adjustments.rgbCurve &&
-        lhs.curvePickSamples == rhs.curvePickSamples &&
         lhs.whiteBalancePickMode == rhs.whiteBalancePickMode &&
-        lhs.previewRevision == rhs.previewRevision &&
         (lhs.originalCIImage != nil) == (rhs.originalCIImage != nil)
     }
 
@@ -1230,17 +1258,6 @@ struct ColorAdjustmentsView: View, Equatable {
                 range: ImageAdjustments.vibranceRange,
                 step: 0.01
             )
-
-            Divider()
-                .padding(.vertical, 8)
-
-            // 曲线调整
-            WhiteBalanceAndCurveView(
-                adjustments: $adjustments,
-                curvePickSamples: $curvePickSamples,
-                adjustedCIImage: adjustedCIImage,
-                pickMode: $whiteBalancePickMode
-            )
         }
         .padding(.horizontal, 16)
     }
@@ -1261,25 +1278,6 @@ struct ColorAdjustmentsView: View, Equatable {
         } else {
             print("自动白平衡: ✗ 计算失败")
         }
-    }
-}
-
-// 白平衡和曲线调整包装视图
-// 将 CurveAdjustmentView 嵌入到面板中
-struct WhiteBalanceAndCurveView: View {
-    @Binding var adjustments: ImageAdjustments
-    @Binding var curvePickSamples: CurvePickSamples
-    let adjustedCIImage: CIImage?
-    @Binding var pickMode: CurveAdjustmentView.PickMode
-
-    var body: some View {
-        CurveAdjustmentView(
-            adjustments: $adjustments,
-            ciImage: adjustedCIImage,
-            pickMode: $pickMode,
-            curvePickSamples: $curvePickSamples
-        )
-        .padding(0)
     }
 }
 
@@ -1444,11 +1442,8 @@ struct SliderControl: View, Equatable {
             displayValue = steppedValue
         }
 
-        let binding = _value
-        DispatchQueue.main.async {
-            if abs(binding.wrappedValue - steppedValue) > 0.0001 {
-                binding.wrappedValue = steppedValue
-            }
+        if abs(_value.wrappedValue - steppedValue) > 0.0001 {
+            _value.wrappedValue = steppedValue
         }
     }
 
@@ -1483,9 +1478,9 @@ struct SliderControl: View, Equatable {
         }
 
         displayValue = resetValue
-        let binding = _value
-        DispatchQueue.main.async {
-            binding.wrappedValue = resetValue
+
+        if abs(_value.wrappedValue - resetValue) > 0.0001 {
+            _value.wrappedValue = resetValue
         }
     }
 }
@@ -1504,7 +1499,7 @@ struct SliderWithDoubleTap: NSViewRepresentable {
 
     func makeNSView(context: Context) -> TrackClickableSlider {
         let slider = TrackClickableSlider(value: value, minValue: range.lowerBound, maxValue: range.upperBound, target: context.coordinator, action: #selector(Coordinator.valueChanged(_:)))
-        slider.isContinuous = true  // 保持连续模式，配合节流机制
+        slider.isContinuous = true  // 保持连续模式
         slider.onDoubleClick = onDoubleTap
 
         return slider
