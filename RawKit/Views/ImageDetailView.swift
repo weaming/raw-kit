@@ -31,10 +31,12 @@ struct ImageDetailView: View {
         let adjustments: ImageAdjustments
         let showOriginal: Bool
         let isCropPreview: Bool
+        let retryCount: Int
     }
 
     private struct RenderSnapshot: @unchecked Sendable {
         let requestID: Int
+        let retryCount: Int
         let originalImage: CIImage
         let sourceHDRHeadroom: Double?
         let viewportSize: CGSize
@@ -45,6 +47,7 @@ struct ImageDetailView: View {
 
     private struct RenderOutput: @unchecked Sendable {
         let requestID: Int
+        let requestRetryCount: Int
         let image: CIImage
         let displayResult: ImageProcessor.DisplayCGImageResult?
         let adjustments: ImageAdjustments
@@ -69,7 +72,7 @@ struct ImageDetailView: View {
     @State private var previewRevision = 0
     @State private var displayImage: NSImage?
     @State private var displayImageIsHDR = false
-    @State private var displayImageID = UUID() // 用于强制刷新视图
+    @State private var displayImageID = UUID() // HDR 状态变化时强制重建视图
     @State private var isLoading = true
     @State private var loadingStage: LoadingStage = .thumbnail
     @State private var scale: CGFloat = 1.0
@@ -325,7 +328,8 @@ struct ImageDetailView: View {
                 id: nextRenderRequestID,
                 adjustments: editingState.adjustments,
                 showOriginal: showOriginal,
-                isCropPreview: isCropModeEnabled
+                isCropPreview: isCropModeEnabled,
+                retryCount: 0
             )
             latestRenderRequestID = request.id
             return request
@@ -346,6 +350,7 @@ struct ImageDetailView: View {
 
             return RenderSnapshot(
                 requestID: request.id,
+                retryCount: request.retryCount,
                 originalImage: originalImage,
                 sourceHDRHeadroom: imageInfo.hdrHeadroom,
                 viewportSize: viewportSize,
@@ -368,7 +373,14 @@ struct ImageDetailView: View {
             }
 
             guard let displayResult = output.displayResult else {
-                print("ImageDetailView: display render returned nil, skipping display update")
+                // 渲染失败时最多重试一次，避免无限循环
+                let retryCount = output.requestRetryCount
+                if retryCount < 2 {
+                    print("ImageDetailView: display render returned nil (retry \(retryCount)/2), retrying")
+                    enqueueRender(editingState.adjustments, retryCount: retryCount + 1)
+                } else {
+                    print("ImageDetailView: display render returned nil after \(retryCount) retries, giving up")
+                }
                 return
             }
 
@@ -470,12 +482,32 @@ struct ImageDetailView: View {
         let outputImage = snapshot.showOriginal
             ? scaledImage
             : ImageProcessor.applyAdjustments(to: scaledImage, adjustments: previewAdjustments)
+
         let displayAdjustments = snapshot.showOriginal
             ? ImageAdjustments.sourceHDRBaseline(headroom: snapshot.sourceHDRHeadroom)
             : snapshot.adjustments
 
+        // 诊断：检测调整后的 CIImage extent 是否有效
+        let outputExtent = outputImage.extent
+        if outputExtent.isEmpty || outputExtent.isInfinite {
+            print("ImageDetailView: ⚠️ adjusted CIImage extent invalid (isEmpty=\(outputExtent.isEmpty), isInfinite=\(outputExtent.isInfinite)), using scaled original")
+            return RenderOutput(
+                requestID: snapshot.requestID,
+                requestRetryCount: snapshot.retryCount,
+                image: scaledImage,
+                displayResult: ImageProcessor.convertToDisplayCGImage(
+                    scaledImage,
+                    adjustments: displayAdjustments
+                ),
+                adjustments: snapshot.adjustments,
+                showOriginal: snapshot.showOriginal,
+                isCropPreview: snapshot.isCropPreview
+            )
+        }
+
         return RenderOutput(
             requestID: snapshot.requestID,
+            requestRetryCount: snapshot.retryCount,
             image: outputImage,
             displayResult: ImageProcessor.convertToDisplayCGImage(
                 outputImage,
@@ -612,14 +644,15 @@ struct ImageDetailView: View {
     }
 
     @MainActor
-    private func enqueueRender(_ adjustments: ImageAdjustments) {
+    private func enqueueRender(_ adjustments: ImageAdjustments, retryCount: Int = 0) {
         ensureRenderQueue()
         nextRenderRequestID += 1
         let request = RenderRequest(
             id: nextRenderRequestID,
             adjustments: adjustments,
             showOriginal: showOriginal,
-            isCropPreview: isCropModeEnabled
+            isCropPreview: isCropModeEnabled,
+            retryCount: retryCount
         )
         latestRenderRequestID = request.id
 
@@ -630,9 +663,13 @@ struct ImageDetailView: View {
 
     @MainActor
     private func setDisplayImage(_ image: NSImage, isHDR: Bool) {
+        let hdrChanged = displayImageIsHDR != isHDR
         displayImage = image
         displayImageIsHDR = isHDR
-        displayImageID = UUID()
+        // 仅在 HDR 状态变化时重建视图；常规刷新走 updateNSView 更新 image 属性
+        if hdrChanged {
+            displayImageID = UUID()
+        }
     }
 
     @MainActor

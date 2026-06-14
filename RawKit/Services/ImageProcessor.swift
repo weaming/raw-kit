@@ -2062,7 +2062,7 @@ class ImageProcessor {
             return DisplayCGImageResult(cgImage: cgImage, isHDR: true, didFallbackToSDR: false)
         }
 
-        print("ImageProcessor: HDR display render failed, falling back to SDR")
+        print("ImageProcessor: HDR display render failed (extent=\(extent.size.width.rounded())x\(extent.size.height.rounded()), headroom=\(adjustments.hdrHeadroom)), falling back to SDR")
         guard let sdrCGImage = convertToCGImage(ciImage) else {
             print("ImageProcessor: SDR fallback render also failed")
             return nil

@@ -920,6 +920,10 @@ struct ClickableImageRepresentable: NSViewRepresentable {
 
         // 更新图像
         nsView.imageView.image = image
+        // 强制标记需要重绘，避免 HDR 场景下 imageView 不刷新
+        if imageChanged {
+            nsView.imageView.setNeedsDisplay(nsView.imageView.bounds)
+        }
 
         // 回调函数总是更新
         nsView.onScrollWheel = onScrollWheel
