@@ -152,7 +152,9 @@ final class ImageEditingSession: Identifiable {
                 with: adjustments
             )
         } else {
-            thumbnailManager.clearThumbnail(for: imageInfo.id)
+            // 没有调整时，生成基础缩略图（显示原图）而不是清除所有缩略图
+            // 修复：避免 clearThumbnail 同时清除 base 和 adjusted 导致缩略图消失
+            thumbnailManager.generateBaseThumbnail(for: imageInfo)
         }
     }
 }
