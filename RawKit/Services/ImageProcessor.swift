@@ -5,156 +5,188 @@ import UniformTypeIdentifiers
 import simd
 
 class ImageProcessor {
-    struct DisplayCGImageResult {
-        let cgImage: CGImage
-        let isHDR: Bool
-        let didFallbackToSDR: Bool
+  struct DisplayCGImageResult {
+    let cgImage: CGImage
+    let isHDR: Bool
+    let didFallbackToSDR: Bool
+  }
+
+  private final class CachedSourceImage: NSObject {
+    let image: CIImage
+
+    init(image: CIImage) {
+      self.image = image
+    }
+  }
+
+  private struct LUTCacheKey: Hashable {
+    let path: String
+    let modificationTime: TimeInterval
+    let fileSize: Int64
+  }
+
+  private struct SourceImageCacheKey: Hashable {
+    let path: String
+    let modificationTime: TimeInterval
+    let fileSize: Int64
+  }
+
+  private enum X3fConverterTool {
+    case x3fGo(URL)
+    case x3fExtract(URL)
+  }
+
+  private static var lutCache: [LUTCacheKey: (data: Data, size: Int)] = [:]
+  private static var lutCacheOrder: [LUTCacheKey] = []
+  private static let lutCacheLimit = 16
+  private static let lutCacheLock = NSLock()
+  private static let sourceImageMemoryLimit = 512 * 1024 * 1024
+  private static let x3fDiskCacheMaxSize = 20 * 1024 * 1024 * 1024
+  private static let x3fDiskCacheMaxAge: TimeInterval = 14 * 24 * 60 * 60
+  private static let x3fDiskCacheLock = NSLock()
+  private static let executableSearchPathLock = NSLock()
+  private static var cachedExecutableSearchPaths: [String]?
+  private static let sourceImageCache: NSCache<NSString, CachedSourceImage> = {
+    let cache = NSCache<NSString, CachedSourceImage>()
+    cache.name = "RawKit.SourceImageCache"
+    cache.totalCostLimit = sourceImageMemoryLimit
+    return cache
+  }()
+
+  private struct ChromaticityPoint {
+    let x: Double
+    let y: Double
+  }
+
+  private struct RGBPrimaries {
+    let red: ChromaticityPoint
+    let green: ChromaticityPoint
+    let blue: ChromaticityPoint
+    let white: ChromaticityPoint
+
+    var rgbToXYZ: simd_double3x3 {
+      let r = SIMD3<Double>(
+        red.x / red.y,
+        1.0,
+        (1.0 - red.x - red.y) / red.y
+      )
+      let g = SIMD3<Double>(
+        green.x / green.y,
+        1.0,
+        (1.0 - green.x - green.y) / green.y
+      )
+      let b = SIMD3<Double>(
+        blue.x / blue.y,
+        1.0,
+        (1.0 - blue.x - blue.y) / blue.y
+      )
+      let whiteXYZ = SIMD3<Double>(
+        white.x / white.y,
+        1.0,
+        (1.0 - white.x - white.y) / white.y
+      )
+
+      let primaries = simd_double3x3(columns: (r, g, b))
+      let scale = simd_inverse(primaries) * whiteXYZ
+      return simd_double3x3(
+        columns: (
+          r * scale.x,
+          g * scale.y,
+          b * scale.z
+        ))
     }
 
-    private struct LUTCacheKey: Hashable {
-        let path: String
-        let modificationTime: TimeInterval
-        let fileSize: Int64
+    var xyzToRGB: simd_double3x3 {
+      simd_inverse(rgbToXYZ)
+    }
+  }
+
+  private struct AutoWhiteBalanceSample {
+    let r: Double
+    let g: Double
+    let b: Double
+    let luminance: Double
+    let maxComponent: Double
+    let chroma: Double
+  }
+
+  private struct AutoWhiteBalanceEstimate {
+    let sample: (r: Double, g: Double, b: Double)
+    let candidateCount: Int
+    let luminanceRange: (lower: Double, upper: Double)
+    let chromaCutoff: Double
+  }
+
+  private struct RawShootingMetadata {
+    let neutralTemperature: Double?
+    let neutralTint: Double?
+    let ev: Double?
+    let boost: Double?
+    let baselineExposure: Double?
+    let isVendorLensCorrectionEnabled: Bool?
+  }
+
+  private enum LUTTransferMode: Int {
+    case linear = 0
+    case sRGB = 1
+    case gamma22 = 2
+    case gamma24 = 3
+    case gamma26 = 4
+    case rec709 = 5
+    case hlg = 6
+    case pq = 7
+    case fLog = 8
+    case fLog2 = 9
+    case fLog2C = 10
+    case sLog2 = 11
+    case sLog3 = 12
+    case dLog = 13
+    case canonLog3 = 14
+    case vLog = 15
+
+    init(_ transferFunction: LUTTransferFunction) {
+      switch transferFunction {
+      case .linear:
+        self = .linear
+      case .sRGB:
+        self = .sRGB
+      case .gamma22:
+        self = .gamma22
+      case .gamma24:
+        self = .gamma24
+      case .gamma26:
+        self = .gamma26
+      case .rec709:
+        self = .rec709
+      case .hlg:
+        self = .hlg
+      case .pq:
+        self = .pq
+      case .fLog:
+        self = .fLog
+      case .fLog2:
+        self = .fLog2
+      case .fLog2C:
+        self = .fLog2C
+      case .sLog2:
+        self = .sLog2
+      case .sLog3:
+        self = .sLog3
+      case .dLog:
+        self = .dLog
+      case .canonLog3:
+        self = .canonLog3
+      case .vLog:
+        self = .vLog
+      }
     }
 
-    private static var lutCache: [LUTCacheKey: (data: Data, size: Int)] = [:]
-    private static var lutCacheOrder: [LUTCacheKey] = []
-    private static let lutCacheLimit = 16
-    private static let lutCacheLock = NSLock()
-
-    private struct ChromaticityPoint {
-        let x: Double
-        let y: Double
+    var kernelValue: CGFloat {
+      CGFloat(rawValue)
     }
+  }
 
-    private struct RGBPrimaries {
-        let red: ChromaticityPoint
-        let green: ChromaticityPoint
-        let blue: ChromaticityPoint
-        let white: ChromaticityPoint
-
-        var rgbToXYZ: simd_double3x3 {
-            let r = SIMD3<Double>(
-                red.x / red.y,
-                1.0,
-                (1.0 - red.x - red.y) / red.y
-            )
-            let g = SIMD3<Double>(
-                green.x / green.y,
-                1.0,
-                (1.0 - green.x - green.y) / green.y
-            )
-            let b = SIMD3<Double>(
-                blue.x / blue.y,
-                1.0,
-                (1.0 - blue.x - blue.y) / blue.y
-            )
-            let whiteXYZ = SIMD3<Double>(
-                white.x / white.y,
-                1.0,
-                (1.0 - white.x - white.y) / white.y
-            )
-
-            let primaries = simd_double3x3(columns: (r, g, b))
-            let scale = simd_inverse(primaries) * whiteXYZ
-            return simd_double3x3(columns: (
-                r * scale.x,
-                g * scale.y,
-                b * scale.z
-            ))
-        }
-
-        var xyzToRGB: simd_double3x3 {
-            simd_inverse(rgbToXYZ)
-        }
-    }
-
-    private struct AutoWhiteBalanceSample {
-        let r: Double
-        let g: Double
-        let b: Double
-        let luminance: Double
-        let maxComponent: Double
-        let chroma: Double
-    }
-
-    private struct AutoWhiteBalanceEstimate {
-        let sample: (r: Double, g: Double, b: Double)
-        let candidateCount: Int
-        let luminanceRange: (lower: Double, upper: Double)
-        let chromaCutoff: Double
-    }
-
-    private struct RawShootingMetadata {
-        let neutralTemperature: Double?
-        let neutralTint: Double?
-        let ev: Double?
-        let boost: Double?
-        let baselineExposure: Double?
-        let isVendorLensCorrectionEnabled: Bool?
-    }
-
-    private enum LUTTransferMode: Int {
-        case linear = 0
-        case sRGB = 1
-        case gamma22 = 2
-        case gamma24 = 3
-        case gamma26 = 4
-        case rec709 = 5
-        case hlg = 6
-        case pq = 7
-        case fLog = 8
-        case fLog2 = 9
-        case fLog2C = 10
-        case sLog2 = 11
-        case sLog3 = 12
-        case dLog = 13
-        case canonLog3 = 14
-        case vLog = 15
-
-        init(_ transferFunction: LUTTransferFunction) {
-            switch transferFunction {
-            case .linear:
-                self = .linear
-            case .sRGB:
-                self = .sRGB
-            case .gamma22:
-                self = .gamma22
-            case .gamma24:
-                self = .gamma24
-            case .gamma26:
-                self = .gamma26
-            case .rec709:
-                self = .rec709
-            case .hlg:
-                self = .hlg
-            case .pq:
-                self = .pq
-            case .fLog:
-                self = .fLog
-            case .fLog2:
-                self = .fLog2
-            case .fLog2C:
-                self = .fLog2C
-            case .sLog2:
-                self = .sLog2
-            case .sLog3:
-                self = .sLog3
-            case .dLog:
-                self = .dLog
-            case .canonLog3:
-                self = .canonLog3
-            case .vLog:
-                self = .vLog
-            }
-        }
-
-        var kernelValue: CGFloat {
-            CGFloat(rawValue)
-        }
-    }
-
-    private static let colorKernelHelpers = """
+  private static let colorKernelHelpers = """
     float positive(float value) {
         return max(value, 0.0);
     }
@@ -534,2545 +566,2878 @@ class ImageProcessor {
     }
     """
 
-    private static let colorMetalKernelSource = """
+  private static let colorMetalKernelSource = """
     #include <CoreImage/CoreImage.h>
     using namespace metal;
     extern "C" namespace coreimage {
     """ + colorKernelHelpers + """
-    [[ stitchable ]] float4 lutInputTransform(sample_t image, float3 row0, float3 row1, float3 row2, float transferMode, float preserveHDRHighlights) {
-        float3 linearColor = applyMatrix(image.rgb, row0, row1, row2);
-        float maxComponent = max(linearColor.r, max(linearColor.g, linearColor.b));
-        float scale = lutHDRCompressionScale(maxComponent, preserveHDRHighlights);
-        float3 normalizedColor = linearColor / scale;
-        float3 encodedColor = encodeTransfer(normalizedColor, transferMode);
-        return float4(encodedColor, image.a);
+      [[ stitchable ]] float4 lutInputTransform(sample_t image, float3 row0, float3 row1, float3 row2, float transferMode, float preserveHDRHighlights) {
+          float3 linearColor = applyMatrix(image.rgb, row0, row1, row2);
+          float maxComponent = max(linearColor.r, max(linearColor.g, linearColor.b));
+          float scale = lutHDRCompressionScale(maxComponent, preserveHDRHighlights);
+          float3 normalizedColor = linearColor / scale;
+          float3 encodedColor = encodeTransfer(normalizedColor, transferMode);
+          return float4(encodedColor, image.a);
+      }
+
+      [[ stitchable ]] float4 lutOutputTransform(sample_t image, sample_t originalImage, float3 row0, float3 row1, float3 row2, float transferMode, float preserveHDRHighlights) {
+          float3 linearColor = decodeTransfer(image.rgb, transferMode);
+          float3 workingColor = applyMatrix(linearColor, row0, row1, row2);
+          float maxComponent = max(originalImage.r, max(originalImage.g, originalImage.b));
+          float highlightScale = lutHDRCompressionScale(maxComponent, preserveHDRHighlights);
+          return float4(workingColor * highlightScale, originalImage.a);
+      }
+
+      [[ stitchable ]] float4 perceptualLuminanceShift(sample_t image, float amount, float pivot, float focusSigma, float maxShift) {
+          float3 safeColor = max(image.rgb, float3(0.0));
+          float luminance = sceneLuminance(safeColor);
+
+          if (luminance <= 1e-6 || fabs(amount) <= 1e-6) {
+              return float4(safeColor, image.a);
+          }
+
+          float compressedLuma = compressPerceptualLuminance(luminance);
+          float displayLuma = encodeSRGBValue(compressedLuma);
+          float weight = tonalWeight(displayLuma, pivot, focusSigma);
+          float shiftedDisplayLuma = logisticValue(logitValue(displayLuma) + amount * maxShift * weight);
+          float shiftedCompressedLuma = decodeSRGBValue(shiftedDisplayLuma);
+          float shiftedLuminance = expandPerceptualLuminance(shiftedCompressedLuma);
+          float scale = safeLuminanceScale(luminance, shiftedLuminance);
+
+          return float4(safeColor * scale, image.a);
+      }
+
+      [[ stitchable ]] float4 hdrContrastAdjust(sample_t image, float amount) {
+          float3 safeColor = max(image.rgb, float3(0.0));
+          float luminance = sceneLuminance(safeColor);
+
+          if (luminance <= 1e-6 || fabs(amount) <= 1e-6) {
+              return float4(safeColor, image.a);
+          }
+
+          float compressedLuma = compressPerceptualLuminance(luminance);
+          float displayLuma = encodeSRGBValue(compressedLuma);
+          float pivot = 0.5;
+          float contrastScale = max(0.05, 1.0 + amount * 0.58);
+          float shiftedDisplayLuma = logisticValue((logitValue(displayLuma) - logitValue(pivot)) * contrastScale + logitValue(pivot));
+          float shiftedCompressedLuma = decodeSRGBValue(shiftedDisplayLuma);
+          float shiftedLuminance = expandPerceptualLuminance(shiftedCompressedLuma);
+          float scale = safeLuminanceScale(luminance, shiftedLuminance);
+
+          return float4(safeColor * scale, image.a);
+      }
+
+      [[ stitchable ]] float4 hdrTonalRangeAdjust(sample_t image, float highlights, float shadows, float whites, float blacks) {
+          float3 safeColor = max(image.rgb, float3(0.0));
+          float luminance = sceneLuminance(safeColor);
+
+          if (luminance <= 1e-6) {
+              return float4(safeColor, image.a);
+          }
+
+          float compressedLuma = compressPerceptualLuminance(luminance);
+          float displayLuma = encodeSRGBValue(compressedLuma);
+          float blackWeight = 1.0 - smoothstep(0.06, 0.28, displayLuma);
+          float shadowWeight = smoothstep(0.08, 0.28, displayLuma) * (1.0 - smoothstep(0.42, 0.64, displayLuma));
+          float highlightWeight = smoothstep(0.45, 0.68, displayLuma) * (1.0 - smoothstep(0.84, 0.98, displayLuma));
+          float whiteWeight = smoothstep(0.72, 0.96, displayLuma);
+          float shift =
+              blacks * 0.80 * blackWeight +
+              shadows * 0.55 * shadowWeight +
+              (highlights - 1.0) * 0.48 * highlightWeight +
+              whites * 0.68 * whiteWeight;
+
+          if (fabs(shift) <= 1e-6) {
+              return float4(safeColor, image.a);
+          }
+
+          float shiftedDisplayLuma = logisticValue(logitValue(displayLuma) + shift);
+          float shiftedCompressedLuma = decodeSRGBValue(shiftedDisplayLuma);
+          float shiftedLuminance = expandPerceptualLuminance(shiftedCompressedLuma);
+          float scale = safeLuminanceScale(luminance, shiftedLuminance);
+
+          return float4(safeColor * scale, image.a);
+      }
+
+      [[ stitchable ]] float4 hdrColorfulnessAdjust(sample_t image, float saturation, float vibrance) {
+          float3 safeColor = max(image.rgb, float3(0.0));
+          float luminance = sceneLuminance(safeColor);
+          float3 grayColor = float3(luminance);
+          float maxComponent = max(safeColor.r, max(safeColor.g, safeColor.b));
+          float minComponent = min(safeColor.r, min(safeColor.g, safeColor.b));
+          float chroma = (maxComponent - minComponent) / max(maxComponent, 1e-5);
+          float lowChromaWeight = 1.0 - smoothstep(0.04, 0.78, chroma);
+          float positiveVibrance = max(vibrance, 0.0) * lowChromaWeight;
+          float negativeVibrance = min(vibrance, 0.0) * mix(0.55, 1.0, smoothstep(0.0, 0.85, chroma));
+          float vibranceScale = 1.0 + (positiveVibrance + negativeVibrance) * 1.25;
+          float saturationScale = max(0.0, saturation * vibranceScale);
+          float3 adjustedColor = grayColor + (safeColor - grayColor) * saturationScale;
+
+          return float4(max(adjustedColor, float3(0.0)), image.a);
+      }
+
+      [[ stitchable ]] float4 hdrDisplayBoost(sample_t image, float brightness, float highlights, float whites, float headroom) {
+          float3 safeColor = max(image.rgb, float3(0.0));
+          float luminance = sceneLuminance(safeColor);
+
+          if (luminance <= 1e-6) {
+              return float4(safeColor, image.a);
+          }
+
+          float displayLuma = encodeSRGBValue(compressPerceptualLuminance(luminance));
+          float highlightWeight = smoothstep(0.48, 0.88, displayLuma);
+          float whiteWeight = smoothstep(0.76, 0.98, displayLuma);
+
+          float baseScale = pow(2.0, brightness * 0.65);
+          float highlightScale = 1.0 + highlights * 1.10 * highlightWeight;
+          float whiteScale = 1.0 + whites * 1.60 * whiteWeight;
+          float combinedScale = max(0.05, baseScale * max(0.05, highlightScale) * max(0.05, whiteScale));
+
+          float3 boostedColor = safeColor * combinedScale;
+          float safeHeadroom = max(headroom, 1.0);
+          float3 shoulder = safeHeadroom * boostedColor / (boostedColor + safeHeadroom);
+          float3 protectedColor = mix(boostedColor, shoulder, smoothstep(safeHeadroom * 0.72, safeHeadroom * 1.35, boostedColor));
+
+          return float4(min(protectedColor, float3(safeHeadroom)), image.a);
+      }
+      }
+      """
+
+  private static let colorKernels: [String: CIColorKernel] = {
+    do {
+      let kernels = try CIKernel.kernels(withMetalString: colorMetalKernelSource)
+      return kernels.reduce(into: [String: CIColorKernel]()) { result, kernel in
+        if let colorKernel = kernel as? CIColorKernel {
+          result[colorKernel.name] = colorKernel
+        }
+      }
+    } catch {
+      print("ImageProcessor: ⚠️ Metal kernel 编译失败: \(error)")
+      return [:]
+    }
+  }()
+
+  private static let lutInputTransformKernel: CIColorKernel? = colorKernels["lutInputTransform"]
+
+  private static let lutOutputTransformKernel: CIColorKernel? = colorKernels["lutOutputTransform"]
+
+  private static let perceptualLuminanceShiftKernel: CIColorKernel? = colorKernels[
+    "perceptualLuminanceShift"]
+
+  private static let hdrContrastAdjustKernel: CIColorKernel? = colorKernels["hdrContrastAdjust"]
+
+  private static let hdrTonalRangeAdjustKernel: CIColorKernel? = colorKernels["hdrTonalRangeAdjust"]
+
+  private static let hdrColorfulnessAdjustKernel: CIColorKernel? = colorKernels[
+    "hdrColorfulnessAdjust"]
+
+  private static let hdrDisplayBoostKernel: CIColorKernel? = colorKernels["hdrDisplayBoost"]
+
+  // 使用 CIContextManager 替代直接创建 context
+  // CIContext 本身是线程安全的，通过 Manager 的 nonisolated getter 访问
+  private static var ciContext: CIContext {
+    CIContextManager.shared.getRenderContext()
+  }
+
+  private static var standardDisplayColorSpace: CGColorSpace {
+    CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+  }
+
+  private static func isRawFormat(_ ext: String) -> Bool {
+    ["arw", "cr2", "cr3", "nef", "orf", "raf", "rw2"].contains(ext)
+  }
+
+  private static func sourceImageCacheKey(for url: URL) -> SourceImageCacheKey? {
+    guard
+      let values = try? url.resourceValues(forKeys: [
+        .contentModificationDateKey,
+        .fileSizeKey,
+      ]),
+      let modificationDate = values.contentModificationDate
+    else {
+      return nil
     }
 
-    [[ stitchable ]] float4 lutOutputTransform(sample_t image, sample_t originalImage, float3 row0, float3 row1, float3 row2, float transferMode, float preserveHDRHighlights) {
-        float3 linearColor = decodeTransfer(image.rgb, transferMode);
-        float3 workingColor = applyMatrix(linearColor, row0, row1, row2);
-        float maxComponent = max(originalImage.r, max(originalImage.g, originalImage.b));
-        float highlightScale = lutHDRCompressionScale(maxComponent, preserveHDRHighlights);
-        return float4(workingColor * highlightScale, originalImage.a);
+    return SourceImageCacheKey(
+      path: url.standardizedFileURL.path,
+      modificationTime: modificationDate.timeIntervalSince1970,
+      fileSize: Int64(values.fileSize ?? 0)
+    )
+  }
+
+  private static func sourceImageCacheNSStringKey(for key: SourceImageCacheKey) -> NSString {
+    "\(key.path)|\(key.modificationTime)|\(key.fileSize)" as NSString
+  }
+
+  private static func cachedSourceImage(for url: URL) -> CIImage? {
+    guard let cacheKey = sourceImageCacheKey(for: url) else {
+      return nil
     }
 
-    [[ stitchable ]] float4 perceptualLuminanceShift(sample_t image, float amount, float pivot, float focusSigma, float maxShift) {
-        float3 safeColor = max(image.rgb, float3(0.0));
-        float luminance = sceneLuminance(safeColor);
+    return sourceImageCache.object(forKey: sourceImageCacheNSStringKey(for: cacheKey))?.image
+  }
 
-        if (luminance <= 1e-6 || fabs(amount) <= 1e-6) {
-            return float4(safeColor, image.a);
-        }
-
-        float compressedLuma = compressPerceptualLuminance(luminance);
-        float displayLuma = encodeSRGBValue(compressedLuma);
-        float weight = tonalWeight(displayLuma, pivot, focusSigma);
-        float shiftedDisplayLuma = logisticValue(logitValue(displayLuma) + amount * maxShift * weight);
-        float shiftedCompressedLuma = decodeSRGBValue(shiftedDisplayLuma);
-        float shiftedLuminance = expandPerceptualLuminance(shiftedCompressedLuma);
-        float scale = safeLuminanceScale(luminance, shiftedLuminance);
-
-        return float4(safeColor * scale, image.a);
+  private static func removeCachedSourceImage(for url: URL) {
+    guard let cacheKey = sourceImageCacheKey(for: url) else {
+      return
     }
 
-    [[ stitchable ]] float4 hdrContrastAdjust(sample_t image, float amount) {
-        float3 safeColor = max(image.rgb, float3(0.0));
-        float luminance = sceneLuminance(safeColor);
+    sourceImageCache.removeObject(forKey: sourceImageCacheNSStringKey(for: cacheKey))
+  }
 
-        if (luminance <= 1e-6 || fabs(amount) <= 1e-6) {
-            return float4(safeColor, image.a);
-        }
-
-        float compressedLuma = compressPerceptualLuminance(luminance);
-        float displayLuma = encodeSRGBValue(compressedLuma);
-        float pivot = 0.5;
-        float contrastScale = max(0.05, 1.0 + amount * 0.58);
-        float shiftedDisplayLuma = logisticValue((logitValue(displayLuma) - logitValue(pivot)) * contrastScale + logitValue(pivot));
-        float shiftedCompressedLuma = decodeSRGBValue(shiftedDisplayLuma);
-        float shiftedLuminance = expandPerceptualLuminance(shiftedCompressedLuma);
-        float scale = safeLuminanceScale(luminance, shiftedLuminance);
-
-        return float4(safeColor * scale, image.a);
+  private static func cacheSourceImage(_ image: CIImage, for url: URL) {
+    guard let cacheKey = sourceImageCacheKey(for: url) else {
+      return
     }
 
-    [[ stitchable ]] float4 hdrTonalRangeAdjust(sample_t image, float highlights, float shadows, float whites, float blacks) {
-        float3 safeColor = max(image.rgb, float3(0.0));
-        float luminance = sceneLuminance(safeColor);
+    sourceImageCache.setObject(
+      CachedSourceImage(image: image),
+      forKey: sourceImageCacheNSStringKey(for: cacheKey),
+      cost: sourceImageCost(for: image, fileURL: url)
+    )
+  }
 
-        if (luminance <= 1e-6) {
-            return float4(safeColor, image.a);
-        }
+  private static func sourceImageCost(for image: CIImage, fileURL: URL) -> Int {
+    let extent = image.extent.integral
+    let pixelCount = max(Int(extent.width), 1) * max(Int(extent.height), 1)
+    let fileExtension = fileURL.pathExtension.lowercased()
 
-        float compressedLuma = compressPerceptualLuminance(luminance);
-        float displayLuma = encodeSRGBValue(compressedLuma);
-        float blackWeight = 1.0 - smoothstep(0.06, 0.28, displayLuma);
-        float shadowWeight = smoothstep(0.08, 0.28, displayLuma) * (1.0 - smoothstep(0.42, 0.64, displayLuma));
-        float highlightWeight = smoothstep(0.45, 0.68, displayLuma) * (1.0 - smoothstep(0.84, 0.98, displayLuma));
-        float whiteWeight = smoothstep(0.72, 0.96, displayLuma);
-        float shift =
-            blacks * 0.80 * blackWeight +
-            shadows * 0.55 * shadowWeight +
-            (highlights - 1.0) * 0.48 * highlightWeight +
-            whites * 0.68 * whiteWeight;
-
-        if (fabs(shift) <= 1e-6) {
-            return float4(safeColor, image.a);
-        }
-
-        float shiftedDisplayLuma = logisticValue(logitValue(displayLuma) + shift);
-        float shiftedCompressedLuma = decodeSRGBValue(shiftedDisplayLuma);
-        float shiftedLuminance = expandPerceptualLuminance(shiftedCompressedLuma);
-        float scale = safeLuminanceScale(luminance, shiftedLuminance);
-
-        return float4(safeColor * scale, image.a);
+    let bytesPerPixel: Int
+    if fileExtension == "exr" {
+      bytesPerPixel = 16
+    } else if fileExtension == "dng" || fileExtension == "x3f" || isRawFormat(fileExtension) {
+      bytesPerPixel = 12
+    } else {
+      bytesPerPixel = 8
     }
 
-    [[ stitchable ]] float4 hdrColorfulnessAdjust(sample_t image, float saturation, float vibrance) {
-        float3 safeColor = max(image.rgb, float3(0.0));
-        float luminance = sceneLuminance(safeColor);
-        float3 grayColor = float3(luminance);
-        float maxComponent = max(safeColor.r, max(safeColor.g, safeColor.b));
-        float minComponent = min(safeColor.r, min(safeColor.g, safeColor.b));
-        float chroma = (maxComponent - minComponent) / max(maxComponent, 1e-5);
-        float lowChromaWeight = 1.0 - smoothstep(0.04, 0.78, chroma);
-        float positiveVibrance = max(vibrance, 0.0) * lowChromaWeight;
-        float negativeVibrance = min(vibrance, 0.0) * mix(0.55, 1.0, smoothstep(0.0, 0.85, chroma));
-        float vibranceScale = 1.0 + (positiveVibrance + negativeVibrance) * 1.25;
-        float saturationScale = max(0.0, saturation * vibranceScale);
-        float3 adjustedColor = grayColor + (safeColor - grayColor) * saturationScale;
+    return max(pixelCount * bytesPerPixel, 1)
+  }
 
-        return float4(max(adjustedColor, float3(0.0)), image.a);
+  private static func isHighCostSourceFormat(_ url: URL) -> Bool {
+    let fileExtension = url.pathExtension.lowercased()
+    return fileExtension == "x3f" || fileExtension == "dng" || fileExtension == "exr"
+      || isRawFormat(fileExtension)
+  }
+
+  private static func shouldCacheSourceImage(_ image: CIImage, originalURL: URL, loadURL: URL)
+    -> Bool
+  {
+    if isHighCostSourceFormat(originalURL) || loadURL != originalURL {
+      return true
     }
 
-    [[ stitchable ]] float4 hdrDisplayBoost(sample_t image, float brightness, float highlights, float whites, float headroom) {
-        float3 safeColor = max(image.rgb, float3(0.0));
-        float luminance = sceneLuminance(safeColor);
+    let extent = image.extent.integral
+    let pixelCount = extent.width * extent.height
+    return pixelCount > 0 && pixelCount <= 24_000_000
+  }
 
-        if (luminance <= 1e-6) {
-            return float4(safeColor, image.a);
-        }
-
-        float displayLuma = encodeSRGBValue(compressPerceptualLuminance(luminance));
-        float highlightWeight = smoothstep(0.48, 0.88, displayLuma);
-        float whiteWeight = smoothstep(0.76, 0.98, displayLuma);
-
-        float baseScale = pow(2.0, brightness * 0.65);
-        float highlightScale = 1.0 + highlights * 1.10 * highlightWeight;
-        float whiteScale = 1.0 + whites * 1.60 * whiteWeight;
-        float combinedScale = max(0.05, baseScale * max(0.05, highlightScale) * max(0.05, whiteScale));
-
-        float3 boostedColor = safeColor * combinedScale;
-        float safeHeadroom = max(headroom, 1.0);
-        float3 shoulder = safeHeadroom * boostedColor / (boostedColor + safeHeadroom);
-        float3 protectedColor = mix(boostedColor, shoulder, smoothstep(safeHeadroom * 0.72, safeHeadroom * 1.35, boostedColor));
-
-        return float4(min(protectedColor, float3(safeHeadroom)), image.a);
-    }
-    }
-    """
-
-    private static let colorKernels: [String: CIColorKernel] = {
-        do {
-            let kernels = try CIKernel.kernels(withMetalString: colorMetalKernelSource)
-            return kernels.reduce(into: [String: CIColorKernel]()) { result, kernel in
-                if let colorKernel = kernel as? CIColorKernel {
-                    result[colorKernel.name] = colorKernel
-                }
-            }
-        } catch {
-            print("ImageProcessor: ⚠️ Metal kernel 编译失败: \(error)")
-            return [:]
-        }
-    }()
-
-    private static let lutInputTransformKernel: CIColorKernel? = colorKernels["lutInputTransform"]
-
-    private static let lutOutputTransformKernel: CIColorKernel? = colorKernels["lutOutputTransform"]
-
-    private static let perceptualLuminanceShiftKernel: CIColorKernel? = colorKernels["perceptualLuminanceShift"]
-
-    private static let hdrContrastAdjustKernel: CIColorKernel? = colorKernels["hdrContrastAdjust"]
-
-    private static let hdrTonalRangeAdjustKernel: CIColorKernel? = colorKernels["hdrTonalRangeAdjust"]
-
-    private static let hdrColorfulnessAdjustKernel: CIColorKernel? = colorKernels["hdrColorfulnessAdjust"]
-
-    private static let hdrDisplayBoostKernel: CIColorKernel? = colorKernels["hdrDisplayBoost"]
-
-    // 使用 CIContextManager 替代直接创建 context
-    // CIContext 本身是线程安全的，通过 Manager 的 nonisolated getter 访问
-    private static var ciContext: CIContext {
-        CIContextManager.shared.getRenderContext()
+  private static func resolvedLoadURL(for url: URL) -> URL {
+    guard url.pathExtension.lowercased() == "x3f" else {
+      return url
     }
 
-    private static var standardDisplayColorSpace: CGColorSpace {
-        CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+    return convertX3fToCachedDNG(from: url) ?? url
+  }
+
+  private static func x3fDiskCacheDirectory() -> URL {
+    FileManager.default.temporaryDirectory.appendingPathComponent("RawKit/X3F", isDirectory: true)
+  }
+
+  private static func x3fCachedDNGURL(for x3fURL: URL) -> URL? {
+    guard x3fURL.pathExtension.lowercased() == "x3f" else {
+      return nil
     }
 
-    private static func isRawFormat(_ ext: String) -> Bool {
-        ["arw", "cr2", "cr3", "nef", "orf", "raf", "rw2"].contains(ext)
+    let baseFilename = x3fURL.deletingPathExtension().lastPathComponent
+    let pathHash = stablePathHash(for: x3fURL)
+    return x3fDiskCacheDirectory().appendingPathComponent("\(baseFilename)_\(pathHash)_linear.dng")
+  }
+
+  private static func fishExecutableURL() -> URL? {
+    let candidatePaths = [
+      "/opt/homebrew/bin/fish",
+      "/usr/local/bin/fish",
+      "/usr/bin/fish",
+      "/bin/fish",
+    ]
+
+    for candidatePath in candidatePaths
+    where FileManager.default.isExecutableFile(atPath: candidatePath) {
+      return URL(fileURLWithPath: candidatePath)
     }
 
-    static func loadThumbnail(from url: URL) -> CIImage? {
-        guard FileManager.default.fileExists(atPath: url.path) else {
-            return nil
-        }
+    return nil
+  }
 
-        let fileExtension = url.pathExtension.lowercased()
-        let targetSize: CGFloat = 512
-
-        // 优化：对所有格式（包括 RAW）统一使用 CGImageSource 缩略图 API
-        // 这比先加载全尺寸再缩放快 4-8 倍
-        guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil) else {
-            return nil
-        }
-
-        var thumbnailOptions: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: targetSize,
-        ]
-
-        // RAW 文件特殊优化：使用子采样加速解码
-        if fileExtension == "dng" || isRawFormat(fileExtension) {
-            // kCGImageSourceSubsampleFactor: 让 Core Graphics 在解码时直接采样
-            // 4 = 使用 1/4 分辨率解码，速度提升 75%
-            thumbnailOptions[kCGImageSourceSubsampleFactor as CFString] = 4
-        }
-
-        guard let thumbnail = CGImageSourceCreateThumbnailAtIndex(
-            imageSource,
-            0,
-            thumbnailOptions as CFDictionary
-        ) else {
-            return nil
-        }
-
-        return CIImage(cgImage: thumbnail)
+  private static func fishLoginPATH() -> String? {
+    guard let fishURL = fishExecutableURL() else {
+      return nil
     }
 
-    static func loadSquareThumbnail(from url: URL, maxPixelSize: CGFloat = 512) -> CIImage? {
-        let fileExtension = url.pathExtension.lowercased()
-        let thumbnail: CIImage?
+    let process = Process()
+    process.executableURL = fishURL
+    process.arguments = ["-lc", "string join ':' $PATH"]
 
-        if fileExtension == "dng" || isRawFormat(fileExtension) {
-            thumbnail = loadThumbnail(from: url)
-        } else {
-            thumbnail = loadFullImageThumbnail(from: url, maxPixelSize: maxPixelSize)
+    let outputPipe = Pipe()
+    process.standardOutput = outputPipe
+    process.standardError = Pipe()
+
+    do {
+      try process.run()
+      process.waitUntilExit()
+    } catch {
+      return nil
+    }
+
+    guard process.terminationStatus == 0 else {
+      return nil
+    }
+
+    let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+    guard var pathValue = String(data: outputData, encoding: .utf8) else {
+      return nil
+    }
+
+    pathValue = pathValue.trimmingCharacters(in: .whitespacesAndNewlines)
+    return pathValue.isEmpty ? nil : pathValue
+  }
+
+  private static func executableSearchPaths() -> [String] {
+    executableSearchPathLock.lock()
+    defer { executableSearchPathLock.unlock() }
+
+    if let cachedExecutableSearchPaths {
+      return cachedExecutableSearchPaths
+    }
+
+    var orderedPaths: [String] = []
+    var seenPaths = Set<String>()
+    let pathSources = [
+      fishLoginPATH(),
+      ProcessInfo.processInfo.environment["PATH"],
+    ]
+
+    for pathValue in pathSources.compactMap({ $0 }) {
+      let pathComponents = pathValue.split(separator: ":").map(String.init)
+      for pathComponent in pathComponents where !pathComponent.isEmpty {
+        if seenPaths.insert(pathComponent).inserted {
+          orderedPaths.append(pathComponent)
         }
+      }
+    }
 
-        guard let thumbnail else {
-            return nil
-        }
+    cachedExecutableSearchPaths = orderedPaths
+    return orderedPaths
+  }
 
-        let squareImage = cropToCenteredSquare(thumbnail)
-        let extent = squareImage.extent
-        let maxDimension = max(extent.width, extent.height)
+  private static func findExecutableInPATH(named executableName: String) -> URL? {
+    for pathComponent in executableSearchPaths() {
+      let candidateURL = URL(fileURLWithPath: pathComponent).appendingPathComponent(executableName)
+      if FileManager.default.isExecutableFile(atPath: candidateURL.path) {
+        return candidateURL
+      }
+    }
 
-        guard maxDimension > 0, maxPixelSize > 0 else {
-            return squareImage
-        }
+    return nil
+  }
 
-        let scale = min(1.0, maxPixelSize / maxDimension)
-        guard scale < 1.0 else {
-            return squareImage
-        }
+  private static func resolveX3fConverterTool() -> X3fConverterTool? {
+    if let x3fGoURL = findExecutableInPATH(named: "x3f-go") {
+      return .x3fGo(x3fGoURL)
+    }
 
-        return squareImage.transformed(
-            by: CGAffineTransform(scaleX: scale, y: scale),
-            highQualityDownsample: true
+    if let x3fExtractPath = Bundle.main.path(forResource: "x3f-extract", ofType: nil) {
+      return .x3fExtract(URL(fileURLWithPath: x3fExtractPath))
+    }
+
+    return nil
+  }
+
+  private static func ensureX3fDiskCacheDirectory() {
+    try? FileManager.default.createDirectory(
+      at: x3fDiskCacheDirectory(),
+      withIntermediateDirectories: true
+    )
+  }
+
+  private static func touchCacheFile(at url: URL) {
+    var mutableURL = url
+    var values = URLResourceValues()
+    values.contentAccessDate = Date()
+    try? mutableURL.setResourceValues(values)
+  }
+
+  private static func cleanupStaleX3fDiskCacheFiles(now: Date = Date()) {
+    ensureX3fDiskCacheDirectory()
+
+    guard
+      let cachedFiles = try? FileManager.default.contentsOfDirectory(
+        at: x3fDiskCacheDirectory(),
+        includingPropertiesForKeys: [
+          .isRegularFileKey,
+          .contentModificationDateKey,
+        ],
+        options: [.skipsHiddenFiles]
+      )
+    else {
+      return
+    }
+
+    let expirationDate = now.addingTimeInterval(-x3fDiskCacheMaxAge)
+    for fileURL in cachedFiles where fileURL.pathExtension.lowercased() == "dng" {
+      guard
+        let values = try? fileURL.resourceValues(forKeys: [.contentModificationDateKey]),
+        let modificationDate = values.contentModificationDate,
+        modificationDate < expirationDate
+      else {
+        continue
+      }
+
+      try? FileManager.default.removeItem(at: fileURL)
+    }
+  }
+
+  private static func trimX3fDiskCacheIfNeeded() {
+    ensureX3fDiskCacheDirectory()
+
+    guard
+      let cachedFiles = try? FileManager.default.contentsOfDirectory(
+        at: x3fDiskCacheDirectory(),
+        includingPropertiesForKeys: [
+          .isRegularFileKey,
+          .fileSizeKey,
+          .contentAccessDateKey,
+          .contentModificationDateKey,
+        ],
+        options: [.skipsHiddenFiles]
+      )
+    else {
+      return
+    }
+
+    struct CachedFile {
+      let url: URL
+      let size: Int64
+      let lastAccessDate: Date
+    }
+
+    var entries: [CachedFile] = []
+    var totalSize: Int64 = 0
+
+    for fileURL in cachedFiles where fileURL.pathExtension.lowercased() == "dng" {
+      guard
+        let values = try? fileURL.resourceValues(forKeys: [
+          .isRegularFileKey,
+          .fileSizeKey,
+          .contentAccessDateKey,
+          .contentModificationDateKey,
+        ]),
+        values.isRegularFile == true
+      else {
+        continue
+      }
+
+      let size = Int64(values.fileSize ?? 0)
+      let lastAccessDate =
+        values.contentAccessDate ?? values.contentModificationDate ?? .distantPast
+
+      totalSize += size
+      entries.append(CachedFile(url: fileURL, size: size, lastAccessDate: lastAccessDate))
+    }
+
+    guard totalSize > Int64(x3fDiskCacheMaxSize) else {
+      return
+    }
+
+    let sortedEntries = entries.sorted { $0.lastAccessDate < $1.lastAccessDate }
+    for entry in sortedEntries {
+      try? FileManager.default.removeItem(at: entry.url)
+      totalSize -= entry.size
+
+      if totalSize <= Int64(x3fDiskCacheMaxSize) {
+        break
+      }
+    }
+  }
+
+  static func performCacheMaintenance() {
+    x3fDiskCacheLock.lock()
+    defer { x3fDiskCacheLock.unlock() }
+
+    cleanupStaleX3fDiskCacheFiles()
+    trimX3fDiskCacheIfNeeded()
+  }
+
+  static func releaseCaches(for url: URL) {
+    removeCachedSourceImage(for: url)
+
+    guard let cachedDNGURL = x3fCachedDNGURL(for: url) else {
+      return
+    }
+
+    x3fDiskCacheLock.lock()
+    defer { x3fDiskCacheLock.unlock() }
+
+    if FileManager.default.fileExists(atPath: cachedDNGURL.path) {
+      try? FileManager.default.removeItem(at: cachedDNGURL)
+    }
+  }
+
+  static func loadThumbnail(from url: URL) -> CIImage? {
+    guard FileManager.default.fileExists(atPath: url.path) else {
+      return nil
+    }
+
+    let fileExtension = url.pathExtension.lowercased()
+    let targetSize: CGFloat = 512
+
+    // 优化：对所有格式（包括 RAW）统一使用 CGImageSource 缩略图 API
+    // 这比先加载全尺寸再缩放快 4-8 倍
+    guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil) else {
+      return nil
+    }
+
+    var thumbnailOptions: [CFString: Any] = [
+      kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
+      kCGImageSourceCreateThumbnailWithTransform: true,
+      kCGImageSourceThumbnailMaxPixelSize: targetSize,
+    ]
+
+    // RAW 文件特殊优化：使用子采样加速解码
+    if fileExtension == "dng" || isRawFormat(fileExtension) {
+      // kCGImageSourceSubsampleFactor: 让 Core Graphics 在解码时直接采样
+      // 4 = 使用 1/4 分辨率解码，速度提升 75%
+      thumbnailOptions[kCGImageSourceSubsampleFactor as CFString] = 4
+    }
+
+    guard
+      let thumbnail = CGImageSourceCreateThumbnailAtIndex(
+        imageSource,
+        0,
+        thumbnailOptions as CFDictionary
+      )
+    else {
+      return nil
+    }
+
+    return CIImage(cgImage: thumbnail)
+  }
+
+  static func loadSquareThumbnail(from url: URL, maxPixelSize: CGFloat = 512) -> CIImage? {
+    let fileExtension = url.pathExtension.lowercased()
+    let thumbnail: CIImage?
+
+    if fileExtension == "dng" || isRawFormat(fileExtension) {
+      thumbnail = loadThumbnail(from: url)
+    } else {
+      thumbnail = loadFullImageThumbnail(from: url, maxPixelSize: maxPixelSize)
+    }
+
+    guard let thumbnail else {
+      return nil
+    }
+
+    let squareImage = cropToCenteredSquare(thumbnail)
+    let extent = squareImage.extent
+    let maxDimension = max(extent.width, extent.height)
+
+    guard maxDimension > 0, maxPixelSize > 0 else {
+      return squareImage
+    }
+
+    let scale = min(1.0, maxPixelSize / maxDimension)
+    guard scale < 1.0 else {
+      return squareImage
+    }
+
+    return squareImage.transformed(
+      by: CGAffineTransform(scaleX: scale, y: scale),
+      highQualityDownsample: true
+    )
+  }
+
+  static func loadFullImageThumbnail(from url: URL, maxPixelSize: CGFloat) -> CIImage? {
+    guard FileManager.default.fileExists(atPath: url.path),
+      let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil)
+    else {
+      return nil
+    }
+
+    let thumbnailOptions: [CFString: Any] = [
+      kCGImageSourceCreateThumbnailFromImageAlways: true,
+      kCGImageSourceCreateThumbnailWithTransform: true,
+      kCGImageSourceThumbnailMaxPixelSize: max(maxPixelSize * 2, maxPixelSize),
+    ]
+
+    guard
+      let thumbnail = CGImageSourceCreateThumbnailAtIndex(
+        imageSource,
+        0,
+        thumbnailOptions as CFDictionary
+      )
+    else {
+      return nil
+    }
+
+    return CIImage(cgImage: thumbnail)
+  }
+
+  static func cropToCenteredSquare(_ image: CIImage) -> CIImage {
+    let extent = image.extent
+    let sideLength = min(extent.width, extent.height)
+
+    guard sideLength > 0,
+      extent.isEmpty == false,
+      extent.isInfinite == false
+    else {
+      return image
+    }
+
+    let cropRect = CGRect(
+      x: extent.midX - sideLength / 2,
+      y: extent.midY - sideLength / 2,
+      width: sideLength,
+      height: sideLength
+    )
+
+    return
+      image
+      .cropped(to: cropRect)
+      .transformed(by: CGAffineTransform(translationX: -cropRect.origin.x, y: -cropRect.origin.y))
+  }
+
+  static func loadMediumResolution(from url: URL) -> CIImage? {
+    guard FileManager.default.fileExists(atPath: url.path) else {
+      return nil
+    }
+
+    let fileExtension = url.pathExtension.lowercased()
+    let targetSize: CGFloat = 2048
+
+    // 优化：统一使用 CGImageSource 缩略图 API
+    guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil) else {
+      return nil
+    }
+
+    var options: [CFString: Any] = [
+      kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
+      kCGImageSourceCreateThumbnailWithTransform: true,
+      kCGImageSourceThumbnailMaxPixelSize: targetSize,
+    ]
+
+    // RAW 文件使用 1/2 子采样（2048px 需要更高质量）
+    if fileExtension == "dng" || isRawFormat(fileExtension) {
+      options[kCGImageSourceSubsampleFactor as CFString] = 2
+    }
+
+    guard
+      let cgImage = CGImageSourceCreateThumbnailAtIndex(
+        imageSource,
+        0,
+        options as CFDictionary
+      )
+    else {
+      return nil
+    }
+
+    return CIImage(cgImage: cgImage)
+  }
+
+  static func loadImage(from url: URL) async -> NSImage? {
+    guard FileManager.default.fileExists(atPath: url.path) else {
+      return nil
+    }
+
+    if let ciImage = await loadCIImage(from: url) {
+      return convertToNSImage(ciImage)
+    }
+
+    return NSImage(contentsOf: url)
+  }
+
+  static func loadX3FPreviewImage(from url: URL) async -> NSImage? {
+    guard url.pathExtension.lowercased() == "x3f" else {
+      return nil
+    }
+
+    guard let ciImage = await loadCIImage(from: url) else {
+      return nil
+    }
+
+    return convertToNSImage(ciImage)
+  }
+
+  static func loadCIImage(from url: URL) async -> CIImage? {
+    guard FileManager.default.fileExists(atPath: url.path) else {
+      return nil
+    }
+
+    if let cachedImage = cachedSourceImage(for: url) {
+      return cachedImage
+    }
+
+    let loadURL = resolvedLoadURL(for: url)
+    if let ciImage = loadWithCoreImage(from: loadURL) {
+      if shouldCacheSourceImage(ciImage, originalURL: url, loadURL: loadURL) {
+        cacheSourceImage(ciImage, for: url)
+      }
+      return ciImage
+    }
+
+    if loadURL != url, let ciImage = loadWithCoreImage(from: url) {
+      if shouldCacheSourceImage(ciImage, originalURL: url, loadURL: url) {
+        cacheSourceImage(ciImage, for: url)
+      }
+      return ciImage
+    }
+
+    return nil
+  }
+
+  static func convertToNSImage(_ ciImage: CIImage) -> NSImage? {
+    let extent = ciImage.extent
+    guard !extent.isEmpty, extent.isInfinite == false else {
+      return nil
+    }
+
+    guard let cgImage = createStandardDisplayCGImage(ciImage, from: extent) else {
+      return nil
+    }
+
+    let size = NSSize(width: extent.width, height: extent.height)
+    return NSImage(cgImage: cgImage, size: size)
+  }
+
+  // 非隔离版本，可以在后台线程调用
+  static func convertToNSImageAsync(_ ciImage: CIImage) -> NSImage? {
+    let extent = ciImage.extent
+    guard !extent.isEmpty, extent.isInfinite == false else {
+      return nil
+    }
+
+    guard let cgImage = createStandardDisplayCGImage(ciImage, from: extent) else {
+      return nil
+    }
+
+    let size = NSSize(width: extent.width, height: extent.height)
+    return NSImage(cgImage: cgImage, size: size)
+  }
+
+  static func convertToCGImage(_ ciImage: CIImage) -> CGImage? {
+    let extent = ciImage.extent
+    guard !extent.isEmpty, extent.isInfinite == false else {
+      return nil
+    }
+
+    return createStandardDisplayCGImage(ciImage, from: extent)
+  }
+
+  private static func createStandardDisplayCGImage(_ ciImage: CIImage, from extent: CGRect)
+    -> CGImage?
+  {
+    ciContext.createCGImage(
+      ciImage,
+      from: extent,
+      format: .RGBA8,
+      colorSpace: standardDisplayColorSpace
+    )
+  }
+
+  private static func loadWithCoreImage(from url: URL) -> CIImage? {
+    print("ImageProcessor: 尝试加载图片: \(url.lastPathComponent)")
+
+    let fileExtension = url.pathExtension.lowercased()
+
+    if fileExtension == "x3f" {
+      print("ImageProcessor: X3F 格式，跳过 CIImage 加载")
+      return nil
+    }
+
+    if fileExtension == "dng" || isRawFormat(fileExtension) {
+      print("ImageProcessor: RAW/DNG 格式，使用 RAW 过滤器加载")
+      if let rawImage = loadRawWithFilter(from: url) {
+        return rawImage
+      }
+    }
+
+    let options: [CIImageOption: Any] = [
+      .applyOrientationProperty: true,
+      .toneMapHDRtoSDR: false,
+      .expandToHDR: true,
+    ]
+
+    if let expandedImage = loadHDRGainMapImage(from: url, baseOptions: options) {
+      print("ImageProcessor: ✓ HDR gain map 已融合")
+      return expandedImage
+    }
+
+    if let ciImage = CIImage(contentsOf: url, options: options) {
+      print("ImageProcessor: ✓ CIImage 直接加载成功")
+      return ciImage
+    }
+
+    print("ImageProcessor: CIImage 直接加载失败，尝试 CGImageSource")
+
+    guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil) else {
+      print("ImageProcessor: ✗ 无法创建 CGImageSource")
+      return nil
+    }
+
+    let imageType = CGImageSourceGetType(imageSource)
+    print("ImageProcessor: 图片类型: \(imageType ?? "unknown" as CFString)")
+
+    let cgImageOptions: [CFString: Any] = [
+      kCGImageSourceDecodeRequest: kCGImageSourceDecodeToHDR,
+      kCGImageSourceDecodeRequestOptions: [
+        kCGImageSourceGenerateImageSpecificLumaScaling: true
+      ],
+    ]
+
+    guard
+      let cgImage = CGImageSourceCreateImageAtIndex(
+        imageSource,
+        0,
+        cgImageOptions as CFDictionary
+      )
+    else {
+      print("ImageProcessor: ✗ 无法从 CGImageSource 创建 CGImage")
+      return nil
+    }
+
+    print("ImageProcessor: ✓ CGImageSource 加载成功")
+    return applyImageOrientation(to: CIImage(cgImage: cgImage), from: imageSource)
+  }
+
+  private static func applyImageOrientation(to image: CIImage, from imageSource: CGImageSource)
+    -> CIImage
+  {
+    guard let orientation = readImageOrientation(from: imageSource) else {
+      return image
+    }
+
+    return image.oriented(orientation)
+  }
+
+  private static func readImageOrientation(from imageSource: CGImageSource)
+    -> CGImagePropertyOrientation?
+  {
+    guard
+      let properties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any],
+      let orientationNumber = properties[kCGImagePropertyOrientation] as? NSNumber,
+      let orientationValue = UInt32(exactly: orientationNumber),
+      let orientation = CGImagePropertyOrientation(rawValue: orientationValue)
+    else {
+      return nil
+    }
+
+    return orientation
+  }
+
+  private static func loadHDRGainMapImage(
+    from url: URL,
+    baseOptions: [CIImageOption: Any]
+  ) -> CIImage? {
+    let gainMapOptions: [CIImageOption: Any] = [
+      .applyOrientationProperty: true,
+      .auxiliaryHDRGainMap: true,
+    ]
+
+    guard let gainMap = CIImage(contentsOf: url, options: gainMapOptions) else {
+      return nil
+    }
+
+    var sdrBaseOptions = baseOptions
+    sdrBaseOptions[.expandToHDR] = false
+    sdrBaseOptions[.toneMapHDRtoSDR] = false
+    sdrBaseOptions[.auxiliaryHDRGainMap] = false
+
+    guard let sdrBaseImage = CIImage(contentsOf: url, options: sdrBaseOptions) else {
+      return nil
+    }
+
+    let expandedImage = sdrBaseImage.applyingGainMap(gainMap)
+    let resolvedHeadroom = max(
+      Float(expandedImage.contentHeadroom),
+      Float(sdrBaseImage.contentHeadroom),
+      Float(gainMap.contentHeadroom),
+      2.0
+    )
+
+    if #available(macOS 16.0, *) {
+      return expandedImage.settingContentHeadroom(
+        resolvedHeadroom
+      )
+    }
+
+    return expandedImage
+  }
+
+  static func extractRawWhiteBalance(from url: URL) -> (temperature: Double, tint: Double)? {
+    guard let rawFilter = CIFilter(imageURL: url, options: [:]) else {
+      return nil
+    }
+
+    // 获取相机白平衡（As Shot）
+    let neutralTemp = rawFilter.value(forKey: "inputNeutralTemperature") as? NSNumber
+    let neutralTint = rawFilter.value(forKey: "inputNeutralTint") as? NSNumber
+
+    if let temp = neutralTemp, let tint = neutralTint {
+      print("ImageProcessor: 提取相机白平衡 - 色温: \(temp), 色调: \(tint)")
+      return (temp.doubleValue, tint.doubleValue)
+    }
+
+    return nil
+  }
+
+  static func calculateAutoWhiteBalance(from ciImage: CIImage) -> (
+    temperature: Double, tint: Double
+  )? {
+    guard let samples = extractAutoWhiteBalanceSamples(from: ciImage, maxDimension: 256),
+      samples.count >= 64
+    else {
+      return nil
+    }
+
+    let estimate =
+      estimateAutoWhiteBalanceNeutralSample(from: samples)
+      ?? fallbackAutoWhiteBalanceEstimate(from: samples)
+
+    guard let estimate,
+      let whiteBalance = whiteBalanceFromNeutralSample(linearRGB: estimate.sample)
+    else {
+      return nil
+    }
+
+    print(
+      "自动白平衡: 线性域候选 \(estimate.candidateCount)/\(samples.count), 亮度范围 \(String(format: "%.3f", estimate.luminanceRange.lower))-\(String(format: "%.3f", estimate.luminanceRange.upper)), 色差阈值 \(String(format: "%.3f", estimate.chromaCutoff))"
+    )
+    print(
+      "  估计中性色样本=(\(String(format: "%.4f", estimate.sample.r)), \(String(format: "%.4f", estimate.sample.g)), \(String(format: "%.4f", estimate.sample.b)))"
+    )
+    print(
+      "  最终结果: 色温=\(Int(whiteBalance.temperature)), 色调=\(String(format: "%.1f", whiteBalance.tint))"
+    )
+
+    return whiteBalance
+  }
+
+  private static func extractAutoWhiteBalanceSamples(
+    from ciImage: CIImage,
+    maxDimension: CGFloat
+  ) -> [AutoWhiteBalanceSample]? {
+    let extent = ciImage.extent
+    guard !extent.isEmpty else {
+      return nil
+    }
+
+    let scale = min(1.0, maxDimension / max(extent.width, extent.height))
+    let scaledImage: CIImage
+    if scale < 1.0 {
+      scaledImage = ciImage.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+    } else {
+      scaledImage = ciImage
+    }
+
+    let scaledExtent = scaledImage.extent.integral
+    let width = max(Int(scaledExtent.width), 1)
+    let height = max(Int(scaledExtent.height), 1)
+    let bytesPerPixel = 4
+    let rowBytes = width * bytesPerPixel * MemoryLayout<Float>.size
+    let totalFloats = width * height * bytesPerPixel
+
+    var pixelData = [Float](repeating: 0, count: totalFloats)
+    let translatedImage = scaledImage.transformed(
+      by: CGAffineTransform(
+        translationX: -scaledExtent.origin.x,
+        y: -scaledExtent.origin.y
+      )
+    )
+
+    ciContext.render(
+      translatedImage,
+      toBitmap: &pixelData,
+      rowBytes: rowBytes,
+      bounds: CGRect(x: 0, y: 0, width: width, height: height),
+      format: .RGBAf,
+      colorSpace: nil
+    )
+
+    var samples: [AutoWhiteBalanceSample] = []
+    samples.reserveCapacity(width * height)
+
+    for pixelIndex in 0..<(width * height) {
+      let offset = pixelIndex * bytesPerPixel
+      let alpha = Double(pixelData[offset + 3])
+      guard alpha > 0.01 else { continue }
+
+      let r = max(Double(pixelData[offset]), 0.0)
+      let g = max(Double(pixelData[offset + 1]), 0.0)
+      let b = max(Double(pixelData[offset + 2]), 0.0)
+
+      guard r.isFinite, g.isFinite, b.isFinite else { continue }
+
+      let maxComponent = max(r, max(g, b))
+      guard maxComponent > 0.0005 else { continue }
+
+      let minComponent = min(r, min(g, b))
+      let luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
+      guard luminance.isFinite, luminance > 0.001 else { continue }
+
+      let chroma = (maxComponent - minComponent) / max(maxComponent, 0.000_01)
+      guard chroma.isFinite else { continue }
+
+      samples.append(
+        AutoWhiteBalanceSample(
+          r: r,
+          g: g,
+          b: b,
+          luminance: luminance,
+          maxComponent: maxComponent,
+          chroma: chroma
         )
+      )
     }
 
-    static func loadFullImageThumbnail(from url: URL, maxPixelSize: CGFloat) -> CIImage? {
-        guard FileManager.default.fileExists(atPath: url.path),
-              let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil) else {
-            return nil
-        }
+    return samples.isEmpty ? nil : samples
+  }
 
-        let thumbnailOptions: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: max(maxPixelSize * 2, maxPixelSize),
-        ]
+  private static func estimateAutoWhiteBalanceNeutralSample(
+    from samples: [AutoWhiteBalanceSample]
+  ) -> AutoWhiteBalanceEstimate? {
+    let sortedLuminance = samples.map(\.luminance).sorted()
+    let sortedHighlights = samples.map(\.maxComponent).sorted()
 
-        guard let thumbnail = CGImageSourceCreateThumbnailAtIndex(
-            imageSource,
-            0,
-            thumbnailOptions as CFDictionary
-        ) else {
-            return nil
-        }
+    let luminanceLower = percentile(sortedLuminance, fraction: 0.12)
+    let luminanceUpper = percentile(sortedLuminance, fraction: 0.98)
+    let highlightLimit = percentile(sortedHighlights, fraction: 0.995)
 
-        return CIImage(cgImage: thumbnail)
+    let exposureFiltered = samples.filter { sample in
+      sample.luminance >= luminanceLower && sample.luminance <= luminanceUpper
+        && sample.maxComponent <= highlightLimit
     }
 
-    static func cropToCenteredSquare(_ image: CIImage) -> CIImage {
-        let extent = image.extent
-        let sideLength = min(extent.width, extent.height)
-
-        guard sideLength > 0,
-              extent.isEmpty == false,
-              extent.isInfinite == false else {
-            return image
-        }
-
-        let cropRect = CGRect(
-            x: extent.midX - sideLength / 2,
-            y: extent.midY - sideLength / 2,
-            width: sideLength,
-            height: sideLength
-        )
-
-        return image
-            .cropped(to: cropRect)
-            .transformed(by: CGAffineTransform(translationX: -cropRect.origin.x, y: -cropRect.origin.y))
+    guard exposureFiltered.count >= 32 else {
+      return nil
     }
 
-    static func loadMediumResolution(from url: URL) -> CIImage? {
-        guard FileManager.default.fileExists(atPath: url.path) else {
-            return nil
-        }
+    let sortedChroma = exposureFiltered.map(\.chroma).sorted()
+    let strictChromaCutoff = min(
+      0.35,
+      max(0.03, percentile(sortedChroma, fraction: 0.35) * 1.25)
+    )
+    let relaxedChromaCutoff = min(
+      0.45,
+      max(strictChromaCutoff, percentile(sortedChroma, fraction: 0.55) * 1.2)
+    )
 
-        let fileExtension = url.pathExtension.lowercased()
-        let targetSize: CGFloat = 2048
+    var candidateSamples = exposureFiltered.filter { $0.chroma <= strictChromaCutoff }
+    var chromaCutoff = strictChromaCutoff
 
-        // 优化：统一使用 CGImageSource 缩略图 API
-        guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil) else {
-            return nil
-        }
-
-        var options: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: targetSize,
-        ]
-
-        // RAW 文件使用 1/2 子采样（2048px 需要更高质量）
-        if fileExtension == "dng" || isRawFormat(fileExtension) {
-            options[kCGImageSourceSubsampleFactor as CFString] = 2
-        }
-
-        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(
-            imageSource,
-            0,
-            options as CFDictionary
-        ) else {
-            return nil
-        }
-
-        return CIImage(cgImage: cgImage)
+    let minimumCandidateCount = max(64, exposureFiltered.count / 20)
+    if candidateSamples.count < minimumCandidateCount {
+      chromaCutoff = relaxedChromaCutoff
+      candidateSamples = exposureFiltered.filter { $0.chroma <= relaxedChromaCutoff }
     }
 
-    static func loadImage(from url: URL) async -> NSImage? {
-        guard FileManager.default.fileExists(atPath: url.path) else {
-            return nil
+    if candidateSamples.count < minimumCandidateCount {
+      let targetCount = min(
+        max(minimumCandidateCount, exposureFiltered.count / 6), exposureFiltered.count)
+      candidateSamples = Array(
+        exposureFiltered.sorted { lhs, rhs in
+          if abs(lhs.chroma - rhs.chroma) > 0.000_01 {
+            return lhs.chroma < rhs.chroma
+          }
+          return lhs.luminance > rhs.luminance
         }
-
-        if let ciImage = loadWithCoreImage(from: url) {
-            return convertToNSImage(ciImage)
-        }
-
-        // 尝试使用 x3f-extract 加载（用于 X3F 等不被 Core Image 支持的格式）
-        if let x3fImage = await loadWithX3fExtract(from: url) {
-            print("ImageProcessor: ✓ x3f-extract 加载成功")
-            return x3fImage
-        }
-
-        return NSImage(contentsOf: url)
+        .prefix(targetCount)
+      )
+      chromaCutoff = candidateSamples.last?.chroma ?? chromaCutoff
     }
 
-    static func loadX3FPreviewImage(from url: URL) async -> NSImage? {
-        guard url.pathExtension.lowercased() == "x3f" else {
-            return nil
-        }
-
-        return await loadWithX3fExtract(from: url)
+    guard
+      let neutralSample = weightedNeutralSample(
+        from: candidateSamples,
+        luminanceRange: (lower: luminanceLower, upper: luminanceUpper),
+        chromaCutoff: chromaCutoff,
+        favorNeutrality: true
+      )
+    else {
+      return nil
     }
 
-    static func loadCIImage(from url: URL) async -> CIImage? {
-        guard FileManager.default.fileExists(atPath: url.path) else {
-            return nil
-        }
+    return AutoWhiteBalanceEstimate(
+      sample: neutralSample,
+      candidateCount: candidateSamples.count,
+      luminanceRange: (lower: luminanceLower, upper: luminanceUpper),
+      chromaCutoff: chromaCutoff
+    )
+  }
 
-        if let ciImage = loadWithCoreImage(from: url) {
-            return ciImage
-        }
+  private static func fallbackAutoWhiteBalanceEstimate(
+    from samples: [AutoWhiteBalanceSample]
+  ) -> AutoWhiteBalanceEstimate? {
+    let sortedLuminance = samples.map(\.luminance).sorted()
+    let luminanceLower = percentile(sortedLuminance, fraction: 0.08)
+    let luminanceUpper = percentile(sortedLuminance, fraction: 0.97)
 
-        // 尝试使用 x3f-extract 加载，然后转换为 CIImage
-        if let x3fImage = await loadWithX3fExtract(from: url),
-           let cgImage = x3fImage.cgImage(forProposedRect: nil, context: nil, hints: nil) {
-            return CIImage(cgImage: cgImage)
-        }
-
-        return nil
+    let filteredSamples = samples.filter { sample in
+      sample.luminance >= luminanceLower && sample.luminance <= luminanceUpper
     }
 
-    static func convertToNSImage(_ ciImage: CIImage) -> NSImage? {
-        let extent = ciImage.extent
-        guard !extent.isEmpty, extent.isInfinite == false else {
-            return nil
-        }
-
-        guard let cgImage = createStandardDisplayCGImage(ciImage, from: extent) else {
-            return nil
-        }
-
-        let size = NSSize(width: extent.width, height: extent.height)
-        return NSImage(cgImage: cgImage, size: size)
+    guard
+      let neutralSample = weightedNeutralSample(
+        from: filteredSamples,
+        luminanceRange: (lower: luminanceLower, upper: luminanceUpper),
+        chromaCutoff: 1.0,
+        favorNeutrality: false
+      )
+    else {
+      return nil
     }
 
-    // 非隔离版本，可以在后台线程调用
-    static func convertToNSImageAsync(_ ciImage: CIImage) -> NSImage? {
-        let extent = ciImage.extent
-        guard !extent.isEmpty, extent.isInfinite == false else {
-            return nil
-        }
+    return AutoWhiteBalanceEstimate(
+      sample: neutralSample,
+      candidateCount: filteredSamples.count,
+      luminanceRange: (lower: luminanceLower, upper: luminanceUpper),
+      chromaCutoff: 1.0
+    )
+  }
 
-        guard let cgImage = createStandardDisplayCGImage(ciImage, from: extent) else {
-            return nil
-        }
-
-        let size = NSSize(width: extent.width, height: extent.height)
-        return NSImage(cgImage: cgImage, size: size)
+  private static func weightedNeutralSample(
+    from samples: [AutoWhiteBalanceSample],
+    luminanceRange: (lower: Double, upper: Double),
+    chromaCutoff: Double,
+    favorNeutrality: Bool
+  ) -> (r: Double, g: Double, b: Double)? {
+    guard !samples.isEmpty else {
+      return nil
     }
 
-    static func convertToCGImage(_ ciImage: CIImage) -> CGImage? {
-        let extent = ciImage.extent
-        guard !extent.isEmpty, extent.isInfinite == false else {
-            return nil
-        }
+    let luminanceSpan = max(luminanceRange.upper - luminanceRange.lower, 0.000_01)
+    let effectiveChromaCutoff = max(chromaCutoff, 0.000_01)
+    var weightedLogR = 0.0
+    var weightedLogG = 0.0
+    var weightedLogB = 0.0
+    var totalWeight = 0.0
 
-        return createStandardDisplayCGImage(ciImage, from: extent)
+    for sample in samples {
+      let normalizedLuminance = min(
+        max((sample.luminance - luminanceRange.lower) / luminanceSpan, 0.0),
+        1.0
+      )
+      let luminanceWeight = 0.35 + (0.65 * sqrt(normalizedLuminance))
+
+      let neutralityWeight: Double
+      if favorNeutrality {
+        let neutrality = max(0.0, 1.0 - (sample.chroma / effectiveChromaCutoff))
+        neutralityWeight = 0.2 + (0.8 * neutrality * neutrality)
+      } else {
+        neutralityWeight = 1.0
+      }
+
+      let weight = luminanceWeight * neutralityWeight
+      guard weight.isFinite, weight > 0 else { continue }
+
+      weightedLogR += weight * log(max(sample.r, 0.000_01))
+      weightedLogG += weight * log(max(sample.g, 0.000_01))
+      weightedLogB += weight * log(max(sample.b, 0.000_01))
+      totalWeight += weight
     }
 
-    private static func createStandardDisplayCGImage(_ ciImage: CIImage, from extent: CGRect) -> CGImage? {
-        ciContext.createCGImage(
-            ciImage,
-            from: extent,
-            format: .RGBA8,
-            colorSpace: standardDisplayColorSpace
-        )
+    guard totalWeight > 0 else {
+      return nil
     }
 
-    private static func loadWithCoreImage(from url: URL) -> CIImage? {
-        print("ImageProcessor: 尝试加载图片: \(url.lastPathComponent)")
+    let rgb = (
+      r: exp(weightedLogR / totalWeight),
+      g: exp(weightedLogG / totalWeight),
+      b: exp(weightedLogB / totalWeight)
+    )
 
-        let fileExtension = url.pathExtension.lowercased()
+    return normalizedWhiteBalanceSample(from: rgb)
+  }
 
-        if fileExtension == "x3f" {
-            print("ImageProcessor: X3F 格式，跳过 CIImage 加载")
-            return nil
-        }
-
-        if fileExtension == "dng" || isRawFormat(fileExtension) {
-            print("ImageProcessor: RAW/DNG 格式，使用 RAW 过滤器加载")
-            if let rawImage = loadRawWithFilter(from: url) {
-                return rawImage
-            }
-        }
-
-        let options: [CIImageOption: Any] = [
-            .applyOrientationProperty: true,
-            .toneMapHDRtoSDR: false,
-            .expandToHDR: true,
-        ]
-
-        if let expandedImage = loadHDRGainMapImage(from: url, baseOptions: options) {
-            print("ImageProcessor: ✓ HDR gain map 已融合")
-            return expandedImage
-        }
-
-        if let ciImage = CIImage(contentsOf: url, options: options) {
-            print("ImageProcessor: ✓ CIImage 直接加载成功")
-            return ciImage
-        }
-
-        print("ImageProcessor: CIImage 直接加载失败，尝试 CGImageSource")
-
-        guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil) else {
-            print("ImageProcessor: ✗ 无法创建 CGImageSource")
-            return nil
-        }
-
-        let imageType = CGImageSourceGetType(imageSource)
-        print("ImageProcessor: 图片类型: \(imageType ?? "unknown" as CFString)")
-
-        let cgImageOptions: [CFString: Any] = [
-            kCGImageSourceDecodeRequest: kCGImageSourceDecodeToHDR,
-            kCGImageSourceDecodeRequestOptions: [
-                kCGImageSourceGenerateImageSpecificLumaScaling: true,
-            ],
-        ]
-
-        guard let cgImage = CGImageSourceCreateImageAtIndex(
-            imageSource,
-            0,
-            cgImageOptions as CFDictionary
-        ) else {
-            print("ImageProcessor: ✗ 无法从 CGImageSource 创建 CGImage")
-            return nil
-        }
-
-        print("ImageProcessor: ✓ CGImageSource 加载成功")
-        return applyImageOrientation(to: CIImage(cgImage: cgImage), from: imageSource)
+  private static func normalizedWhiteBalanceSample(
+    from rgb: (r: Double, g: Double, b: Double)
+  ) -> (r: Double, g: Double, b: Double)? {
+    let luminance = 0.2126 * rgb.r + 0.7152 * rgb.g + 0.0722 * rgb.b
+    let maxComponent = max(rgb.r, max(rgb.g, rgb.b))
+    guard luminance.isFinite, luminance > 0, maxComponent.isFinite, maxComponent > 0 else {
+      return nil
     }
 
-    private static func applyImageOrientation(to image: CIImage, from imageSource: CGImageSource) -> CIImage {
-        guard let orientation = readImageOrientation(from: imageSource) else {
-            return image
-        }
-
-        return image.oriented(orientation)
+    let targetLuminance = 0.25
+    var scale = targetLuminance / luminance
+    if maxComponent * scale > 0.9 {
+      scale = 0.9 / maxComponent
     }
 
-    private static func readImageOrientation(from imageSource: CGImageSource) -> CGImagePropertyOrientation? {
-        guard
-            let properties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any],
-            let orientationNumber = properties[kCGImagePropertyOrientation] as? NSNumber,
-            let orientationValue = UInt32(exactly: orientationNumber),
-            let orientation = CGImagePropertyOrientation(rawValue: orientationValue)
-        else {
-            return nil
-        }
-
-        return orientation
+    guard scale.isFinite, scale > 0 else {
+      return nil
     }
 
-    private static func loadHDRGainMapImage(
-        from url: URL,
-        baseOptions: [CIImageOption: Any]
-    ) -> CIImage? {
-        let gainMapOptions: [CIImageOption: Any] = [
-            .applyOrientationProperty: true,
-            .auxiliaryHDRGainMap: true,
-        ]
+    return (
+      r: rgb.r * scale,
+      g: rgb.g * scale,
+      b: rgb.b * scale
+    )
+  }
 
-        guard let gainMap = CIImage(contentsOf: url, options: gainMapOptions) else {
-            return nil
-        }
-
-        var sdrBaseOptions = baseOptions
-        sdrBaseOptions[.expandToHDR] = false
-        sdrBaseOptions[.toneMapHDRtoSDR] = false
-        sdrBaseOptions[.auxiliaryHDRGainMap] = false
-
-        guard let sdrBaseImage = CIImage(contentsOf: url, options: sdrBaseOptions) else {
-            return nil
-        }
-
-        let expandedImage = sdrBaseImage.applyingGainMap(gainMap)
-        let resolvedHeadroom = max(
-            Float(expandedImage.contentHeadroom),
-            Float(sdrBaseImage.contentHeadroom),
-            Float(gainMap.contentHeadroom),
-            2.0
-        )
-
-        if #available(macOS 16.0, *) {
-            return expandedImage.settingContentHeadroom(
-                resolvedHeadroom
-            )
-        }
-
-        return expandedImage
+  private static func percentile(_ sortedValues: [Double], fraction: Double) -> Double {
+    guard let first = sortedValues.first else {
+      return 0.0
     }
 
-    static func extractRawWhiteBalance(from url: URL) -> (temperature: Double, tint: Double)? {
-        guard let rawFilter = CIFilter(imageURL: url, options: [:]) else {
-            return nil
-        }
-
-        // 获取相机白平衡（As Shot）
-        let neutralTemp = rawFilter.value(forKey: "inputNeutralTemperature") as? NSNumber
-        let neutralTint = rawFilter.value(forKey: "inputNeutralTint") as? NSNumber
-
-        if let temp = neutralTemp, let tint = neutralTint {
-            print("ImageProcessor: 提取相机白平衡 - 色温: \(temp), 色调: \(tint)")
-            return (temp.doubleValue, tint.doubleValue)
-        }
-
-        return nil
+    guard sortedValues.count > 1 else {
+      return first
     }
 
-    static func calculateAutoWhiteBalance(from ciImage: CIImage) -> (temperature: Double, tint: Double)? {
-        guard let samples = extractAutoWhiteBalanceSamples(from: ciImage, maxDimension: 256),
-              samples.count >= 64 else {
-            return nil
-        }
+    let clampedFraction = min(max(fraction, 0.0), 1.0)
+    let position = clampedFraction * Double(sortedValues.count - 1)
+    let lowerIndex = Int(position.rounded(.down))
+    let upperIndex = Int(position.rounded(.up))
 
-        let estimate = estimateAutoWhiteBalanceNeutralSample(from: samples)
-            ?? fallbackAutoWhiteBalanceEstimate(from: samples)
-
-        guard let estimate,
-              let whiteBalance = whiteBalanceFromNeutralSample(linearRGB: estimate.sample) else {
-            return nil
-        }
-
-        print(
-            "自动白平衡: 线性域候选 \(estimate.candidateCount)/\(samples.count), 亮度范围 \(String(format: "%.3f", estimate.luminanceRange.lower))-\(String(format: "%.3f", estimate.luminanceRange.upper)), 色差阈值 \(String(format: "%.3f", estimate.chromaCutoff))"
-        )
-        print(
-            "  估计中性色样本=(\(String(format: "%.4f", estimate.sample.r)), \(String(format: "%.4f", estimate.sample.g)), \(String(format: "%.4f", estimate.sample.b)))"
-        )
-        print("  最终结果: 色温=\(Int(whiteBalance.temperature)), 色调=\(String(format: "%.1f", whiteBalance.tint))")
-
-        return whiteBalance
+    guard lowerIndex != upperIndex else {
+      return sortedValues[lowerIndex]
     }
 
-    private static func extractAutoWhiteBalanceSamples(
-        from ciImage: CIImage,
-        maxDimension: CGFloat
-    ) -> [AutoWhiteBalanceSample]? {
-        let extent = ciImage.extent
-        guard !extent.isEmpty else {
-            return nil
-        }
+    let interpolation = position - Double(lowerIndex)
+    return sortedValues[lowerIndex] * (1.0 - interpolation) + sortedValues[upperIndex]
+      * interpolation
+  }
 
-        let scale = min(1.0, maxDimension / max(extent.width, extent.height))
-        let scaledImage: CIImage
-        if scale < 1.0 {
-            scaledImage = ciImage.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-        } else {
-            scaledImage = ciImage
-        }
+  private static func applyRGBGains(to image: CIImage, r: Double, g: Double, b: Double) -> CIImage {
+    guard let filter = CIFilter(name: "CIColorMatrix") else { return image }
+    filter.setValue(image, forKey: kCIInputImageKey)
 
-        let scaledExtent = scaledImage.extent.integral
-        let width = max(Int(scaledExtent.width), 1)
-        let height = max(Int(scaledExtent.height), 1)
-        let bytesPerPixel = 4
-        let rowBytes = width * bytesPerPixel * MemoryLayout<Float>.size
-        let totalFloats = width * height * bytesPerPixel
+    let rVector = CIVector(x: r, y: 0, z: 0, w: 0)
+    let gVector = CIVector(x: 0, y: g, z: 0, w: 0)
+    let bVector = CIVector(x: 0, y: 0, z: b, w: 0)
+    let aVector = CIVector(x: 0, y: 0, z: 0, w: 1)
+    let biasVector = CIVector(x: 0, y: 0, z: 0, w: 0)
 
-        var pixelData = [Float](repeating: 0, count: totalFloats)
-        let translatedImage = scaledImage.transformed(
-            by: CGAffineTransform(
-                translationX: -scaledExtent.origin.x,
-                y: -scaledExtent.origin.y
-            )
-        )
+    filter.setValue(rVector, forKey: "inputRVector")
+    filter.setValue(gVector, forKey: "inputGVector")
+    filter.setValue(bVector, forKey: "inputBVector")
+    filter.setValue(aVector, forKey: "inputAVector")
+    filter.setValue(biasVector, forKey: "inputBiasVector")
 
-        ciContext.render(
-            translatedImage,
-            toBitmap: &pixelData,
-            rowBytes: rowBytes,
-            bounds: CGRect(x: 0, y: 0, width: width, height: height),
-            format: .RGBAf,
-            colorSpace: nil
-        )
+    return filter.outputImage ?? image
+  }
 
-        var samples: [AutoWhiteBalanceSample] = []
-        samples.reserveCapacity(width * height)
+  private static func sign(_ value: Double) -> Double {
+    if value > 0 { return 1.0 }
+    if value < 0 { return -1.0 }
+    return 0.0
+  }
 
-        for pixelIndex in 0 ..< (width * height) {
-            let offset = pixelIndex * bytesPerPixel
-            let alpha = Double(pixelData[offset + 3])
-            guard alpha > 0.01 else { continue }
-
-            let r = max(Double(pixelData[offset]), 0.0)
-            let g = max(Double(pixelData[offset + 1]), 0.0)
-            let b = max(Double(pixelData[offset + 2]), 0.0)
-
-            guard r.isFinite, g.isFinite, b.isFinite else { continue }
-
-            let maxComponent = max(r, max(g, b))
-            guard maxComponent > 0.0005 else { continue }
-
-            let minComponent = min(r, min(g, b))
-            let luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
-            guard luminance.isFinite, luminance > 0.001 else { continue }
-
-            let chroma = (maxComponent - minComponent) / max(maxComponent, 0.000_01)
-            guard chroma.isFinite else { continue }
-
-            samples.append(
-                AutoWhiteBalanceSample(
-                    r: r,
-                    g: g,
-                    b: b,
-                    luminance: luminance,
-                    maxComponent: maxComponent,
-                    chroma: chroma
-                )
-            )
-        }
-
-        return samples.isEmpty ? nil : samples
+  private static func extractPixelData(from ciImage: CIImage) -> [(
+    r: Double, g: Double, b: Double
+  )]? {
+    let extent = ciImage.extent
+    guard extent.width > 0, extent.height > 0 else {
+      return nil
     }
 
-    private static func estimateAutoWhiteBalanceNeutralSample(
-        from samples: [AutoWhiteBalanceSample]
-    ) -> AutoWhiteBalanceEstimate? {
-        let sortedLuminance = samples.map(\.luminance).sorted()
-        let sortedHighlights = samples.map(\.maxComponent).sorted()
+    let bytesPerPixel = 4
+    let bytesPerRow = Int(extent.width) * bytesPerPixel * MemoryLayout<Float>.size
+    let totalFloats = Int(extent.width) * Int(extent.height) * bytesPerPixel
 
-        let luminanceLower = percentile(sortedLuminance, fraction: 0.12)
-        let luminanceUpper = percentile(sortedLuminance, fraction: 0.98)
-        let highlightLimit = percentile(sortedHighlights, fraction: 0.995)
+    var pixelData = [Float](repeating: 0, count: totalFloats)
 
-        let exposureFiltered = samples.filter { sample in
-            sample.luminance >= luminanceLower &&
-                sample.luminance <= luminanceUpper &&
-                sample.maxComponent <= highlightLimit
-        }
+    let colorSpace = CGColorSpaceCreateDeviceRGB()
+    ciContext.render(
+      ciImage,
+      toBitmap: &pixelData,
+      rowBytes: bytesPerRow,
+      bounds: extent,
+      format: .RGBAf,
+      colorSpace: colorSpace
+    )
 
-        guard exposureFiltered.count >= 32 else {
-            return nil
-        }
+    var result: [(r: Double, g: Double, b: Double)] = []
+    let pixelCount = Int(extent.width) * Int(extent.height)
 
-        let sortedChroma = exposureFiltered.map(\.chroma).sorted()
-        let strictChromaCutoff = min(
-            0.35,
-            max(0.03, percentile(sortedChroma, fraction: 0.35) * 1.25)
-        )
-        let relaxedChromaCutoff = min(
-            0.45,
-            max(strictChromaCutoff, percentile(sortedChroma, fraction: 0.55) * 1.2)
-        )
-
-        var candidateSamples = exposureFiltered.filter { $0.chroma <= strictChromaCutoff }
-        var chromaCutoff = strictChromaCutoff
-
-        let minimumCandidateCount = max(64, exposureFiltered.count / 20)
-        if candidateSamples.count < minimumCandidateCount {
-            chromaCutoff = relaxedChromaCutoff
-            candidateSamples = exposureFiltered.filter { $0.chroma <= relaxedChromaCutoff }
-        }
-
-        if candidateSamples.count < minimumCandidateCount {
-            let targetCount = min(max(minimumCandidateCount, exposureFiltered.count / 6), exposureFiltered.count)
-            candidateSamples = Array(
-                exposureFiltered.sorted { lhs, rhs in
-                    if abs(lhs.chroma - rhs.chroma) > 0.000_01 {
-                        return lhs.chroma < rhs.chroma
-                    }
-                    return lhs.luminance > rhs.luminance
-                }
-                .prefix(targetCount)
-            )
-            chromaCutoff = candidateSamples.last?.chroma ?? chromaCutoff
-        }
-
-        guard let neutralSample = weightedNeutralSample(
-            from: candidateSamples,
-            luminanceRange: (lower: luminanceLower, upper: luminanceUpper),
-            chromaCutoff: chromaCutoff,
-            favorNeutrality: true
-        ) else {
-            return nil
-        }
-
-        return AutoWhiteBalanceEstimate(
-            sample: neutralSample,
-            candidateCount: candidateSamples.count,
-            luminanceRange: (lower: luminanceLower, upper: luminanceUpper),
-            chromaCutoff: chromaCutoff
-        )
+    for i in 0..<pixelCount {
+      let offset = i * bytesPerPixel
+      let r = Double(pixelData[offset])
+      let g = Double(pixelData[offset + 1])
+      let b = Double(pixelData[offset + 2])
+      result.append((r: r, g: g, b: b))
     }
 
-    private static func fallbackAutoWhiteBalanceEstimate(
-        from samples: [AutoWhiteBalanceSample]
-    ) -> AutoWhiteBalanceEstimate? {
-        let sortedLuminance = samples.map(\.luminance).sorted()
-        let luminanceLower = percentile(sortedLuminance, fraction: 0.08)
-        let luminanceUpper = percentile(sortedLuminance, fraction: 0.97)
+    return result
+  }
 
-        let filteredSamples = samples.filter { sample in
-            sample.luminance >= luminanceLower && sample.luminance <= luminanceUpper
-        }
-
-        guard let neutralSample = weightedNeutralSample(
-            from: filteredSamples,
-            luminanceRange: (lower: luminanceLower, upper: luminanceUpper),
-            chromaCutoff: 1.0,
-            favorNeutrality: false
-        ) else {
-            return nil
-        }
-
-        return AutoWhiteBalanceEstimate(
-            sample: neutralSample,
-            candidateCount: filteredSamples.count,
-            luminanceRange: (lower: luminanceLower, upper: luminanceUpper),
-            chromaCutoff: 1.0
-        )
+  private static func calculateAverageRGB(from ciImage: CIImage) -> (
+    red: Double, green: Double, blue: Double
+  )? {
+    let extent = ciImage.extent
+    guard extent.width > 0, extent.height > 0 else {
+      return nil
     }
 
-    private static func weightedNeutralSample(
-        from samples: [AutoWhiteBalanceSample],
-        luminanceRange: (lower: Double, upper: Double),
-        chromaCutoff: Double,
-        favorNeutrality: Bool
-    ) -> (r: Double, g: Double, b: Double)? {
-        guard !samples.isEmpty else {
-            return nil
-        }
+    let bytesPerPixel = 4
+    let bytesPerRow = Int(extent.width) * bytesPerPixel * MemoryLayout<Float>.size
+    let totalFloats = Int(extent.width) * Int(extent.height) * bytesPerPixel
 
-        let luminanceSpan = max(luminanceRange.upper - luminanceRange.lower, 0.000_01)
-        let effectiveChromaCutoff = max(chromaCutoff, 0.000_01)
-        var weightedLogR = 0.0
-        var weightedLogG = 0.0
-        var weightedLogB = 0.0
-        var totalWeight = 0.0
+    var pixelData = [Float](repeating: 0, count: totalFloats)
 
-        for sample in samples {
-            let normalizedLuminance = min(
-                max((sample.luminance - luminanceRange.lower) / luminanceSpan, 0.0),
-                1.0
-            )
-            let luminanceWeight = 0.35 + (0.65 * sqrt(normalizedLuminance))
+    let colorSpace = CGColorSpaceCreateDeviceRGB()
+    ciContext.render(
+      ciImage,
+      toBitmap: &pixelData,
+      rowBytes: bytesPerRow,
+      bounds: extent,
+      format: .RGBAf,
+      colorSpace: colorSpace
+    )
 
-            let neutralityWeight: Double
-            if favorNeutrality {
-                let neutrality = max(0.0, 1.0 - (sample.chroma / effectiveChromaCutoff))
-                neutralityWeight = 0.2 + (0.8 * neutrality * neutrality)
-            } else {
-                neutralityWeight = 1.0
-            }
+    let pixelCount = Int(extent.width) * Int(extent.height)
 
-            let weight = luminanceWeight * neutralityWeight
-            guard weight.isFinite, weight > 0 else { continue }
-
-            weightedLogR += weight * log(max(sample.r, 0.000_01))
-            weightedLogG += weight * log(max(sample.g, 0.000_01))
-            weightedLogB += weight * log(max(sample.b, 0.000_01))
-            totalWeight += weight
-        }
-
-        guard totalWeight > 0 else {
-            return nil
-        }
-
-        let rgb = (
-            r: exp(weightedLogR / totalWeight),
-            g: exp(weightedLogG / totalWeight),
-            b: exp(weightedLogB / totalWeight)
-        )
-
-        return normalizedWhiteBalanceSample(from: rgb)
+    // 收集所有亮度值
+    var brightnessValues: [Double] = []
+    for i in 0..<pixelCount {
+      let offset = i * bytesPerPixel
+      let r = Double(pixelData[offset])
+      let g = Double(pixelData[offset + 1])
+      let b = Double(pixelData[offset + 2])
+      let luminance = r * 0.299 + g * 0.587 + b * 0.114
+      brightnessValues.append(luminance)
     }
 
-    private static func normalizedWhiteBalanceSample(
-        from rgb: (r: Double, g: Double, b: Double)
-    ) -> (r: Double, g: Double, b: Double)? {
-        let luminance = 0.2126 * rgb.r + 0.7152 * rgb.g + 0.0722 * rgb.b
-        let maxComponent = max(rgb.r, max(rgb.g, rgb.b))
-        guard luminance.isFinite, luminance > 0, maxComponent.isFinite, maxComponent > 0 else {
-            return nil
-        }
+    // 使用百分位数确定范围
+    brightnessValues.sort()
+    let lowerBound = brightnessValues[Int(Double(brightnessValues.count) * 0.05)]
+    let upperBound = brightnessValues[Int(Double(brightnessValues.count) * 0.95)]
 
-        let targetLuminance = 0.25
-        var scale = targetLuminance / luminance
-        if maxComponent * scale > 0.9 {
-            scale = 0.9 / maxComponent
-        }
+    var redSum: Double = 0
+    var greenSum: Double = 0
+    var blueSum: Double = 0
+    var validPixelCount = 0
 
-        guard scale.isFinite, scale > 0 else {
-            return nil
-        }
+    for i in 0..<pixelCount {
+      let offset = i * bytesPerPixel
+      let r = Double(pixelData[offset])
+      let g = Double(pixelData[offset + 1])
+      let b = Double(pixelData[offset + 2])
+      let luminance = brightnessValues[i]
 
-        return (
-            r: rgb.r * scale,
-            g: rgb.g * scale,
-            b: rgb.b * scale
-        )
+      if luminance > lowerBound && luminance < upperBound {
+        redSum += r
+        greenSum += g
+        blueSum += b
+        validPixelCount += 1
+      }
     }
 
-    private static func percentile(_ sortedValues: [Double], fraction: Double) -> Double {
-        guard let first = sortedValues.first else {
-            return 0.0
-        }
-
-        guard sortedValues.count > 1 else {
-            return first
-        }
-
-        let clampedFraction = min(max(fraction, 0.0), 1.0)
-        let position = clampedFraction * Double(sortedValues.count - 1)
-        let lowerIndex = Int(position.rounded(.down))
-        let upperIndex = Int(position.rounded(.up))
-
-        guard lowerIndex != upperIndex else {
-            return sortedValues[lowerIndex]
-        }
-
-        let interpolation = position - Double(lowerIndex)
-        return sortedValues[lowerIndex] * (1.0 - interpolation) +
-            sortedValues[upperIndex] * interpolation
+    guard validPixelCount > 0 else {
+      return nil
     }
 
-    private static func applyRGBGains(to image: CIImage, r: Double, g: Double, b: Double) -> CIImage {
-        guard let filter = CIFilter(name: "CIColorMatrix") else { return image }
-        filter.setValue(image, forKey: kCIInputImageKey)
+    let avgRed = redSum / Double(validPixelCount)
+    let avgGreen = greenSum / Double(validPixelCount)
+    let avgBlue = blueSum / Double(validPixelCount)
 
-        let rVector = CIVector(x: r, y: 0, z: 0, w: 0)
-        let gVector = CIVector(x: 0, y: g, z: 0, w: 0)
-        let bVector = CIVector(x: 0, y: 0, z: b, w: 0)
-        let aVector = CIVector(x: 0, y: 0, z: 0, w: 1)
-        let biasVector = CIVector(x: 0, y: 0, z: 0, w: 0)
+    return (avgRed, avgGreen, avgBlue)
+  }
 
-        filter.setValue(rVector, forKey: "inputRVector")
-        filter.setValue(gVector, forKey: "inputGVector")
-        filter.setValue(bVector, forKey: "inputBVector")
-        filter.setValue(aVector, forKey: "inputAVector")
-        filter.setValue(biasVector, forKey: "inputBiasVector")
-
-        return filter.outputImage ?? image
+  private static func isX3fRawDNG(url: URL) -> Bool {
+    guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil),
+      let properties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [String: Any],
+      let dngDict = properties[kCGImagePropertyDNGDictionary as String] as? [String: Any],
+      let colorCalib = dngDict["ColorCalibration1"] as? [NSNumber],
+      colorCalib.count >= 9
+    else {
+      return false
     }
 
-    private static func sign(_ value: Double) -> Double {
-        if value > 0 { return 1.0 }
-        if value < 0 { return -1.0 }
-        return 0.0
+    let r = colorCalib[0].doubleValue
+    let g = colorCalib[4].doubleValue
+    let b = colorCalib[8].doubleValue
+
+    return abs(r - 1.0) > 0.01 || abs(g - 1.0) > 0.01 || abs(b - 1.0) > 0.01
+  }
+
+  private static func convertX3fToCachedDNG(from x3fURL: URL) -> URL? {
+    guard x3fURL.pathExtension.lowercased() == "x3f" else {
+      return nil
     }
 
-    private static func extractPixelData(from ciImage: CIImage) -> [(r: Double, g: Double, b: Double)]? {
-        let extent = ciImage.extent
-        guard extent.width > 0, extent.height > 0 else {
-            return nil
-        }
+    x3fDiskCacheLock.lock()
+    defer { x3fDiskCacheLock.unlock() }
 
-        let bytesPerPixel = 4
-        let bytesPerRow = Int(extent.width) * bytesPerPixel * MemoryLayout<Float>.size
-        let totalFloats = Int(extent.width) * Int(extent.height) * bytesPerPixel
+    cleanupStaleX3fDiskCacheFiles()
+    trimX3fDiskCacheIfNeeded()
 
-        var pixelData = [Float](repeating: 0, count: totalFloats)
+    let cacheDir = x3fDiskCacheDirectory()
+    ensureX3fDiskCacheDirectory()
 
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
-        ciContext.render(
-            ciImage,
-            toBitmap: &pixelData,
-            rowBytes: bytesPerRow,
-            bounds: extent,
-            format: .RGBAf,
-            colorSpace: colorSpace
-        )
+    let baseFilename = x3fURL.deletingPathExtension().lastPathComponent
+    let pathHash = stablePathHash(for: x3fURL)
+    let cachedURL = cacheDir.appendingPathComponent("\(baseFilename)_\(pathHash)_linear.dng")
 
-        var result: [(r: Double, g: Double, b: Double)] = []
-        let pixelCount = Int(extent.width) * Int(extent.height)
-
-        for i in 0 ..< pixelCount {
-            let offset = i * bytesPerPixel
-            let r = Double(pixelData[offset])
-            let g = Double(pixelData[offset + 1])
-            let b = Double(pixelData[offset + 2])
-            result.append((r: r, g: g, b: b))
-        }
-
-        return result
+    // 检查缓存
+    if FileManager.default.fileExists(atPath: cachedURL.path) {
+      if isConvertedCacheFresh(cacheURL: cachedURL, sourceURL: x3fURL) {
+        touchCacheFile(at: cachedURL)
+        print("ImageProcessor: 使用缓存的线性 sRGB DNG: \(cachedURL.lastPathComponent)")
+        return cachedURL
+      } else {
+        try? FileManager.default.removeItem(at: cachedURL)
+        print("ImageProcessor: 缓存已过期，重新转换 X3F")
+      }
     }
 
-    private static func calculateAverageRGB(from ciImage: CIImage) -> (red: Double, green: Double, blue: Double)? {
-        let extent = ciImage.extent
-        guard extent.width > 0, extent.height > 0 else {
-            return nil
-        }
+    print("ImageProcessor: 转换 X3F 为线性 sRGB DNG...")
 
-        let bytesPerPixel = 4
-        let bytesPerRow = Int(extent.width) * bytesPerPixel * MemoryLayout<Float>.size
-        let totalFloats = Int(extent.width) * Int(extent.height) * bytesPerPixel
-
-        var pixelData = [Float](repeating: 0, count: totalFloats)
-
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
-        ciContext.render(
-            ciImage,
-            toBitmap: &pixelData,
-            rowBytes: bytesPerRow,
-            bounds: extent,
-            format: .RGBAf,
-            colorSpace: colorSpace
-        )
-
-        let pixelCount = Int(extent.width) * Int(extent.height)
-
-        // 收集所有亮度值
-        var brightnessValues: [Double] = []
-        for i in 0 ..< pixelCount {
-            let offset = i * bytesPerPixel
-            let r = Double(pixelData[offset])
-            let g = Double(pixelData[offset + 1])
-            let b = Double(pixelData[offset + 2])
-            let luminance = r * 0.299 + g * 0.587 + b * 0.114
-            brightnessValues.append(luminance)
-        }
-
-        // 使用百分位数确定范围
-        brightnessValues.sort()
-        let lowerBound = brightnessValues[Int(Double(brightnessValues.count) * 0.05)]
-        let upperBound = brightnessValues[Int(Double(brightnessValues.count) * 0.95)]
-
-        var redSum: Double = 0
-        var greenSum: Double = 0
-        var blueSum: Double = 0
-        var validPixelCount = 0
-
-        for i in 0 ..< pixelCount {
-            let offset = i * bytesPerPixel
-            let r = Double(pixelData[offset])
-            let g = Double(pixelData[offset + 1])
-            let b = Double(pixelData[offset + 2])
-            let luminance = brightnessValues[i]
-
-            if luminance > lowerBound && luminance < upperBound {
-                redSum += r
-                greenSum += g
-                blueSum += b
-                validPixelCount += 1
-            }
-        }
-
-        guard validPixelCount > 0 else {
-            return nil
-        }
-
-        let avgRed = redSum / Double(validPixelCount)
-        let avgGreen = greenSum / Double(validPixelCount)
-        let avgBlue = blueSum / Double(validPixelCount)
-
-        return (avgRed, avgGreen, avgBlue)
+    guard let converterTool = resolveX3fConverterTool() else {
+      print("ImageProcessor: ✗ 未找到可用的 X3F 转换工具（系统 x3f-go 或 bundle x3f-extract）")
+      return nil
     }
 
-    private static func isX3fRawDNG(url: URL) -> Bool {
-        guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let properties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [String: Any],
-              let dngDict = properties[kCGImagePropertyDNGDictionary as String] as? [String: Any],
-              let colorCalib = dngDict["ColorCalibration1"] as? [NSNumber],
-              colorCalib.count >= 9 else {
-            return false
-        }
+    let process = Process()
+    let executableURL: URL
+    let arguments: [String]
 
-        let r = colorCalib[0].doubleValue
-        let g = colorCalib[4].doubleValue
-        let b = colorCalib[8].doubleValue
+    switch converterTool {
+    case .x3fGo(let x3fGoURL):
+      executableURL = x3fGoURL
+      arguments = ["-o", cachedURL.path, x3fURL.path]
+      print("ImageProcessor: 使用系统 x3f-go: \(x3fGoURL.path)")
+      print("ImageProcessor: 源 X3F 文件: \(x3fURL.path)")
+      print("ImageProcessor: 目标 DNG 文件: \(cachedURL.path)")
 
-        return abs(r - 1.0) > 0.01 || abs(g - 1.0) > 0.01 || abs(b - 1.0) > 0.01
+    case .x3fExtract(let x3fExtractURL):
+      executableURL = x3fExtractURL
+      arguments = ["-dng", "-linear-srgb", "-o", cacheDir.path, x3fURL.path]
+      print("ImageProcessor: 使用 bundle 中的 x3f-extract: \(x3fExtractURL.path)")
+      print("ImageProcessor: 源 X3F 文件: \(x3fURL.path)")
+      print("ImageProcessor: 输出目录: \(cacheDir.path)")
+      print("ImageProcessor: 目标 DNG 文件: \(cachedURL.path)")
     }
 
-    private static func findX3fSourceFile(for dngURL: URL) -> URL? {
-        let directory = dngURL.deletingLastPathComponent()
-        let filename = dngURL.lastPathComponent
+    process.executableURL = executableURL
+    process.arguments = arguments
 
-        // DNG 文件名格式：DP3Q0109.X3F.old.dng 或 DP3Q0109.X3F.dng
-        // 对应的 X3F：DP3Q0109.X3F
+    // 捕获标准输出和错误输出
+    let outputPipe = Pipe()
+    let errorPipe = Pipe()
+    process.standardOutput = outputPipe
+    process.standardError = errorPipe
 
-        var x3fName: String?
+    print("ImageProcessor: 执行命令: \(executableURL.path) \(arguments.joined(separator: " "))")
 
-        if filename.hasSuffix(".X3F.old.dng") {
-            x3fName = String(filename.dropLast(8)) // 去掉 ".old.dng"
-        } else if filename.hasSuffix(".X3F.dng") {
-            x3fName = String(filename.dropLast(4)) // 去掉 ".dng"
+    do {
+      try process.run()
+      process.waitUntilExit()
+
+      let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+      let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+
+      let toolName: String
+      switch converterTool {
+      case .x3fGo:
+        toolName = "x3f-go"
+      case .x3fExtract:
+        toolName = "x3f-extract"
+      }
+
+      if let output = String(data: outputData, encoding: .utf8), !output.isEmpty {
+        print("ImageProcessor: \(toolName) 输出:\n\(output)")
+      }
+
+      if let errorOutput = String(data: errorData, encoding: .utf8), !errorOutput.isEmpty {
+        print("ImageProcessor: \(toolName) 错误:\n\(errorOutput)")
+      }
+
+      print("ImageProcessor: \(toolName) 退出码: \(process.terminationStatus)")
+
+      if process.terminationStatus == 0 {
+        switch converterTool {
+        case .x3fGo:
+          if FileManager.default.fileExists(atPath: cachedURL.path) {
+            touchCacheFile(at: cachedURL)
+            trimX3fDiskCacheIfNeeded()
+            print("ImageProcessor: ✓ 转换成功，已缓存到: \(cachedURL.path)")
+            return cachedURL
+          }
+
+          print("ImageProcessor: ✗ x3f-go 未生成目标 DNG 文件: \(cachedURL.path)")
+
+        case .x3fExtract:
+          let expectedOutput = cacheDir.appendingPathComponent(x3fURL.lastPathComponent + ".dng")
+          print("ImageProcessor: 检查预期输出: \(expectedOutput.path)")
+
+          if FileManager.default.fileExists(atPath: expectedOutput.path) {
+            print("ImageProcessor: ✓ 找到输出文件")
+            try? FileManager.default.removeItem(at: cachedURL)
+            try? FileManager.default.moveItem(at: expectedOutput, to: cachedURL)
+            touchCacheFile(at: cachedURL)
+            trimX3fDiskCacheIfNeeded()
+            print("ImageProcessor: ✓ 转换成功，已缓存到: \(cachedURL.path)")
+            return cachedURL
+          }
+
+          print("ImageProcessor: ✗ 预期输出文件不存在")
+
+          if let files = try? FileManager.default.contentsOfDirectory(atPath: cacheDir.path) {
+            print("ImageProcessor: 输出目录内容: \(files)")
+          }
         }
-
-        guard let x3fName = x3fName else {
-            return nil
-        }
-
-        let x3fURL = directory.appendingPathComponent(x3fName)
-        if FileManager.default.fileExists(atPath: x3fURL.path) {
-            return x3fURL
-        }
-
-        return nil
+      }
+    } catch {
+      print("ImageProcessor: ✗ 转换失败: \(error)")
     }
 
-    private static func convertX3fRawDNG(from url: URL) -> URL? {
-        // 寻找源 X3F 文件
-        guard let x3fURL = findX3fSourceFile(for: url) else {
-            print("ImageProcessor: ⚠️ 未找到对应的 X3F 源文件")
-            return nil
-        }
+    return nil
+  }
 
-        print("ImageProcessor: 找到源 X3F 文件: \(x3fURL.lastPathComponent)")
+  private static func stablePathHash(for url: URL) -> String {
+    var hash: UInt64 = 1_469_598_103_934_665_603
+    for byte in url.standardizedFileURL.path.utf8 {
+      hash ^= UInt64(byte)
+      hash &*= 1_099_511_628_211
+    }
+    return String(hash, radix: 16)
+  }
 
-        // 生成缓存路径
-        let cacheDir = FileManager.default.temporaryDirectory.appendingPathComponent("RawKit/X3F", isDirectory: true)
-        try? FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
-
-        let baseFilename = x3fURL.deletingPathExtension().lastPathComponent
-        let pathHash = stablePathHash(for: x3fURL)
-        let cachedURL = cacheDir.appendingPathComponent("\(baseFilename)_\(pathHash)_linear.dng")
-
-        // 检查缓存
-        if FileManager.default.fileExists(atPath: cachedURL.path) {
-            if isConvertedCacheFresh(cacheURL: cachedURL, sourceURL: x3fURL) {
-                print("ImageProcessor: 使用缓存的线性 sRGB DNG: \(cachedURL.lastPathComponent)")
-                return cachedURL
-            } else {
-                try? FileManager.default.removeItem(at: cachedURL)
-                print("ImageProcessor: 缓存已过期，重新转换 X3F")
-            }
-        }
-
-        print("ImageProcessor: 转换 X3F 为线性 sRGB DNG...")
-
-        // 从应用 bundle 中查找 x3f-extract
-        guard let x3fExtractPath = Bundle.main.path(forResource: "x3f-extract", ofType: nil) else {
-            print("ImageProcessor: ✗ 应用 bundle 中未找到 x3f-extract 工具")
-            return nil
-        }
-
-        print("ImageProcessor: 使用 bundle 中的 x3f-extract: \(x3fExtractPath)")
-        print("ImageProcessor: 源 X3F 文件: \(x3fURL.path)")
-        print("ImageProcessor: 输出目录: \(cacheDir.path)")
-        print("ImageProcessor: 目标 DNG 文件: \(cachedURL.path)")
-
-        // 调用 x3f-extract
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: x3fExtractPath)
-        process.arguments = ["-dng", "-linear-srgb", "-o", cacheDir.path, x3fURL.path]
-
-        // 捕获标准输出和错误输出
-        let outputPipe = Pipe()
-        let errorPipe = Pipe()
-        process.standardOutput = outputPipe
-        process.standardError = errorPipe
-
-        print("ImageProcessor: 执行命令: \(x3fExtractPath) -dng -linear-srgb -o \(cacheDir.path) \(x3fURL.path)")
-
-        do {
-            try process.run()
-            process.waitUntilExit()
-
-            let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-            let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-
-            if let output = String(data: outputData, encoding: .utf8), !output.isEmpty {
-                print("ImageProcessor: x3f-extract 输出:\n\(output)")
-            }
-
-            if let errorOutput = String(data: errorData, encoding: .utf8), !errorOutput.isEmpty {
-                print("ImageProcessor: x3f-extract 错误:\n\(errorOutput)")
-            }
-
-            print("ImageProcessor: x3f-extract 退出码: \(process.terminationStatus)")
-
-            if process.terminationStatus == 0 {
-                // x3f-extract 输出格式：<source>.dng (如 DP3Q0109.X3F.dng)
-                let expectedOutput = cacheDir.appendingPathComponent(x3fURL.lastPathComponent + ".dng")
-                print("ImageProcessor: 检查预期输出: \(expectedOutput.path)")
-
-                if FileManager.default.fileExists(atPath: expectedOutput.path) {
-                    print("ImageProcessor: ✓ 找到输出文件")
-                    // 重命名为我们的缓存格式
-                    try? FileManager.default.removeItem(at: cachedURL) // 删除旧缓存
-                    try? FileManager.default.moveItem(at: expectedOutput, to: cachedURL)
-                    print("ImageProcessor: ✓ 转换成功，已缓存到: \(cachedURL.path)")
-                    return cachedURL
-                } else {
-                    print("ImageProcessor: ✗ 预期输出文件不存在")
-
-                    // 列出输出目录的所有文件
-                    if let files = try? FileManager.default.contentsOfDirectory(atPath: cacheDir.path) {
-                        print("ImageProcessor: 输出目录内容: \(files)")
-                    }
-                }
-            }
-        } catch {
-            print("ImageProcessor: ✗ 转换失败: \(error)")
-        }
-
-        return nil
+  private static func isConvertedCacheFresh(cacheURL: URL, sourceURL: URL) -> Bool {
+    guard
+      let cacheValues = try? cacheURL.resourceValues(forKeys: [
+        .contentModificationDateKey,
+        .fileSizeKey,
+      ]),
+      let sourceValues = try? sourceURL.resourceValues(forKeys: [.contentModificationDateKey]),
+      let cacheDate = cacheValues.contentModificationDate,
+      let sourceDate = sourceValues.contentModificationDate,
+      (cacheValues.fileSize ?? 0) > 0
+    else {
+      return false
     }
 
-    private static func stablePathHash(for url: URL) -> String {
-        var hash: UInt64 = 1_469_598_103_934_665_603
-        for byte in url.standardizedFileURL.path.utf8 {
-            hash ^= UInt64(byte)
-            hash &*= 1_099_511_628_211
-        }
-        return String(hash, radix: 16)
+    return cacheDate >= sourceDate
+  }
+
+  private static func loadRawWithFilter(from url: URL) -> CIImage? {
+    print("ImageProcessor: 使用拍摄元信息加载 RAW")
+    print("ImageProcessor: 输入文件: \(url.path)")
+
+    guard let rawFilter = CIFilter(imageURL: url, options: [:]) else {
+      print("ImageProcessor: ✗ 无法创建 RAW 过滤器")
+      return nil
     }
 
-    private static func isConvertedCacheFresh(cacheURL: URL, sourceURL: URL) -> Bool {
-        guard
-            let cacheValues = try? cacheURL.resourceValues(forKeys: [
-                .contentModificationDateKey,
-                .fileSizeKey,
-            ]),
-            let sourceValues = try? sourceURL.resourceValues(forKeys: [.contentModificationDateKey]),
-            let cacheDate = cacheValues.contentModificationDate,
-            let sourceDate = sourceValues.contentModificationDate,
-            (cacheValues.fileSize ?? 0) > 0
-        else {
-            return false
-        }
+    let shootingMetadata = readRawShootingMetadata(from: rawFilter)
+    applyRawShootingMetadata(shootingMetadata, to: rawFilter)
+    logRawShootingMetadata(shootingMetadata)
 
-        return cacheDate >= sourceDate
+    if rawFilter.inputKeys.contains("inputDraftMode") {
+      rawFilter.setValue(false, forKey: "inputDraftMode")
+      print("ImageProcessor: ✓ 禁用草稿模式")
     }
 
-    private static func loadRawWithFilter(from url: URL) -> CIImage? {
-        print("ImageProcessor: 使用拍摄元信息加载 RAW")
-        print("ImageProcessor: 输入文件: \(url.path)")
-
-        guard let rawFilter = CIFilter(imageURL: url, options: [:]) else {
-            print("ImageProcessor: ✗ 无法创建 RAW 过滤器")
-            return nil
-        }
-
-        let shootingMetadata = readRawShootingMetadata(from: rawFilter)
-        applyRawShootingMetadata(shootingMetadata, to: rawFilter)
-        logRawShootingMetadata(shootingMetadata)
-
-        if rawFilter.inputKeys.contains("inputDraftMode") {
-            rawFilter.setValue(false, forKey: "inputDraftMode")
-            print("ImageProcessor: ✓ 禁用草稿模式")
-        }
-
-        if rawFilter.inputKeys.contains("inputIgnoreOrientation") {
-            rawFilter.setValue(false, forKey: "inputIgnoreOrientation")
-        }
-
-        guard let outputImage = rawFilter.outputImage else {
-            print("ImageProcessor: ✗ RAW 过滤器无输出")
-            return nil
-        }
-
-        print("ImageProcessor: ✓ CIRAWFilter 输出完成（白平衡已在线性空间应用）")
-        if let colorSpace = outputImage.colorSpace {
-            let csName = colorSpace.name.flatMap { String(describing: $0) } ?? "Unknown"
-            print("ImageProcessor: 输出色彩空间: \(csName)")
-        }
-
-        return outputImage
+    if rawFilter.inputKeys.contains("inputIgnoreOrientation") {
+      rawFilter.setValue(false, forKey: "inputIgnoreOrientation")
     }
 
-    private static func readRawShootingMetadata(from rawFilter: CIFilter) -> RawShootingMetadata {
-        RawShootingMetadata(
-            neutralTemperature: doubleFilterValue("inputNeutralTemperature", in: rawFilter),
-            neutralTint: doubleFilterValue("inputNeutralTint", in: rawFilter),
-            ev: doubleFilterValue("inputEV", in: rawFilter),
-            boost: doubleFilterValue("inputBoost", in: rawFilter),
-            baselineExposure: doubleFilterValue("inputBaselineExposure", in: rawFilter),
-            isVendorLensCorrectionEnabled: boolFilterValue(
-                "inputEnableVendorLensCorrection",
-                in: rawFilter
-            )
-        )
+    guard let outputImage = rawFilter.outputImage else {
+      print("ImageProcessor: ✗ RAW 过滤器无输出")
+      return nil
     }
 
-    private static func applyRawShootingMetadata(
-        _ metadata: RawShootingMetadata,
-        to rawFilter: CIFilter
+    print("ImageProcessor: ✓ CIRAWFilter 输出完成（白平衡已在线性空间应用）")
+    if let colorSpace = outputImage.colorSpace {
+      let csName = colorSpace.name.flatMap { String(describing: $0) } ?? "Unknown"
+      print("ImageProcessor: 输出色彩空间: \(csName)")
+    }
+
+    return outputImage
+  }
+
+  private static func readRawShootingMetadata(from rawFilter: CIFilter) -> RawShootingMetadata {
+    RawShootingMetadata(
+      neutralTemperature: doubleFilterValue("inputNeutralTemperature", in: rawFilter),
+      neutralTint: doubleFilterValue("inputNeutralTint", in: rawFilter),
+      ev: doubleFilterValue("inputEV", in: rawFilter),
+      boost: doubleFilterValue("inputBoost", in: rawFilter),
+      baselineExposure: doubleFilterValue("inputBaselineExposure", in: rawFilter),
+      isVendorLensCorrectionEnabled: boolFilterValue(
+        "inputEnableVendorLensCorrection",
+        in: rawFilter
+      )
+    )
+  }
+
+  private static func applyRawShootingMetadata(
+    _ metadata: RawShootingMetadata,
+    to rawFilter: CIFilter
+  ) {
+    setFilterValue(metadata.neutralTemperature, forKey: "inputNeutralTemperature", in: rawFilter)
+    setFilterValue(metadata.neutralTint, forKey: "inputNeutralTint", in: rawFilter)
+    setFilterValue(metadata.ev, forKey: "inputEV", in: rawFilter)
+    setFilterValue(metadata.boost, forKey: "inputBoost", in: rawFilter)
+    setFilterValue(metadata.baselineExposure, forKey: "inputBaselineExposure", in: rawFilter)
+    setFilterValue(
+      metadata.isVendorLensCorrectionEnabled,
+      forKey: "inputEnableVendorLensCorrection",
+      in: rawFilter
+    )
+  }
+
+  private static func logRawShootingMetadata(_ metadata: RawShootingMetadata) {
+    let temperatureText = metadata.neutralTemperature.map { "\(Int($0))K" } ?? "无"
+    let tintText = metadata.neutralTint.map { String(format: "%.2f", $0) } ?? "无"
+    let evText = metadata.ev.map { String(format: "%.2f", $0) } ?? "无"
+    let boostText = metadata.boost.map { String(format: "%.2f", $0) } ?? "无"
+    let baselineExposureText = metadata.baselineExposure.map { String(format: "%.2f", $0) } ?? "无"
+    let lensCorrectionText = metadata.isVendorLensCorrectionEnabled.map { $0 ? "开" : "关" } ?? "无"
+
+    print(
+      "ImageProcessor: RAW 拍摄元信息 - 白平衡 \(temperatureText), 色调 \(tintText), EV \(evText), Boost \(boostText), BaselineExposure \(baselineExposureText), 镜头校正 \(lensCorrectionText)"
+    )
+  }
+
+  private static func doubleFilterValue(_ key: String, in filter: CIFilter) -> Double? {
+    guard filter.inputKeys.contains(key) else {
+      return nil
+    }
+
+    return (filter.value(forKey: key) as? NSNumber)?.doubleValue
+  }
+
+  private static func boolFilterValue(_ key: String, in filter: CIFilter) -> Bool? {
+    guard filter.inputKeys.contains(key) else {
+      return nil
+    }
+
+    return (filter.value(forKey: key) as? NSNumber)?.boolValue
+  }
+
+  private static func setFilterValue(_ value: Double?, forKey key: String, in filter: CIFilter) {
+    guard filter.inputKeys.contains(key),
+      let value
+    else {
+      return
+    }
+
+    filter.setValue(value, forKey: key)
+  }
+
+  private static func setFilterValue(_ value: Bool?, forKey key: String, in filter: CIFilter) {
+    guard filter.inputKeys.contains(key),
+      let value
+    else {
+      return
+    }
+
+    filter.setValue(value, forKey: key)
+  }
+
+  static func applyAdjustments(to image: CIImage, adjustments: ImageAdjustments) -> CIImage {
+    var result = image
+
+    // 首先应用构图变换，再按变换后的画面裁切。
+    if adjustments.rotation != 0 || abs(adjustments.straightenAngle) > 0.0001
+      || adjustments.flipHorizontal || adjustments.flipVertical
+    {
+      result = applyTransform(
+        to: result,
+        rotation: adjustments.rotation,
+        straightenAngle: adjustments.straightenAngle,
+        flipHorizontal: adjustments.flipHorizontal,
+        flipVertical: adjustments.flipVertical
+      )
+    }
+
+    if adjustments.cropLeft > 0.0001 || adjustments.cropTop > 0.0001
+      || adjustments.cropRight > 0.0001 || adjustments.cropBottom > 0.0001
+      || adjustments.cropAspectRatio != .free
+    {
+      result = applyCrop(
+        to: result,
+        left: adjustments.cropLeft,
+        top: adjustments.cropTop,
+        right: adjustments.cropRight,
+        bottom: adjustments.cropBottom,
+        aspectRatio: adjustments.cropAspectRatio
+      )
+    }
+
+    if adjustments.exposure != 0.0 {
+      result = applyExposure(to: result, value: adjustments.exposure)
+    }
+
+    if adjustments.perceptualExposure != 0.0 {
+      result = applyPerceptualExposure(to: result, value: adjustments.perceptualExposure)
+    }
+
+    if adjustments.contrast != 0.0 {
+      result = applyContrast(to: result, value: adjustments.contrast)
+    }
+
+    if adjustments.highlights != 1.0 || adjustments.shadows != 0.0 || adjustments.whites != 0.0
+      || adjustments.blacks != 0.0
+    {
+      result = applyHighlightsShadows(
+        to: result,
+        highlights: adjustments.highlights,
+        shadows: adjustments.shadows,
+        whites: adjustments.whites,
+        blacks: adjustments.blacks
+      )
+    }
+
+    if adjustments.saturation != 1.0 {
+      result = applySaturation(to: result, value: adjustments.saturation)
+    }
+
+    if adjustments.vibrance != 0.0 {
+      result = applyVibrance(to: result, value: adjustments.vibrance)
+    }
+
+    // 检查是否需要应用白平衡调整（从 D65 基准调整到目标白平衡）
+    if abs(adjustments.temperature - 6500.0) > 0.01 || abs(adjustments.tint) > 0.01 {
+      result = applyWhiteBalance(
+        to: result,
+        temperature: adjustments.temperature,
+        tint: adjustments.tint
+      )
+    }
+
+    if adjustments.clarity != 0.0 {
+      result = applyClarity(to: result, value: adjustments.clarity)
+    }
+
+    if adjustments.dehaze != 0.0 {
+      result = applyDehaze(to: result, value: adjustments.dehaze)
+    }
+
+    // Photoshop 的曲线应用顺序：
+    // 1. RGB 复合曲线（同时应用到 R、G、B 三个通道）
+    // 2. R/G/B 单独曲线（只影响各自通道）
+    // 3. 亮度曲线
+
+    if adjustments.rgbCurve.hasPoints {
+      // RGB 曲线应该应用到所有三个颜色通道
+      result = adjustments.rgbCurve.applyToRGB(to: result)
+    }
+
+    if adjustments.redCurve.hasPoints {
+      result = adjustments.redCurve.apply(to: result, channel: .red)
+    }
+
+    if adjustments.greenCurve.hasPoints {
+      result = adjustments.greenCurve.apply(to: result, channel: .green)
+    }
+
+    if adjustments.blueCurve.hasPoints {
+      result = adjustments.blueCurve.apply(to: result, channel: .blue)
+    }
+
+    if adjustments.luminanceCurve.hasPoints {
+      result = adjustments.luminanceCurve.apply(to: result, channel: .luminance)
+    }
+
+    if adjustments.sharpness != 0.0 {
+      result = applySharpness(to: result, value: adjustments.sharpness)
+    }
+
+    var hasAppliedHDRAdjustments = false
+
+    if let lutURL = adjustments.lutURL {
+      if adjustments.isHDREnabled {
+        result = applyHDRAdjustmentsIfNeeded(to: result, adjustments: adjustments)
+        hasAppliedHDRAdjustments = true
+      }
+
+      result = applyLUT(
+        to: result,
+        lutURL: lutURL,
+        alpha: adjustments.lutAlpha,
+        profile: adjustments.lutColorProfile,
+        isHDRPreserving: adjustments.isHDREnabled
+      )
+
+      if hasAppliedHDRAdjustments, #available(macOS 16.0, *) {
+        result = result.settingContentHeadroom(Float(adjustments.hdrHeadroom))
+      }
+    }
+
+    if !hasAppliedHDRAdjustments {
+      result = applyHDRAdjustmentsIfNeeded(to: result, adjustments: adjustments)
+    }
+
+    return result
+  }
+
+  static func convertToDisplayCGImage(_ ciImage: CIImage, adjustments: ImageAdjustments)
+    -> DisplayCGImageResult?
+  {
+    guard adjustments.isHDREnabled else {
+      return convertToCGImage(ciImage).map {
+        DisplayCGImageResult(cgImage: $0, isHDR: false, didFallbackToSDR: false)
+      }
+    }
+
+    let extent = ciImage.extent
+    guard !extent.isEmpty, extent.isInfinite == false else {
+      return nil
+    }
+
+    let outputImage: CIImage
+    if #available(macOS 16.0, *) {
+      outputImage = ciImage.settingContentHeadroom(Float(adjustments.hdrHeadroom))
+    } else {
+      outputImage = ciImage
+    }
+
+    let hdrColorSpace =
+      CGColorSpace(name: CGColorSpace.itur_2100_HLG)
+      ?? CGColorSpace(name: CGColorSpace.displayP3_HLG)
+
+    guard let hdrColorSpace else {
+      return convertToCGImage(ciImage).map {
+        DisplayCGImageResult(cgImage: $0, isHDR: false, didFallbackToSDR: true)
+      }
+    }
+
+    if let cgImage = ciContext.createCGImage(
+      outputImage,
+      from: extent,
+      format: .RGBAh,
+      colorSpace: hdrColorSpace
     ) {
-        setFilterValue(metadata.neutralTemperature, forKey: "inputNeutralTemperature", in: rawFilter)
-        setFilterValue(metadata.neutralTint, forKey: "inputNeutralTint", in: rawFilter)
-        setFilterValue(metadata.ev, forKey: "inputEV", in: rawFilter)
-        setFilterValue(metadata.boost, forKey: "inputBoost", in: rawFilter)
-        setFilterValue(metadata.baselineExposure, forKey: "inputBaselineExposure", in: rawFilter)
-        setFilterValue(
-            metadata.isVendorLensCorrectionEnabled,
-            forKey: "inputEnableVendorLensCorrection",
-            in: rawFilter
-        )
+      return DisplayCGImageResult(cgImage: cgImage, isHDR: true, didFallbackToSDR: false)
     }
 
-    private static func logRawShootingMetadata(_ metadata: RawShootingMetadata) {
-        let temperatureText = metadata.neutralTemperature.map { "\(Int($0))K" } ?? "无"
-        let tintText = metadata.neutralTint.map { String(format: "%.2f", $0) } ?? "无"
-        let evText = metadata.ev.map { String(format: "%.2f", $0) } ?? "无"
-        let boostText = metadata.boost.map { String(format: "%.2f", $0) } ?? "无"
-        let baselineExposureText = metadata.baselineExposure.map { String(format: "%.2f", $0) } ?? "无"
-        let lensCorrectionText = metadata.isVendorLensCorrectionEnabled.map { $0 ? "开" : "关" } ?? "无"
-
-        print(
-            "ImageProcessor: RAW 拍摄元信息 - 白平衡 \(temperatureText), 色调 \(tintText), EV \(evText), Boost \(boostText), BaselineExposure \(baselineExposureText), 镜头校正 \(lensCorrectionText)"
-        )
+    print(
+      "ImageProcessor: HDR display render failed (extent=\(extent.size.width.rounded())x\(extent.size.height.rounded()), headroom=\(adjustments.hdrHeadroom)), falling back to SDR"
+    )
+    guard let sdrCGImage = convertToCGImage(ciImage) else {
+      print("ImageProcessor: SDR fallback render also failed")
+      return nil
     }
 
-    private static func doubleFilterValue(_ key: String, in filter: CIFilter) -> Double? {
-        guard filter.inputKeys.contains(key) else {
-            return nil
-        }
+    return DisplayCGImageResult(cgImage: sdrCGImage, isHDR: false, didFallbackToSDR: true)
+  }
 
-        return (filter.value(forKey: key) as? NSNumber)?.doubleValue
+  // 摄影曝光调整 - 真实 EV 曝光
+  // 基于 EV (Exposure Value) 光圈档位
+  // 每增加 1 EV，亮度翻倍；每减少 1 EV，亮度减半
+  // 公式：output = input * 2^EV
+  // 范围：[-5, +5] EV，相当于 10 档光圈
+  private static func applyExposure(to image: CIImage, value: Double) -> CIImage {
+    if value == 0.0 { return image }
+
+    guard let filter = CIFilter(name: "CIExposureAdjust") else { return image }
+    filter.setValue(image, forKey: kCIInputImageKey)
+
+    filter.setValue(value, forKey: kCIInputEVKey)
+
+    return filter.outputImage ?? image
+  }
+
+  // 感知曝光：在显示参考亮度上整体提亮/压暗，
+  // 同时通过 sigmoid 保护端点，并以亮度比例缩放 RGB 保持色相稳定。
+  private static func applyPerceptualExposure(to image: CIImage, value: Double) -> CIImage {
+    if value == 0.0 { return image }
+
+    return applyPerceptualLuminanceShift(
+      to: image,
+      value: value,
+      focusSigma: 0.0,
+      maxShift: 0.25
+    )
+  }
+
+  private static let perceptualMidGrayPivot: CGFloat = 0.425
+
+  private static func applyPerceptualLuminanceShift(
+    to image: CIImage,
+    value: Double,
+    focusSigma: CGFloat,
+    maxShift: CGFloat
+  ) -> CIImage {
+    guard let kernel = perceptualLuminanceShiftKernel else {
+      return image
     }
 
-    private static func boolFilterValue(_ key: String, in filter: CIFilter) -> Bool? {
-        guard filter.inputKeys.contains(key) else {
-            return nil
-        }
+    return kernel.apply(
+      extent: image.extent,
+      arguments: [
+        image,
+        CGFloat(value),
+        perceptualMidGrayPivot,
+        focusSigma,
+        maxShift,
+      ]
+    ) ?? image
+  }
 
-        return (filter.value(forKey: key) as? NSNumber)?.boolValue
+  private static func applyHDRDisplayBoost(to image: CIImage, adjustments: ImageAdjustments)
+    -> CIImage
+  {
+    guard let kernel = hdrDisplayBoostKernel else {
+      return image
     }
 
-    private static func setFilterValue(_ value: Double?, forKey key: String, in filter: CIFilter) {
-        guard filter.inputKeys.contains(key),
-              let value
-        else {
-            return
-        }
+    let headroom = min(
+      max(adjustments.hdrHeadroom, ImageAdjustments.hdrHeadroomRange.lowerBound),
+      ImageAdjustments.hdrHeadroomRange.upperBound
+    )
 
-        filter.setValue(value, forKey: key)
+    let output =
+      kernel.apply(
+        extent: image.extent,
+        arguments: [
+          image,
+          CGFloat(adjustments.hdrBrightness),
+          CGFloat(adjustments.hdrHighlights),
+          CGFloat(adjustments.hdrWhites),
+          CGFloat(headroom),
+        ]
+      ) ?? image
+
+    if #available(macOS 16.0, *) {
+      return output.settingContentHeadroom(Float(headroom))
     }
 
-    private static func setFilterValue(_ value: Bool?, forKey key: String, in filter: CIFilter) {
-        guard filter.inputKeys.contains(key),
-              let value
-        else {
-            return
-        }
+    return output
+  }
 
-        filter.setValue(value, forKey: key)
+  private static func applyHDRAdjustmentsIfNeeded(to image: CIImage, adjustments: ImageAdjustments)
+    -> CIImage
+  {
+    guard adjustments.isHDREnabled else {
+      return image
     }
 
-    private static func loadWithX3fExtract(from url: URL) async -> NSImage? {
-        print("ImageProcessor: 尝试使用 x3f-extract 加载: \(url.lastPathComponent)")
-
-        // 获取应用包内的 x3f-extract 路径
-        guard let x3fPath = Bundle.main.path(forResource: "x3f-extract", ofType: nil) else {
-            print("ImageProcessor: ✗ 找不到 x3f-extract 工具")
-            return nil
-        }
-
-        print("ImageProcessor: x3f-extract 路径: \(x3fPath)")
-
-        // 创建临时目录用于输出
-        let tempDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString)
-        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
-
-        // x3f-extract 会生成 .dng 文件
-        let outputFileName = "\(url.lastPathComponent).dng"
-        let expectedOutputPath = tempDir.appendingPathComponent(outputFileName)
-
-        // 执行 x3f-extract 命令
-        // 参数: -dng -linear-srgb -o <输出目录> <输入文件>
-        // -linear-srgb: 输出线性 sRGB，已应用相机白平衡
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: x3fPath)
-        process.arguments = ["-dng", "-linear-srgb", "-o", tempDir.path, url.path]
-
-        let errorPipe = Pipe()
-        let outputPipe = Pipe()
-        process.standardError = errorPipe
-        process.standardOutput = outputPipe
-
-        do {
-            try process.run()
-            process.waitUntilExit()
-
-            if process.terminationStatus != 0 {
-                let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-                let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-                let errorMsg = String(data: errorData, encoding: .utf8) ?? "unknown"
-                let outputMsg = String(data: outputData, encoding: .utf8) ?? ""
-                print("ImageProcessor: ✗ x3f-extract 执行失败，状态码: \(process.terminationStatus)")
-                print("ImageProcessor: 输出: \(outputMsg)")
-                print("ImageProcessor: 错误信息: \(errorMsg)")
-                return nil
-            }
-
-            // 加载生成的 DNG 文件
-            if FileManager.default.fileExists(atPath: expectedOutputPath.path),
-               let image = NSImage(contentsOf: expectedOutputPath) {
-                print("ImageProcessor: ✓ x3f-extract 加载成功，图片尺寸: \(image.size)")
-                return image
-            } else {
-                print("ImageProcessor: ✗ 无法加载 x3f-extract 生成的 DNG 文件")
-                print("ImageProcessor: 期望路径: \(expectedOutputPath.path)")
-                // 列出临时目录中的文件以调试
-                if let files = try? FileManager.default.contentsOfDirectory(atPath: tempDir.path) {
-                    print("ImageProcessor: 临时目录内容: \(files)")
-                }
-                return nil
-            }
-        } catch {
-            print("ImageProcessor: ✗ x3f-extract 执行错误: \(error)")
-            return nil
-        }
+    if adjustments.isHDRAutoAdjustmentEnabled || abs(adjustments.hdrBrightness) > 0.0001
+      || abs(adjustments.hdrHighlights) > 0.0001 || abs(adjustments.hdrWhites) > 0.0001
+    {
+      return applyHDRDisplayBoost(to: image, adjustments: adjustments)
     }
 
-    static func applyAdjustments(to image: CIImage, adjustments: ImageAdjustments) -> CIImage {
-        var result = image
-
-        // 首先应用构图变换，再按变换后的画面裁切。
-        if adjustments.rotation != 0 ||
-            abs(adjustments.straightenAngle) > 0.0001 ||
-            adjustments.flipHorizontal ||
-            adjustments.flipVertical
-        {
-            result = applyTransform(
-                to: result,
-                rotation: adjustments.rotation,
-                straightenAngle: adjustments.straightenAngle,
-                flipHorizontal: adjustments.flipHorizontal,
-                flipVertical: adjustments.flipVertical
-            )
-        }
-
-        if adjustments.cropLeft > 0.0001 ||
-            adjustments.cropTop > 0.0001 ||
-            adjustments.cropRight > 0.0001 ||
-            adjustments.cropBottom > 0.0001 ||
-            adjustments.cropAspectRatio != .free
-        {
-            result = applyCrop(
-                to: result,
-                left: adjustments.cropLeft,
-                top: adjustments.cropTop,
-                right: adjustments.cropRight,
-                bottom: adjustments.cropBottom,
-                aspectRatio: adjustments.cropAspectRatio
-            )
-        }
-
-        if adjustments.exposure != 0.0 {
-            result = applyExposure(to: result, value: adjustments.exposure)
-        }
-
-        if adjustments.perceptualExposure != 0.0 {
-            result = applyPerceptualExposure(to: result, value: adjustments.perceptualExposure)
-        }
-
-        if adjustments.contrast != 0.0 {
-            result = applyContrast(to: result, value: adjustments.contrast)
-        }
-
-        if adjustments.highlights != 1.0 || adjustments.shadows != 0.0 ||
-            adjustments.whites != 0.0 || adjustments.blacks != 0.0
-        {
-            result = applyHighlightsShadows(
-                to: result,
-                highlights: adjustments.highlights,
-                shadows: adjustments.shadows,
-                whites: adjustments.whites,
-                blacks: adjustments.blacks
-            )
-        }
-
-        if adjustments.saturation != 1.0 {
-            result = applySaturation(to: result, value: adjustments.saturation)
-        }
-
-        if adjustments.vibrance != 0.0 {
-            result = applyVibrance(to: result, value: adjustments.vibrance)
-        }
-
-        // 检查是否需要应用白平衡调整（从 D65 基准调整到目标白平衡）
-        if abs(adjustments.temperature - 6500.0) > 0.01 || abs(adjustments.tint) > 0.01 {
-            result = applyWhiteBalance(
-                to: result,
-                temperature: adjustments.temperature,
-                tint: adjustments.tint
-            )
-        }
-
-        if adjustments.clarity != 0.0 {
-            result = applyClarity(to: result, value: adjustments.clarity)
-        }
-
-        if adjustments.dehaze != 0.0 {
-            result = applyDehaze(to: result, value: adjustments.dehaze)
-        }
-
-        // Photoshop 的曲线应用顺序：
-        // 1. RGB 复合曲线（同时应用到 R、G、B 三个通道）
-        // 2. R/G/B 单独曲线（只影响各自通道）
-        // 3. 亮度曲线
-
-        if adjustments.rgbCurve.hasPoints {
-            // RGB 曲线应该应用到所有三个颜色通道
-            result = adjustments.rgbCurve.applyToRGB(to: result)
-        }
-
-        if adjustments.redCurve.hasPoints {
-            result = adjustments.redCurve.apply(to: result, channel: .red)
-        }
-
-        if adjustments.greenCurve.hasPoints {
-            result = adjustments.greenCurve.apply(to: result, channel: .green)
-        }
-
-        if adjustments.blueCurve.hasPoints {
-            result = adjustments.blueCurve.apply(to: result, channel: .blue)
-        }
-
-        if adjustments.luminanceCurve.hasPoints {
-            result = adjustments.luminanceCurve.apply(to: result, channel: .luminance)
-        }
-
-        if adjustments.sharpness != 0.0 {
-            result = applySharpness(to: result, value: adjustments.sharpness)
-        }
-
-        var hasAppliedHDRAdjustments = false
-
-        if let lutURL = adjustments.lutURL {
-            if adjustments.isHDREnabled {
-                result = applyHDRAdjustmentsIfNeeded(to: result, adjustments: adjustments)
-                hasAppliedHDRAdjustments = true
-            }
-
-            result = applyLUT(
-                to: result,
-                lutURL: lutURL,
-                alpha: adjustments.lutAlpha,
-                profile: adjustments.lutColorProfile,
-                isHDRPreserving: adjustments.isHDREnabled
-            )
-
-            if hasAppliedHDRAdjustments, #available(macOS 16.0, *) {
-                result = result.settingContentHeadroom(Float(adjustments.hdrHeadroom))
-            }
-        }
-
-        if !hasAppliedHDRAdjustments {
-            result = applyHDRAdjustmentsIfNeeded(to: result, adjustments: adjustments)
-        }
-
-        return result
+    if #available(macOS 16.0, *) {
+      return image.settingContentHeadroom(Float(adjustments.hdrHeadroom))
     }
 
-    static func convertToDisplayCGImage(_ ciImage: CIImage, adjustments: ImageAdjustments) -> DisplayCGImageResult? {
-        guard adjustments.isHDREnabled else {
-            return convertToCGImage(ciImage).map {
-                DisplayCGImageResult(cgImage: $0, isHDR: false, didFallbackToSDR: false)
-            }
-        }
+    return image
+  }
 
-        let extent = ciImage.extent
-        guard !extent.isEmpty, extent.isInfinite == false else {
-            return nil
-        }
+  // Photoshop 风格的对比度调整
+  // 对比度围绕中点（0.5）进行 S 曲线调整
+  private static func applyContrast(to image: CIImage, value: Double) -> CIImage {
+    if value == 0.0 { return image }
 
-        let outputImage: CIImage
-        if #available(macOS 16.0, *) {
-            outputImage = ciImage.settingContentHeadroom(Float(adjustments.hdrHeadroom))
-        } else {
-            outputImage = ciImage
-        }
+    guard let kernel = hdrContrastAdjustKernel else { return image }
 
-        let hdrColorSpace = CGColorSpace(name: CGColorSpace.itur_2100_HLG) ??
-            CGColorSpace(name: CGColorSpace.displayP3_HLG)
+    return kernel.apply(
+      extent: image.extent,
+      arguments: [
+        image,
+        CGFloat(value),
+      ]
+    ) ?? image
+  }
 
-        guard let hdrColorSpace else {
-            return convertToCGImage(ciImage).map {
-                DisplayCGImageResult(cgImage: $0, isHDR: false, didFallbackToSDR: true)
-            }
-        }
+  private static func applySaturation(to image: CIImage, value: Double) -> CIImage {
+    applyColorfulness(to: image, saturation: value, vibrance: 0.0)
+  }
 
-        if let cgImage = ciContext.createCGImage(
-            outputImage,
-            from: extent,
-            format: .RGBAh,
-            colorSpace: hdrColorSpace
-        ) {
-            return DisplayCGImageResult(cgImage: cgImage, isHDR: true, didFallbackToSDR: false)
-        }
+  private static func applyVibrance(to image: CIImage, value: Double) -> CIImage {
+    applyColorfulness(to: image, saturation: 1.0, vibrance: value)
+  }
 
-        print("ImageProcessor: HDR display render failed (extent=\(extent.size.width.rounded())x\(extent.size.height.rounded()), headroom=\(adjustments.hdrHeadroom)), falling back to SDR")
-        guard let sdrCGImage = convertToCGImage(ciImage) else {
-            print("ImageProcessor: SDR fallback render also failed")
-            return nil
-        }
+  private static func applyColorfulness(
+    to image: CIImage,
+    saturation: Double,
+    vibrance: Double
+  ) -> CIImage {
+    guard let kernel = hdrColorfulnessAdjustKernel else { return image }
 
-        return DisplayCGImageResult(cgImage: sdrCGImage, isHDR: false, didFallbackToSDR: true)
+    return kernel.apply(
+      extent: image.extent,
+      arguments: [
+        image,
+        CGFloat(saturation),
+        CGFloat(vibrance),
+      ]
+    ) ?? image
+  }
+
+  // Photoshop/Lightroom 风格的高光、阴影、白色、黑色调整
+  // 这些调整使用参数化曲线，针对不同亮度范围进行调整
+  private static func applyHighlightsShadows(
+    to image: CIImage,
+    highlights: Double,
+    shadows: Double,
+    whites: Double,
+    blacks: Double
+  ) -> CIImage {
+    // 如果所有参数都是默认值，直接返回
+    if highlights == 1.0, shadows == 0.0, whites == 0.0, blacks == 0.0 {
+      return image
     }
 
-    // 摄影曝光调整 - 真实 EV 曝光
-    // 基于 EV (Exposure Value) 光圈档位
-    // 每增加 1 EV，亮度翻倍；每减少 1 EV，亮度减半
-    // 公式：output = input * 2^EV
-    // 范围：[-5, +5] EV，相当于 10 档光圈
-    private static func applyExposure(to image: CIImage, value: Double) -> CIImage {
-        if value == 0.0 { return image }
+    guard let kernel = hdrTonalRangeAdjustKernel else { return image }
 
-        guard let filter = CIFilter(name: "CIExposureAdjust") else { return image }
-        filter.setValue(image, forKey: kCIInputImageKey)
+    return kernel.apply(
+      extent: image.extent,
+      arguments: [
+        image,
+        CGFloat(highlights),
+        CGFloat(shadows),
+        CGFloat(whites),
+        CGFloat(blacks),
+      ]
+    ) ?? image
+  }
 
-        filter.setValue(value, forKey: kCIInputEVKey)
+  private static func applyWhiteBalance(
+    to image: CIImage,
+    temperature: Double,
+    tint: Double
+  ) -> CIImage {
+    // 从色温/色调计算 RGB 增益
+    let gains = calculateWhiteBalanceGains(temperature: temperature, tint: tint)
 
-        return filter.outputImage ?? image
+    // 使用 CIColorMatrix 应用增益（更透明、可控）
+    guard let filter = CIFilter(name: "CIColorMatrix") else { return image }
+    filter.setValue(image, forKey: kCIInputImageKey)
+
+    // 设置 RGB 增益（对角矩阵）
+    filter.setValue(CIVector(x: gains.r, y: 0, z: 0, w: 0), forKey: "inputRVector")
+    filter.setValue(CIVector(x: 0, y: gains.g, z: 0, w: 0), forKey: "inputGVector")
+    filter.setValue(CIVector(x: 0, y: 0, z: gains.b, w: 0), forKey: "inputBVector")
+    filter.setValue(CIVector(x: 0, y: 0, z: 0, w: 1), forKey: "inputAVector")
+    filter.setValue(CIVector(x: 0, y: 0, z: 0, w: 0), forKey: "inputBiasVector")
+
+    return filter.outputImage ?? image
+  }
+
+  static func whiteBalanceFromNeutralSample(
+    linearRGB: (r: Double, g: Double, b: Double)
+  ) -> (temperature: Double, tint: Double)? {
+    let r = max(linearRGB.r, 0.000_01)
+    let g = max(linearRGB.g, 0.000_01)
+    let b = max(linearRGB.b, 0.000_01)
+
+    let luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
+    guard luminance > 0.02, max(r, max(g, b)) < 0.99 else {
+      return nil
     }
 
-    // 感知曝光：在显示参考亮度上整体提亮/压暗，
-    // 同时通过 sigmoid 保护端点，并以亮度比例缩放 RGB 保持色相稳定。
-    private static func applyPerceptualExposure(to image: CIImage, value: Double) -> CIImage {
-        if value == 0.0 { return image }
+    let inverseGains = (r: 1.0 / r, g: 1.0 / g, b: 1.0 / b)
+    let maxGain = max(inverseGains.r, max(inverseGains.g, inverseGains.b))
+    guard maxGain > 0 else { return nil }
 
-        return applyPerceptualLuminanceShift(
-            to: image,
-            value: value,
-            focusSigma: 0.0,
-            maxShift: 0.25
-        )
+    let normalizedGains = (
+      r: inverseGains.r / maxGain,
+      g: inverseGains.g / maxGain,
+      b: inverseGains.b / maxGain
+    )
+
+    let rbRatio = normalizedGains.r / max(normalizedGains.b, 0.000_01)
+    let unclampedTemperature = AppConfig.defaultWhitePoint * pow(rbRatio, 1.0 / 0.6)
+    let temperature = max(
+      ImageAdjustments.temperatureRange.lowerBound,
+      min(ImageAdjustments.temperatureRange.upperBound, unclampedTemperature)
+    )
+
+    let tempRatio = temperature / AppConfig.defaultWhitePoint
+    let tempPower = pow(tempRatio, 0.6)
+    let redBase = tempRatio <= 1.0 ? 1.0 : tempPower
+
+    let greenBase = (normalizedGains.g / max(normalizedGains.r, 0.000_01)) * redBase
+    let unclampedTint = ((1.0 - greenBase) / 0.3) * 100.0
+    let tint = max(
+      ImageAdjustments.tintRange.lowerBound,
+      min(ImageAdjustments.tintRange.upperBound, unclampedTint)
+    )
+
+    return (temperature, tint)
+  }
+
+  private static func calculateWhiteBalanceGains(
+    temperature: Double,
+    tint: Double
+  ) -> (r: Double, g: Double, b: Double) {
+    // 将色温转换为 RGB 增益
+    // 基于 Planckian locus 简化算法
+
+    // 1. 将色温转换为归一化值 (以 6500K D65 为基准)
+    let temp = max(2000.0, min(25000.0, temperature))
+    let tempRatio = temp / 6500.0
+
+    // 2. 计算基础 R/B 增益（基于色温）
+    var rGain: Double
+    var bGain: Double
+
+    if tempRatio < 1.0 {
+      // 低色温（偏暖/偏黄）-> 增加蓝色，减少红色
+      rGain = 1.0
+      bGain = 1.0 / pow(tempRatio, 0.6)  // 温度越低，蓝色增益越高
+    } else {
+      // 高色温（偏冷/偏蓝）-> 增加红色，减少蓝色
+      rGain = pow(tempRatio, 0.6)
+      bGain = 1.0
     }
 
-    private static let perceptualMidGrayPivot: CGFloat = 0.425
+    // 3. 计算绿色增益（基于色调）
+    // tint > 0: 偏绿，需要减少绿色
+    // tint < 0: 偏品红，需要增加绿色
+    let gGain = 1.0 - (tint / 100.0) * 0.3  // 色调影响相对较小
 
-    private static func applyPerceptualLuminanceShift(
-        to image: CIImage,
-        value: Double,
-        focusSigma: CGFloat,
-        maxShift: CGFloat
-    ) -> CIImage {
-        guard let kernel = perceptualLuminanceShiftKernel else {
-            return image
-        }
+    // 4. 归一化到绿色通道（类似 Python 脚本的做法）
+    let maxGain = max(rGain, max(gGain, bGain))
 
-        return kernel.apply(
-            extent: image.extent,
-            arguments: [
-                image,
-                CGFloat(value),
-                perceptualMidGrayPivot,
-                focusSigma,
-                maxShift,
-            ]
-        ) ?? image
+    return (
+      r: rGain / maxGain,
+      g: gGain / maxGain,
+      b: bGain / maxGain
+    )
+  }
+
+  private static func applyClarity(to image: CIImage, value: Double) -> CIImage {
+    guard let filter = CIFilter(name: "CIUnsharpMask") else { return image }
+    filter.setValue(image, forKey: kCIInputImageKey)
+
+    let radius = abs(value) * 10.0
+    let intensity = value > 0 ? value * 2.0 : value
+
+    filter.setValue(radius, forKey: kCIInputRadiusKey)
+    filter.setValue(intensity, forKey: kCIInputIntensityKey)
+
+    return filter.outputImage ?? image
+  }
+
+  private static func applyDehaze(to image: CIImage, value: Double) -> CIImage {
+    var result = applyContrast(to: image, value: value * 0.3)
+    result = applyColorfulness(to: result, saturation: 1.0 + value * 0.2, vibrance: 0.0)
+    result = applyPerceptualLuminanceShift(
+      to: result, value: value, focusSigma: 0.0, maxShift: 0.10)
+
+    return result
+  }
+
+  private static func applySharpness(to image: CIImage, value: Double) -> CIImage {
+    if value < 0 {
+      guard let filter = CIFilter(name: "CIGaussianBlur") else { return image }
+      filter.setValue(image, forKey: kCIInputImageKey)
+      filter.setValue(abs(value) * 2.0, forKey: kCIInputRadiusKey)
+      return filter.outputImage ?? image
+    } else {
+      guard let filter = CIFilter(name: "CISharpenLuminance") else { return image }
+      filter.setValue(image, forKey: kCIInputImageKey)
+      filter.setValue(value, forKey: kCIInputSharpnessKey)
+      return filter.outputImage ?? image
+    }
+  }
+
+  static func applyFilter(
+    _ filterName: String,
+    to image: CIImage,
+    parameters: [String: Any] = [:]
+  ) -> CIImage? {
+    guard let filter = CIFilter(name: filterName) else {
+      return nil
     }
 
-    private static func applyHDRDisplayBoost(to image: CIImage, adjustments: ImageAdjustments) -> CIImage {
-        guard let kernel = hdrDisplayBoostKernel else {
-            return image
-        }
+    filter.setValue(image, forKey: kCIInputImageKey)
 
-        let headroom = min(
-            max(adjustments.hdrHeadroom, ImageAdjustments.hdrHeadroomRange.lowerBound),
-            ImageAdjustments.hdrHeadroomRange.upperBound
-        )
-
-        let output = kernel.apply(
-            extent: image.extent,
-            arguments: [
-                image,
-                CGFloat(adjustments.hdrBrightness),
-                CGFloat(adjustments.hdrHighlights),
-                CGFloat(adjustments.hdrWhites),
-                CGFloat(headroom),
-            ]
-        ) ?? image
-
-        if #available(macOS 16.0, *) {
-            return output.settingContentHeadroom(Float(headroom))
-        }
-
-        return output
+    for (key, value) in parameters {
+      filter.setValue(value, forKey: key)
     }
 
-    private static func applyHDRAdjustmentsIfNeeded(to image: CIImage, adjustments: ImageAdjustments) -> CIImage {
-        guard adjustments.isHDREnabled else {
-            return image
-        }
+    return filter.outputImage
+  }
 
-        if adjustments.isHDRAutoAdjustmentEnabled ||
-            abs(adjustments.hdrBrightness) > 0.0001 ||
-            abs(adjustments.hdrHighlights) > 0.0001 ||
-            abs(adjustments.hdrWhites) > 0.0001
-        {
-            return applyHDRDisplayBoost(to: image, adjustments: adjustments)
-        }
-
-        if #available(macOS 16.0, *) {
-            return image.settingContentHeadroom(Float(adjustments.hdrHeadroom))
-        }
-
-        return image
+  private static func applyLUT(
+    to image: CIImage,
+    lutURL: URL,
+    alpha: Double,
+    profile: LUTColorProfile,
+    isHDRPreserving: Bool
+  ) -> CIImage {
+    guard let (data, size) = cachedLUTData(from: lutURL) else {
+      return image
     }
 
-    // Photoshop 风格的对比度调整
-    // 对比度围绕中点（0.5）进行 S 曲线调整
-    private static func applyContrast(to image: CIImage, value: Double) -> CIImage {
-        if value == 0.0 { return image }
+    let workingToInputGamut = gamutTransformMatrix(
+      from: .sRGB,
+      to: profile.inputGamut
+    )
+    let outputToWorkingGamut = gamutTransformMatrix(
+      from: profile.outputGamut,
+      to: .sRGB
+    )
 
-        guard let kernel = hdrContrastAdjustKernel else { return image }
-
-        return kernel.apply(
-            extent: image.extent,
-            arguments: [
-                image,
-                CGFloat(value),
-            ]
-        ) ?? image
+    guard
+      let imageInLUTSpace = applyLUTInputTransform(
+        to: image,
+        gamutTransform: workingToInputGamut,
+        transferFunction: profile.inputTransfer,
+        isHDRPreserving: isHDRPreserving
+      )
+    else {
+      print("ImageProcessor: ⚠️ 无法创建 LUT 输入变换，跳过 LUT")
+      return image
     }
 
-    private static func applySaturation(to image: CIImage, value: Double) -> CIImage {
-        applyColorfulness(to: image, saturation: value, vibrance: 0.0)
+    guard let filter = CIFilter(name: "CIColorCube") else {
+      return image
     }
 
-    private static func applyVibrance(to image: CIImage, value: Double) -> CIImage {
-        applyColorfulness(to: image, saturation: 1.0, vibrance: value)
+    filter.setValue(imageInLUTSpace, forKey: kCIInputImageKey)
+    filter.setValue(size, forKey: "inputCubeDimension")
+    filter.setValue(data, forKey: "inputCubeData")
+
+    guard let lutAppliedInLUTSpace = filter.outputImage else {
+      return image
     }
 
-    private static func applyColorfulness(
-        to image: CIImage,
-        saturation: Double,
-        vibrance: Double
-    ) -> CIImage {
-        guard let kernel = hdrColorfulnessAdjustKernel else { return image }
-
-        return kernel.apply(
-            extent: image.extent,
-            arguments: [
-                image,
-                CGFloat(saturation),
-                CGFloat(vibrance),
-            ]
-        ) ?? image
+    guard
+      let lutApplied = applyLUTOutputTransform(
+        to: lutAppliedInLUTSpace,
+        originalImage: image,
+        gamutTransform: outputToWorkingGamut,
+        transferFunction: profile.outputTransfer,
+        isHDRPreserving: isHDRPreserving
+      )
+    else {
+      print("ImageProcessor: ⚠️ 无法创建 LUT 输出变换，跳过 LUT")
+      return image
     }
 
-    // Photoshop/Lightroom 风格的高光、阴影、白色、黑色调整
-    // 这些调整使用参数化曲线，针对不同亮度范围进行调整
-    private static func applyHighlightsShadows(
-        to image: CIImage,
-        highlights: Double,
-        shadows: Double,
-        whites: Double,
-        blacks: Double
-    ) -> CIImage {
-        // 如果所有参数都是默认值，直接返回
-        if highlights == 1.0, shadows == 0.0, whites == 0.0, blacks == 0.0 {
-            return image
-        }
+    return applyLUTAlpha(original: image, lutApplied: lutApplied, alpha: alpha)
+  }
 
-        guard let kernel = hdrTonalRangeAdjustKernel else { return image }
-
-        return kernel.apply(
-            extent: image.extent,
-            arguments: [
-                image,
-                CGFloat(highlights),
-                CGFloat(shadows),
-                CGFloat(whites),
-                CGFloat(blacks),
-            ]
-        ) ?? image
+  private static func cachedLUTData(from url: URL) -> (data: Data, size: Int)? {
+    guard let key = lutCacheKey(for: url) else {
+      return parseLUTData(from: url)
     }
 
-    private static func applyWhiteBalance(
-        to image: CIImage,
-        temperature: Double,
-        tint: Double
-    ) -> CIImage {
-        // 从色温/色调计算 RGB 增益
-        let gains = calculateWhiteBalanceGains(temperature: temperature, tint: tint)
-
-        // 使用 CIColorMatrix 应用增益（更透明、可控）
-        guard let filter = CIFilter(name: "CIColorMatrix") else { return image }
-        filter.setValue(image, forKey: kCIInputImageKey)
-
-        // 设置 RGB 增益（对角矩阵）
-        filter.setValue(CIVector(x: gains.r, y: 0, z: 0, w: 0), forKey: "inputRVector")
-        filter.setValue(CIVector(x: 0, y: gains.g, z: 0, w: 0), forKey: "inputGVector")
-        filter.setValue(CIVector(x: 0, y: 0, z: gains.b, w: 0), forKey: "inputBVector")
-        filter.setValue(CIVector(x: 0, y: 0, z: 0, w: 1), forKey: "inputAVector")
-        filter.setValue(CIVector(x: 0, y: 0, z: 0, w: 0), forKey: "inputBiasVector")
-
-        return filter.outputImage ?? image
+    if let cached = cachedLUTData(for: key) {
+      return cached
     }
 
-    static func whiteBalanceFromNeutralSample(
-        linearRGB: (r: Double, g: Double, b: Double)
-    ) -> (temperature: Double, tint: Double)? {
-        let r = max(linearRGB.r, 0.000_01)
-        let g = max(linearRGB.g, 0.000_01)
-        let b = max(linearRGB.b, 0.000_01)
-
-        let luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
-        guard luminance > 0.02, max(r, max(g, b)) < 0.99 else {
-            return nil
-        }
-
-        let inverseGains = (r: 1.0 / r, g: 1.0 / g, b: 1.0 / b)
-        let maxGain = max(inverseGains.r, max(inverseGains.g, inverseGains.b))
-        guard maxGain > 0 else { return nil }
-
-        let normalizedGains = (
-            r: inverseGains.r / maxGain,
-            g: inverseGains.g / maxGain,
-            b: inverseGains.b / maxGain
-        )
-
-        let rbRatio = normalizedGains.r / max(normalizedGains.b, 0.000_01)
-        let unclampedTemperature = AppConfig.defaultWhitePoint * pow(rbRatio, 1.0 / 0.6)
-        let temperature = max(
-            ImageAdjustments.temperatureRange.lowerBound,
-            min(ImageAdjustments.temperatureRange.upperBound, unclampedTemperature)
-        )
-
-        let tempRatio = temperature / AppConfig.defaultWhitePoint
-        let tempPower = pow(tempRatio, 0.6)
-        let redBase = tempRatio <= 1.0 ? 1.0 : tempPower
-
-        let greenBase = (normalizedGains.g / max(normalizedGains.r, 0.000_01)) * redBase
-        let unclampedTint = ((1.0 - greenBase) / 0.3) * 100.0
-        let tint = max(
-            ImageAdjustments.tintRange.lowerBound,
-            min(ImageAdjustments.tintRange.upperBound, unclampedTint)
-        )
-
-        return (temperature, tint)
+    guard let parsed = parseLUTData(from: url) else {
+      return nil
     }
 
-    private static func calculateWhiteBalanceGains(
-        temperature: Double,
-        tint: Double
-    ) -> (r: Double, g: Double, b: Double) {
-        // 将色温转换为 RGB 增益
-        // 基于 Planckian locus 简化算法
+    storeLUTData(parsed, for: key)
 
-        // 1. 将色温转换为归一化值 (以 6500K D65 为基准)
-        let temp = max(2000.0, min(25000.0, temperature))
-        let tempRatio = temp / 6500.0
+    return parsed
+  }
 
-        // 2. 计算基础 R/B 增益（基于色温）
-        var rGain: Double
-        var bGain: Double
+  private static func cachedLUTData(for key: LUTCacheKey) -> (data: Data, size: Int)? {
+    lutCacheLock.lock()
+    defer { lutCacheLock.unlock() }
+    return lutCache[key]
+  }
 
-        if tempRatio < 1.0 {
-            // 低色温（偏暖/偏黄）-> 增加蓝色，减少红色
-            rGain = 1.0
-            bGain = 1.0 / pow(tempRatio, 0.6)  // 温度越低，蓝色增益越高
-        } else {
-            // 高色温（偏冷/偏蓝）-> 增加红色，减少蓝色
-            rGain = pow(tempRatio, 0.6)
-            bGain = 1.0
-        }
+  private static func storeLUTData(_ parsed: (data: Data, size: Int), for key: LUTCacheKey) {
+    lutCacheLock.lock()
+    defer { lutCacheLock.unlock() }
 
-        // 3. 计算绿色增益（基于色调）
-        // tint > 0: 偏绿，需要减少绿色
-        // tint < 0: 偏品红，需要增加绿色
-        let gGain = 1.0 - (tint / 100.0) * 0.3  // 色调影响相对较小
+    lutCache[key] = parsed
+    lutCacheOrder.removeAll { $0 == key }
+    lutCacheOrder.append(key)
 
-        // 4. 归一化到绿色通道（类似 Python 脚本的做法）
-        let maxGain = max(rGain, max(gGain, bGain))
+    while lutCacheOrder.count > lutCacheLimit {
+      let oldestKey = lutCacheOrder.removeFirst()
+      lutCache.removeValue(forKey: oldestKey)
+    }
+  }
 
-        return (
-            r: rGain / maxGain,
-            g: gGain / maxGain,
-            b: bGain / maxGain
-        )
+  private static func lutCacheKey(for url: URL) -> LUTCacheKey? {
+    let resourceValues = try? url.resourceValues(forKeys: [
+      .contentModificationDateKey,
+      .fileSizeKey,
+    ])
+
+    return LUTCacheKey(
+      path: url.standardizedFileURL.path,
+      modificationTime: resourceValues?.contentModificationDate?.timeIntervalSince1970 ?? 0,
+      fileSize: Int64(resourceValues?.fileSize ?? 0)
+    )
+  }
+
+  private static func parseLUTData(from url: URL) -> (data: Data, size: Int)? {
+    let fileExtension = url.pathExtension.lowercased()
+
+    return switch fileExtension {
+    case "cube":
+      parseCubeLUT(from: url)
+    case "3dl":
+      parse3DLLUT(from: url)
+    case "lut":
+      parseBinaryLUT(from: url)
+    default:
+      parseCubeLUT(from: url)
+    }
+  }
+
+  // 应用LUT的alpha混合
+  private static func applyLUTAlpha(
+    original: CIImage,
+    lutApplied: CIImage,
+    alpha: Double
+  ) -> CIImage {
+    // 如果alpha接近1，直接返回LUT结果
+    if abs(alpha - 1.0) < 0.001 {
+      return lutApplied
     }
 
-    private static func applyClarity(to image: CIImage, value: Double) -> CIImage {
-        guard let filter = CIFilter(name: "CIUnsharpMask") else { return image }
-        filter.setValue(image, forKey: kCIInputImageKey)
-
-        let radius = abs(value) * 10.0
-        let intensity = value > 0 ? value * 2.0 : value
-
-        filter.setValue(radius, forKey: kCIInputRadiusKey)
-        filter.setValue(intensity, forKey: kCIInputIntensityKey)
-
-        return filter.outputImage ?? image
+    // 使用 CIBlendWithMask 或直接插值
+    guard let blendFilter = CIFilter(name: "CISourceOverCompositing") else {
+      return lutApplied
     }
 
-    private static func applyDehaze(to image: CIImage, value: Double) -> CIImage {
-        var result = applyContrast(to: image, value: value * 0.3)
-        result = applyColorfulness(to: result, saturation: 1.0 + value * 0.2, vibrance: 0.0)
-        result = applyPerceptualLuminanceShift(to: result, value: value, focusSigma: 0.0, maxShift: 0.10)
+    // 调整 LUT 结果的不透明度
+    let alphaFilter = CIFilter(name: "CIColorMatrix")
+    alphaFilter?.setValue(lutApplied, forKey: kCIInputImageKey)
+    alphaFilter?.setValue(CIVector(x: 1, y: 0, z: 0, w: 0), forKey: "inputRVector")
+    alphaFilter?.setValue(CIVector(x: 0, y: 1, z: 0, w: 0), forKey: "inputGVector")
+    alphaFilter?.setValue(CIVector(x: 0, y: 0, z: 1, w: 0), forKey: "inputBVector")
+    alphaFilter?.setValue(CIVector(x: 0, y: 0, z: 0, w: CGFloat(alpha)), forKey: "inputAVector")
 
-        return result
+    guard let alphaAdjusted = alphaFilter?.outputImage else {
+      return lutApplied
     }
 
-    private static func applySharpness(to image: CIImage, value: Double) -> CIImage {
-        if value < 0 {
-            guard let filter = CIFilter(name: "CIGaussianBlur") else { return image }
-            filter.setValue(image, forKey: kCIInputImageKey)
-            filter.setValue(abs(value) * 2.0, forKey: kCIInputRadiusKey)
-            return filter.outputImage ?? image
-        } else {
-            guard let filter = CIFilter(name: "CISharpenLuminance") else { return image }
-            filter.setValue(image, forKey: kCIInputImageKey)
-            filter.setValue(value, forKey: kCIInputSharpnessKey)
-            return filter.outputImage ?? image
-        }
+    blendFilter.setValue(alphaAdjusted, forKey: kCIInputImageKey)
+    blendFilter.setValue(original, forKey: kCIInputBackgroundImageKey)
+
+    return blendFilter.outputImage ?? original
+  }
+
+  // 解析 .cube 格式 LUT（Adobe 标准格式）
+  private static func parseCubeLUT(from url: URL) -> (data: Data, size: Int)? {
+    guard let lutString = try? String(contentsOf: url, encoding: .utf8) else {
+      return nil
     }
 
-    static func applyFilter(
-        _ filterName: String,
-        to image: CIImage,
-        parameters: [String: Any] = [:]
-    ) -> CIImage? {
-        guard let filter = CIFilter(name: filterName) else {
-            return nil
+    let lines = lutString.components(separatedBy: .newlines)
+    var cubeSize: Int?
+    var floatData: [Float] = []
+
+    // 解析 LUT_3D_SIZE
+    for line in lines {
+      let trimmed = line.trimmingCharacters(in: .whitespaces)
+      if trimmed.hasPrefix("LUT_3D_SIZE") {
+        let parts = trimmed.components(separatedBy: .whitespaces)
+        if parts.count >= 2, let size = Int(parts[1]) {
+          cubeSize = size
+          break
         }
-
-        filter.setValue(image, forKey: kCIInputImageKey)
-
-        for (key, value) in parameters {
-            filter.setValue(value, forKey: key)
-        }
-
-        return filter.outputImage
+      }
     }
 
-    private static func applyLUT(
-        to image: CIImage,
-        lutURL: URL,
-        alpha: Double,
-        profile: LUTColorProfile,
-        isHDRPreserving: Bool
-    ) -> CIImage {
-        guard let (data, size) = cachedLUTData(from: lutURL) else {
-            return image
-        }
-
-        let workingToInputGamut = gamutTransformMatrix(
-            from: .sRGB,
-            to: profile.inputGamut
-        )
-        let outputToWorkingGamut = gamutTransformMatrix(
-            from: profile.outputGamut,
-            to: .sRGB
-        )
-
-        guard let imageInLUTSpace = applyLUTInputTransform(
-            to: image,
-            gamutTransform: workingToInputGamut,
-            transferFunction: profile.inputTransfer,
-            isHDRPreserving: isHDRPreserving
-        ) else {
-            print("ImageProcessor: ⚠️ 无法创建 LUT 输入变换，跳过 LUT")
-            return image
-        }
-
-        guard let filter = CIFilter(name: "CIColorCube") else {
-            return image
-        }
-
-        filter.setValue(imageInLUTSpace, forKey: kCIInputImageKey)
-        filter.setValue(size, forKey: "inputCubeDimension")
-        filter.setValue(data, forKey: "inputCubeData")
-
-        guard let lutAppliedInLUTSpace = filter.outputImage else {
-            return image
-        }
-
-        guard let lutApplied = applyLUTOutputTransform(
-            to: lutAppliedInLUTSpace,
-            originalImage: image,
-            gamutTransform: outputToWorkingGamut,
-            transferFunction: profile.outputTransfer,
-            isHDRPreserving: isHDRPreserving
-        ) else {
-            print("ImageProcessor: ⚠️ 无法创建 LUT 输出变换，跳过 LUT")
-            return image
-        }
-
-        return applyLUTAlpha(original: image, lutApplied: lutApplied, alpha: alpha)
+    guard let size = cubeSize else {
+      return nil
     }
 
-    private static func cachedLUTData(from url: URL) -> (data: Data, size: Int)? {
-        guard let key = lutCacheKey(for: url) else {
-            return parseLUTData(from: url)
-        }
+    // 解析数据
+    for line in lines {
+      let trimmed = line.trimmingCharacters(in: .whitespaces)
+      if trimmed.isEmpty || trimmed.hasPrefix("#") || trimmed.hasPrefix("TITLE")
+        || trimmed.hasPrefix("LUT_") || trimmed.hasPrefix("DOMAIN_")
+      {
+        continue
+      }
 
-        if let cached = cachedLUTData(for: key) {
-            return cached
-        }
-
-        guard let parsed = parseLUTData(from: url) else {
-            return nil
-        }
-
-        storeLUTData(parsed, for: key)
-
-        return parsed
+      let values = trimmed.components(separatedBy: .whitespaces).compactMap { Float($0) }
+      if values.count == 3 {
+        floatData.append(values[0])
+        floatData.append(values[1])
+        floatData.append(values[2])
+        floatData.append(1.0)
+      }
     }
 
-    private static func cachedLUTData(for key: LUTCacheKey) -> (data: Data, size: Int)? {
-        lutCacheLock.lock()
-        defer { lutCacheLock.unlock() }
-        return lutCache[key]
+    let expectedCount = size * size * size * 4
+    guard floatData.count == expectedCount else {
+      return nil
     }
 
-    private static func storeLUTData(_ parsed: (data: Data, size: Int), for key: LUTCacheKey) {
-        lutCacheLock.lock()
-        defer { lutCacheLock.unlock() }
+    let data = Data(bytes: floatData, count: floatData.count * MemoryLayout<Float>.size)
+    return (data, size)
+  }
 
-        lutCache[key] = parsed
-        lutCacheOrder.removeAll { $0 == key }
-        lutCacheOrder.append(key)
-
-        while lutCacheOrder.count > lutCacheLimit {
-            let oldestKey = lutCacheOrder.removeFirst()
-            lutCache.removeValue(forKey: oldestKey)
-        }
+  // 解析 .3dl 格式 LUT（Autodesk/Lustre 格式）
+  private static func parse3DLLUT(from url: URL) -> (data: Data, size: Int)? {
+    guard let lutString = try? String(contentsOf: url, encoding: .utf8) else {
+      return nil
     }
 
-    private static func lutCacheKey(for url: URL) -> LUTCacheKey? {
-        let resourceValues = try? url.resourceValues(forKeys: [
-            .contentModificationDateKey,
-            .fileSizeKey,
-        ])
+    let lines = lutString.components(separatedBy: .newlines)
+    var rawTriples: [(Float, Float, Float)] = []
+    var meshSize: Int?
 
-        return LUTCacheKey(
-            path: url.standardizedFileURL.path,
-            modificationTime: resourceValues?.contentModificationDate?.timeIntervalSince1970 ?? 0,
-            fileSize: Int64(resourceValues?.fileSize ?? 0)
-        )
+    // 查找 Mesh 行
+    for line in lines {
+      let trimmed = line.trimmingCharacters(in: .whitespaces)
+      if trimmed.hasPrefix("Mesh") {
+        let parts = trimmed.components(separatedBy: .whitespaces)
+        if parts.count >= 2, let size = Int(parts[1]) {
+          meshSize = size
+        }
+      }
     }
 
-    private static func parseLUTData(from url: URL) -> (data: Data, size: Int)? {
-        let fileExtension = url.pathExtension.lowercased()
+    let size = meshSize ?? 32
 
-        return switch fileExtension {
-        case "cube":
-            parseCubeLUT(from: url)
-        case "3dl":
-            parse3DLLUT(from: url)
-        case "lut":
-            parseBinaryLUT(from: url)
-        default:
-            parseCubeLUT(from: url)
-        }
+    // 解析数据行
+    for line in lines {
+      let trimmed = line.trimmingCharacters(in: .whitespaces)
+      if trimmed.isEmpty || trimmed.hasPrefix("#") || trimmed.hasPrefix("Mesh") {
+        continue
+      }
+
+      let values = trimmed.components(separatedBy: .whitespaces).compactMap { Float($0) }
+      if values.count == 3 {
+        rawTriples.append((values[0], values[1], values[2]))
+      }
     }
 
-    // 应用LUT的alpha混合
-    private static func applyLUTAlpha(
-        original: CIImage,
-        lutApplied: CIImage,
-        alpha: Double
-    ) -> CIImage {
-        // 如果alpha接近1，直接返回LUT结果
-        if abs(alpha - 1.0) < 0.001 {
-            return lutApplied
-        }
+    // .3dl 格式值范围常见为 0-1023 或 0-4095。必须用全局范围归一化，
+    // 不能按每一行单独归一化，否则会破坏 LUT 的色彩关系。
+    let maxValue =
+      rawTriples
+      .map { max($0.0, max($0.1, $0.2)) }
+      .max() ?? 1.0
+    let scale = maxValue > 1.0 ? maxValue : 1.0
 
-        // 使用 CIBlendWithMask 或直接插值
-        guard let blendFilter = CIFilter(name: "CISourceOverCompositing") else {
-            return lutApplied
-        }
-
-        // 调整 LUT 结果的不透明度
-        let alphaFilter = CIFilter(name: "CIColorMatrix")
-        alphaFilter?.setValue(lutApplied, forKey: kCIInputImageKey)
-        alphaFilter?.setValue(CIVector(x: 1, y: 0, z: 0, w: 0), forKey: "inputRVector")
-        alphaFilter?.setValue(CIVector(x: 0, y: 1, z: 0, w: 0), forKey: "inputGVector")
-        alphaFilter?.setValue(CIVector(x: 0, y: 0, z: 1, w: 0), forKey: "inputBVector")
-        alphaFilter?.setValue(CIVector(x: 0, y: 0, z: 0, w: CGFloat(alpha)), forKey: "inputAVector")
-
-        guard let alphaAdjusted = alphaFilter?.outputImage else {
-            return lutApplied
-        }
-
-        blendFilter.setValue(alphaAdjusted, forKey: kCIInputImageKey)
-        blendFilter.setValue(original, forKey: kCIInputBackgroundImageKey)
-
-        return blendFilter.outputImage ?? original
+    var floatData: [Float] = []
+    floatData.reserveCapacity(rawTriples.count * 4)
+    for values in rawTriples {
+      floatData.append(values.0 / scale)
+      floatData.append(values.1 / scale)
+      floatData.append(values.2 / scale)
+      floatData.append(1.0)
     }
 
-    // 解析 .cube 格式 LUT（Adobe 标准格式）
-    private static func parseCubeLUT(from url: URL) -> (data: Data, size: Int)? {
-        guard let lutString = try? String(contentsOf: url, encoding: .utf8) else {
-            return nil
-        }
-
-        let lines = lutString.components(separatedBy: .newlines)
-        var cubeSize: Int?
-        var floatData: [Float] = []
-
-        // 解析 LUT_3D_SIZE
-        for line in lines {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("LUT_3D_SIZE") {
-                let parts = trimmed.components(separatedBy: .whitespaces)
-                if parts.count >= 2, let size = Int(parts[1]) {
-                    cubeSize = size
-                    break
-                }
-            }
-        }
-
-        guard let size = cubeSize else {
-            return nil
-        }
-
-        // 解析数据
-        for line in lines {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.isEmpty || trimmed.hasPrefix("#") || trimmed.hasPrefix("TITLE") ||
-                trimmed.hasPrefix("LUT_") || trimmed.hasPrefix("DOMAIN_") {
-                continue
-            }
-
-            let values = trimmed.components(separatedBy: .whitespaces).compactMap { Float($0) }
-            if values.count == 3 {
-                floatData.append(values[0])
-                floatData.append(values[1])
-                floatData.append(values[2])
-                floatData.append(1.0)
-            }
-        }
-
-        let expectedCount = size * size * size * 4
-        guard floatData.count == expectedCount else {
-            return nil
-        }
-
-        let data = Data(bytes: floatData, count: floatData.count * MemoryLayout<Float>.size)
-        return (data, size)
+    let expectedCount = size * size * size * 4
+    guard floatData.count == expectedCount else {
+      return nil
     }
 
-    // 解析 .3dl 格式 LUT（Autodesk/Lustre 格式）
-    private static func parse3DLLUT(from url: URL) -> (data: Data, size: Int)? {
-        guard let lutString = try? String(contentsOf: url, encoding: .utf8) else {
-            return nil
-        }
+    let data = Data(bytes: floatData, count: floatData.count * MemoryLayout<Float>.size)
+    return (data, size)
+  }
 
-        let lines = lutString.components(separatedBy: .newlines)
-        var rawTriples: [(Float, Float, Float)] = []
-        var meshSize: Int?
-
-        // 查找 Mesh 行
-        for line in lines {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("Mesh") {
-                let parts = trimmed.components(separatedBy: .whitespaces)
-                if parts.count >= 2, let size = Int(parts[1]) {
-                    meshSize = size
-                }
-            }
-        }
-
-        let size = meshSize ?? 32
-
-        // 解析数据行
-        for line in lines {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.isEmpty || trimmed.hasPrefix("#") || trimmed.hasPrefix("Mesh") {
-                continue
-            }
-
-            let values = trimmed.components(separatedBy: .whitespaces).compactMap { Float($0) }
-            if values.count == 3 {
-                rawTriples.append((values[0], values[1], values[2]))
-            }
-        }
-
-        // .3dl 格式值范围常见为 0-1023 或 0-4095。必须用全局范围归一化，
-        // 不能按每一行单独归一化，否则会破坏 LUT 的色彩关系。
-        let maxValue = rawTriples
-            .map { max($0.0, max($0.1, $0.2)) }
-            .max() ?? 1.0
-        let scale = maxValue > 1.0 ? maxValue : 1.0
-
-        var floatData: [Float] = []
-        floatData.reserveCapacity(rawTriples.count * 4)
-        for values in rawTriples {
-            floatData.append(values.0 / scale)
-            floatData.append(values.1 / scale)
-            floatData.append(values.2 / scale)
-            floatData.append(1.0)
-        }
-
-        let expectedCount = size * size * size * 4
-        guard floatData.count == expectedCount else {
-            return nil
-        }
-
-        let data = Data(bytes: floatData, count: floatData.count * MemoryLayout<Float>.size)
-        return (data, size)
+  // 解析二进制 .lut 格式
+  private static func parseBinaryLUT(from url: URL) -> (data: Data, size: Int)? {
+    guard let rawData = try? Data(contentsOf: url) else {
+      return nil
     }
 
-    // 解析二进制 .lut 格式
-    private static func parseBinaryLUT(from url: URL) -> (data: Data, size: Int)? {
-        guard let rawData = try? Data(contentsOf: url) else {
-            return nil
-        }
+    // 常见的二进制 LUT 格式：64x64x64 或 32x32x32
+    // 尝试推断尺寸
+    let dataSize = rawData.count
 
-        // 常见的二进制 LUT 格式：64x64x64 或 32x32x32
-        // 尝试推断尺寸
-        let dataSize = rawData.count
+    let possibleSizes = [64, 33, 32, 17, 16]
+    var cubeSize: Int?
 
-        let possibleSizes = [64, 33, 32, 17, 16]
-        var cubeSize: Int?
-
-        for size in possibleSizes {
-            let expectedBytes = size * size * size * 3 * MemoryLayout<Float>.size
-            if dataSize == expectedBytes {
-                cubeSize = size
-                break
-            }
-        }
-
-        guard let size = cubeSize else {
-            return nil
-        }
-
-        // 读取并转换数据
-        var floatData: [Float] = []
-        let floatCount = size * size * size * 3
-
-        rawData.withUnsafeBytes { (ptr: UnsafeRawBufferPointer) in
-            let floatPtr = ptr.bindMemory(to: Float.self)
-            for i in 0 ..< floatCount {
-                if i % 3 == 0, i > 0 {
-                    floatData.append(1.0)
-                }
-                floatData.append(floatPtr[i])
-            }
-            floatData.append(1.0)
-        }
-
-        let data = Data(bytes: floatData, count: floatData.count * MemoryLayout<Float>.size)
-        return (data, size)
+    for size in possibleSizes {
+      let expectedBytes = size * size * size * 3 * MemoryLayout<Float>.size
+      if dataSize == expectedBytes {
+        cubeSize = size
+        break
+      }
     }
 
-    private static func applyTransform(
-        to image: CIImage,
-        rotation: Int,
-        straightenAngle: Double,
-        flipHorizontal: Bool,
-        flipVertical: Bool
-    ) -> CIImage {
-        var result = image
-        let extent = result.extent
-
-        // 构建变换矩阵
-        var transform = CGAffineTransform.identity
-
-        // 1. 移动到原点（以中心为基准）
-        let centerX = extent.midX
-        let centerY = extent.midY
-        transform = transform.translatedBy(x: centerX, y: centerY)
-
-        // 2. 应用镜像
-        if flipHorizontal {
-            transform = transform.scaledBy(x: -1, y: 1)
-        }
-        if flipVertical {
-            transform = transform.scaledBy(x: 1, y: -1)
-        }
-
-        // 3. 应用旋转
-        if rotation != 0 {
-            let radians = Double(rotation) * .pi / 180.0
-            transform = transform.rotated(by: radians)
-        }
-
-        // 4. 移回中心
-        transform = transform.translatedBy(x: -centerX, y: -centerY)
-
-        // 应用变换
-        result = result.transformed(by: transform)
-
-        // 调整 extent 以确保图片居中显示
-        let transformedExtent = result.extent
-
-        // 如果旋转了 90 或 270 度，需要调整最终的 extent
-        if rotation == 90 || rotation == 270 {
-            let offsetX = (transformedExtent.width - extent.height) / 2
-            let offsetY = (transformedExtent.height - extent.width) / 2
-            let finalTransform = CGAffineTransform(translationX: -offsetX, y: -offsetY)
-            result = result.transformed(by: finalTransform)
-        }
-
-        if abs(straightenAngle) > 0.0001 {
-            result = applyStraighten(to: result, angle: straightenAngle)
-        }
-
-        return result
+    guard let size = cubeSize else {
+      return nil
     }
 
-    private static func applyStraighten(to image: CIImage, angle: Double) -> CIImage {
-        let extent = image.extent
-        guard extent.width > 0, extent.height > 0 else { return image }
+    // 读取并转换数据
+    var floatData: [Float] = []
+    let floatCount = size * size * size * 3
 
-        let center = CGPoint(x: extent.midX, y: extent.midY)
-        let radians = -angle * .pi / 180.0
-        let transform = CGAffineTransform(translationX: center.x, y: center.y)
-            .rotated(by: radians)
-            .translatedBy(x: -center.x, y: -center.y)
-        let rotatedImage = image.transformed(by: transform)
-        let cropSize = largestCenteredCropSize(
-            width: extent.width,
-            height: extent.height,
-            radians: radians
-        )
-        let rotatedExtent = rotatedImage.extent
-        let cropRect = CGRect(
-            x: rotatedExtent.midX - cropSize.width * 0.5,
-            y: rotatedExtent.midY - cropSize.height * 0.5,
-            width: cropSize.width,
-            height: cropSize.height
-        )
-
-        return rotatedImage
-            .cropped(to: cropRect)
-            .transformed(by: CGAffineTransform(translationX: -cropRect.minX, y: -cropRect.minY))
-    }
-
-    private static func largestCenteredCropSize(
-        width: CGFloat,
-        height: CGFloat,
-        radians: Double
-    ) -> CGSize {
-        let angle = abs(radians).truncatingRemainder(dividingBy: .pi)
-        let normalizedAngle = angle > .pi / 2 ? .pi - angle : angle
-        let sinAngle = CGFloat(abs(sin(normalizedAngle)))
-        let cosAngle = CGFloat(abs(cos(normalizedAngle)))
-
-        if sinAngle < 0.0001 {
-            return CGSize(width: width, height: height)
+    rawData.withUnsafeBytes { (ptr: UnsafeRawBufferPointer) in
+      let floatPtr = ptr.bindMemory(to: Float.self)
+      for i in 0..<floatCount {
+        if i % 3 == 0, i > 0 {
+          floatData.append(1.0)
         }
-
-        let longSide = max(width, height)
-        let shortSide = min(width, height)
-        let cropWidth: CGFloat
-        let cropHeight: CGFloat
-
-        if shortSide <= 2.0 * sinAngle * cosAngle * longSide {
-            let halfShortSide = shortSide * 0.5
-            if width >= height {
-                cropWidth = halfShortSide / sinAngle
-                cropHeight = halfShortSide / cosAngle
-            } else {
-                cropWidth = halfShortSide / cosAngle
-                cropHeight = halfShortSide / sinAngle
-            }
-        } else {
-            let cosDoubleAngle = cosAngle * cosAngle - sinAngle * sinAngle
-            cropWidth = (width * cosAngle - height * sinAngle) / cosDoubleAngle
-            cropHeight = (height * cosAngle - width * sinAngle) / cosDoubleAngle
-        }
-
-        return CGSize(
-            width: min(max(cropWidth, 1.0), width),
-            height: min(max(cropHeight, 1.0), height)
-        )
+        floatData.append(floatPtr[i])
+      }
+      floatData.append(1.0)
     }
 
-    private static func applyCrop(
-        to image: CIImage,
-        left: Double,
-        top: Double,
-        right: Double,
-        bottom: Double,
-        aspectRatio: CropAspectRatio
-    ) -> CIImage {
-        let extent = image.extent
-        guard extent.width > 1, extent.height > 1 else { return image }
+    let data = Data(bytes: floatData, count: floatData.count * MemoryLayout<Float>.size)
+    return (data, size)
+  }
 
-        let clampedLeft = min(max(left, 0.0), 0.95)
-        let clampedTop = min(max(top, 0.0), 0.95)
-        let clampedRight = min(max(right, 0.0), 0.95)
-        let clampedBottom = min(max(bottom, 0.0), 0.95)
-        let horizontalInset = min(clampedLeft + clampedRight, 0.98)
-        let verticalInset = min(clampedTop + clampedBottom, 0.98)
-        let leftScale = horizontalInset > 0 ? clampedLeft / max(clampedLeft + clampedRight, 0.0001) : 0.0
-        let topScale = verticalInset > 0 ? clampedTop / max(clampedTop + clampedBottom, 0.0001) : 0.0
-        let effectiveLeft = horizontalInset * leftScale
-        let effectiveRight = horizontalInset - effectiveLeft
-        let effectiveTop = verticalInset * topScale
-        let effectiveBottom = verticalInset - effectiveTop
-        var cropRect = CGRect(
-            x: extent.minX + extent.width * effectiveLeft,
-            y: extent.minY + extent.height * effectiveBottom,
-            width: extent.width * (1.0 - effectiveLeft - effectiveRight),
-            height: extent.height * (1.0 - effectiveTop - effectiveBottom)
-        )
+  private static func applyTransform(
+    to image: CIImage,
+    rotation: Int,
+    straightenAngle: Double,
+    flipHorizontal: Bool,
+    flipVertical: Bool
+  ) -> CIImage {
+    var result = image
+    let extent = result.extent
 
-        if let targetAspectRatio = aspectRatio.resolvedValue(for: extent.size) {
-            cropRect = cropRect.constrained(toAspectRatio: CGFloat(targetAspectRatio))
-        }
+    // 构建变换矩阵
+    var transform = CGAffineTransform.identity
 
-        cropRect = cropRect.integral
+    // 1. 移动到原点（以中心为基准）
+    let centerX = extent.midX
+    let centerY = extent.midY
+    transform = transform.translatedBy(x: centerX, y: centerY)
 
-        guard cropRect.width > 1, cropRect.height > 1 else { return image }
-
-        return image
-            .cropped(to: cropRect)
-            .transformed(by: CGAffineTransform(translationX: -cropRect.minX, y: -cropRect.minY))
+    // 2. 应用镜像
+    if flipHorizontal {
+      transform = transform.scaledBy(x: -1, y: 1)
+    }
+    if flipVertical {
+      transform = transform.scaledBy(x: 1, y: -1)
     }
 
-    private static func gamutTransformMatrix(
-        from source: LUTGamut,
-        to target: LUTGamut
-    ) -> simd_double3x3 {
-        if source == target {
-            return matrix_identity_double3x3
-        }
-
-        let sourceSpace = primaries(for: source)
-        let targetSpace = primaries(for: target)
-        return targetSpace.xyzToRGB * sourceSpace.rgbToXYZ
+    // 3. 应用旋转
+    if rotation != 0 {
+      let radians = Double(rotation) * .pi / 180.0
+      transform = transform.rotated(by: radians)
     }
 
-    private static func primaries(for gamut: LUTGamut) -> RGBPrimaries {
-        switch gamut {
-        case .sRGB:
-            RGBPrimaries(
-                red: ChromaticityPoint(x: 0.64, y: 0.33),
-                green: ChromaticityPoint(x: 0.30, y: 0.60),
-                blue: ChromaticityPoint(x: 0.15, y: 0.06),
-                white: ChromaticityPoint(x: 0.3127, y: 0.3290)
-            )
-        case .displayP3:
-            RGBPrimaries(
-                red: ChromaticityPoint(x: 0.68, y: 0.32),
-                green: ChromaticityPoint(x: 0.265, y: 0.69),
-                blue: ChromaticityPoint(x: 0.15, y: 0.06),
-                white: ChromaticityPoint(x: 0.3127, y: 0.3290)
-            )
-        case .rec709:
-            RGBPrimaries(
-                red: ChromaticityPoint(x: 0.64, y: 0.33),
-                green: ChromaticityPoint(x: 0.30, y: 0.60),
-                blue: ChromaticityPoint(x: 0.15, y: 0.06),
-                white: ChromaticityPoint(x: 0.3127, y: 0.3290)
-            )
-        case .dciP3:
-            RGBPrimaries(
-                red: ChromaticityPoint(x: 0.68, y: 0.32),
-                green: ChromaticityPoint(x: 0.265, y: 0.69),
-                blue: ChromaticityPoint(x: 0.15, y: 0.06),
-                white: ChromaticityPoint(x: 0.314, y: 0.351)
-            )
-        case .rec2020:
-            RGBPrimaries(
-                red: ChromaticityPoint(x: 0.708, y: 0.292),
-                green: ChromaticityPoint(x: 0.170, y: 0.797),
-                blue: ChromaticityPoint(x: 0.131, y: 0.046),
-                white: ChromaticityPoint(x: 0.3127, y: 0.3290)
-            )
-        case .fGamut:
-            RGBPrimaries(
-                red: ChromaticityPoint(x: 0.708, y: 0.292),
-                green: ChromaticityPoint(x: 0.170, y: 0.797),
-                blue: ChromaticityPoint(x: 0.131, y: 0.046),
-                white: ChromaticityPoint(x: 0.3127, y: 0.3290)
-            )
-        case .fGamutC:
-            RGBPrimaries(
-                red: ChromaticityPoint(x: 0.7347, y: 0.2653),
-                green: ChromaticityPoint(x: 0.0263, y: 0.9737),
-                blue: ChromaticityPoint(x: 0.1173, y: -0.0224),
-                white: ChromaticityPoint(x: 0.3127, y: 0.3290)
-            )
-        case .sonySGamut:
-            RGBPrimaries(
-                red: ChromaticityPoint(x: 0.730, y: 0.280),
-                green: ChromaticityPoint(x: 0.140, y: 0.855),
-                blue: ChromaticityPoint(x: 0.100, y: -0.050),
-                white: ChromaticityPoint(x: 0.3127, y: 0.3290)
-            )
-        case .sonySGamut3Cine:
-            RGBPrimaries(
-                red: ChromaticityPoint(x: 0.766, y: 0.275),
-                green: ChromaticityPoint(x: 0.225, y: 0.800),
-                blue: ChromaticityPoint(x: 0.089, y: -0.087),
-                white: ChromaticityPoint(x: 0.3127, y: 0.3290)
-            )
-        case .djiDGamut:
-            RGBPrimaries(
-                red: ChromaticityPoint(x: 0.710, y: 0.310),
-                green: ChromaticityPoint(x: 0.210, y: 0.880),
-                blue: ChromaticityPoint(x: 0.090, y: -0.080),
-                white: ChromaticityPoint(x: 0.3127, y: 0.3290)
-            )
-        case .canonCinemaGamut:
-            RGBPrimaries(
-                red: ChromaticityPoint(x: 0.740, y: 0.270),
-                green: ChromaticityPoint(x: 0.170, y: 1.140),
-                blue: ChromaticityPoint(x: 0.080, y: -0.100),
-                white: ChromaticityPoint(x: 0.3127, y: 0.3290)
-            )
-        case .panasonicVGamut:
-            RGBPrimaries(
-                red: ChromaticityPoint(x: 0.730, y: 0.280),
-                green: ChromaticityPoint(x: 0.165, y: 0.840),
-                blue: ChromaticityPoint(x: 0.100, y: -0.030),
-                white: ChromaticityPoint(x: 0.3127, y: 0.3290)
-            )
-        }
+    // 4. 移回中心
+    transform = transform.translatedBy(x: -centerX, y: -centerY)
+
+    // 应用变换
+    result = result.transformed(by: transform)
+
+    // 调整 extent 以确保图片居中显示
+    let transformedExtent = result.extent
+
+    // 如果旋转了 90 或 270 度，需要调整最终的 extent
+    if rotation == 90 || rotation == 270 {
+      let offsetX = (transformedExtent.width - extent.height) / 2
+      let offsetY = (transformedExtent.height - extent.width) / 2
+      let finalTransform = CGAffineTransform(translationX: -offsetX, y: -offsetY)
+      result = result.transformed(by: finalTransform)
     }
 
-    private static func applyLUTInputTransform(
-        to image: CIImage,
-        gamutTransform: simd_double3x3,
-        transferFunction: LUTTransferFunction,
-        isHDRPreserving: Bool
-    ) -> CIImage? {
-        guard let kernel = lutInputTransformKernel else {
-            return nil
-        }
-
-        let rows = matrixRows(from: gamutTransform)
-        return kernel.apply(
-            extent: image.extent,
-            arguments: [
-                image,
-                rows.0,
-                rows.1,
-                rows.2,
-                LUTTransferMode(transferFunction).kernelValue,
-                isHDRPreserving ? 1.0 : 0.0,
-            ]
-        )
+    if abs(straightenAngle) > 0.0001 {
+      result = applyStraighten(to: result, angle: straightenAngle)
     }
 
-    private static func applyLUTOutputTransform(
-        to image: CIImage,
-        originalImage: CIImage,
-        gamutTransform: simd_double3x3,
-        transferFunction: LUTTransferFunction,
-        isHDRPreserving: Bool
-    ) -> CIImage? {
-        guard let kernel = lutOutputTransformKernel else {
-            return nil
-        }
+    return result
+  }
 
-        let rows = matrixRows(from: gamutTransform)
-        return kernel.apply(
-            extent: image.extent,
-            arguments: [
-                image,
-                originalImage,
-                rows.0,
-                rows.1,
-                rows.2,
-                LUTTransferMode(transferFunction).kernelValue,
-                isHDRPreserving ? 1.0 : 0.0,
-            ]
-        )
+  private static func applyStraighten(to image: CIImage, angle: Double) -> CIImage {
+    let extent = image.extent
+    guard extent.width > 0, extent.height > 0 else { return image }
+
+    let center = CGPoint(x: extent.midX, y: extent.midY)
+    let radians = -angle * .pi / 180.0
+    let transform = CGAffineTransform(translationX: center.x, y: center.y)
+      .rotated(by: radians)
+      .translatedBy(x: -center.x, y: -center.y)
+    let rotatedImage = image.transformed(by: transform)
+    let cropSize = largestCenteredCropSize(
+      width: extent.width,
+      height: extent.height,
+      radians: radians
+    )
+    let rotatedExtent = rotatedImage.extent
+    let cropRect = CGRect(
+      x: rotatedExtent.midX - cropSize.width * 0.5,
+      y: rotatedExtent.midY - cropSize.height * 0.5,
+      width: cropSize.width,
+      height: cropSize.height
+    )
+
+    return
+      rotatedImage
+      .cropped(to: cropRect)
+      .transformed(by: CGAffineTransform(translationX: -cropRect.minX, y: -cropRect.minY))
+  }
+
+  private static func largestCenteredCropSize(
+    width: CGFloat,
+    height: CGFloat,
+    radians: Double
+  ) -> CGSize {
+    let angle = abs(radians).truncatingRemainder(dividingBy: .pi)
+    let normalizedAngle = angle > .pi / 2 ? .pi - angle : angle
+    let sinAngle = CGFloat(abs(sin(normalizedAngle)))
+    let cosAngle = CGFloat(abs(cos(normalizedAngle)))
+
+    if sinAngle < 0.0001 {
+      return CGSize(width: width, height: height)
     }
 
-    private static func matrixRows(from matrix: simd_double3x3) -> (
-        CIVector,
-        CIVector,
-        CIVector
-    ) {
-        let row0 = CIVector(
-            x: CGFloat(matrix[0].x),
-            y: CGFloat(matrix[1].x),
-            z: CGFloat(matrix[2].x)
-        )
-        let row1 = CIVector(
-            x: CGFloat(matrix[0].y),
-            y: CGFloat(matrix[1].y),
-            z: CGFloat(matrix[2].y)
-        )
-        let row2 = CIVector(
-            x: CGFloat(matrix[0].z),
-            y: CGFloat(matrix[1].z),
-            z: CGFloat(matrix[2].z)
-        )
-        return (row0, row1, row2)
+    let longSide = max(width, height)
+    let shortSide = min(width, height)
+    let cropWidth: CGFloat
+    let cropHeight: CGFloat
+
+    if shortSide <= 2.0 * sinAngle * cosAngle * longSide {
+      let halfShortSide = shortSide * 0.5
+      if width >= height {
+        cropWidth = halfShortSide / sinAngle
+        cropHeight = halfShortSide / cosAngle
+      } else {
+        cropWidth = halfShortSide / cosAngle
+        cropHeight = halfShortSide / sinAngle
+      }
+    } else {
+      let cosDoubleAngle = cosAngle * cosAngle - sinAngle * sinAngle
+      cropWidth = (width * cosAngle - height * sinAngle) / cosDoubleAngle
+      cropHeight = (height * cosAngle - width * sinAngle) / cosDoubleAngle
     }
+
+    return CGSize(
+      width: min(max(cropWidth, 1.0), width),
+      height: min(max(cropHeight, 1.0), height)
+    )
+  }
+
+  private static func applyCrop(
+    to image: CIImage,
+    left: Double,
+    top: Double,
+    right: Double,
+    bottom: Double,
+    aspectRatio: CropAspectRatio
+  ) -> CIImage {
+    let extent = image.extent
+    guard extent.width > 1, extent.height > 1 else { return image }
+
+    let clampedLeft = min(max(left, 0.0), 0.95)
+    let clampedTop = min(max(top, 0.0), 0.95)
+    let clampedRight = min(max(right, 0.0), 0.95)
+    let clampedBottom = min(max(bottom, 0.0), 0.95)
+    let horizontalInset = min(clampedLeft + clampedRight, 0.98)
+    let verticalInset = min(clampedTop + clampedBottom, 0.98)
+    let leftScale =
+      horizontalInset > 0 ? clampedLeft / max(clampedLeft + clampedRight, 0.0001) : 0.0
+    let topScale = verticalInset > 0 ? clampedTop / max(clampedTop + clampedBottom, 0.0001) : 0.0
+    let effectiveLeft = horizontalInset * leftScale
+    let effectiveRight = horizontalInset - effectiveLeft
+    let effectiveTop = verticalInset * topScale
+    let effectiveBottom = verticalInset - effectiveTop
+    var cropRect = CGRect(
+      x: extent.minX + extent.width * effectiveLeft,
+      y: extent.minY + extent.height * effectiveBottom,
+      width: extent.width * (1.0 - effectiveLeft - effectiveRight),
+      height: extent.height * (1.0 - effectiveTop - effectiveBottom)
+    )
+
+    if let targetAspectRatio = aspectRatio.resolvedValue(for: extent.size) {
+      cropRect = cropRect.constrained(toAspectRatio: CGFloat(targetAspectRatio))
+    }
+
+    cropRect = cropRect.integral
+
+    guard cropRect.width > 1, cropRect.height > 1 else { return image }
+
+    return
+      image
+      .cropped(to: cropRect)
+      .transformed(by: CGAffineTransform(translationX: -cropRect.minX, y: -cropRect.minY))
+  }
+
+  private static func gamutTransformMatrix(
+    from source: LUTGamut,
+    to target: LUTGamut
+  ) -> simd_double3x3 {
+    if source == target {
+      return matrix_identity_double3x3
+    }
+
+    let sourceSpace = primaries(for: source)
+    let targetSpace = primaries(for: target)
+    return targetSpace.xyzToRGB * sourceSpace.rgbToXYZ
+  }
+
+  private static func primaries(for gamut: LUTGamut) -> RGBPrimaries {
+    switch gamut {
+    case .sRGB:
+      RGBPrimaries(
+        red: ChromaticityPoint(x: 0.64, y: 0.33),
+        green: ChromaticityPoint(x: 0.30, y: 0.60),
+        blue: ChromaticityPoint(x: 0.15, y: 0.06),
+        white: ChromaticityPoint(x: 0.3127, y: 0.3290)
+      )
+    case .displayP3:
+      RGBPrimaries(
+        red: ChromaticityPoint(x: 0.68, y: 0.32),
+        green: ChromaticityPoint(x: 0.265, y: 0.69),
+        blue: ChromaticityPoint(x: 0.15, y: 0.06),
+        white: ChromaticityPoint(x: 0.3127, y: 0.3290)
+      )
+    case .rec709:
+      RGBPrimaries(
+        red: ChromaticityPoint(x: 0.64, y: 0.33),
+        green: ChromaticityPoint(x: 0.30, y: 0.60),
+        blue: ChromaticityPoint(x: 0.15, y: 0.06),
+        white: ChromaticityPoint(x: 0.3127, y: 0.3290)
+      )
+    case .dciP3:
+      RGBPrimaries(
+        red: ChromaticityPoint(x: 0.68, y: 0.32),
+        green: ChromaticityPoint(x: 0.265, y: 0.69),
+        blue: ChromaticityPoint(x: 0.15, y: 0.06),
+        white: ChromaticityPoint(x: 0.314, y: 0.351)
+      )
+    case .rec2020:
+      RGBPrimaries(
+        red: ChromaticityPoint(x: 0.708, y: 0.292),
+        green: ChromaticityPoint(x: 0.170, y: 0.797),
+        blue: ChromaticityPoint(x: 0.131, y: 0.046),
+        white: ChromaticityPoint(x: 0.3127, y: 0.3290)
+      )
+    case .fGamut:
+      RGBPrimaries(
+        red: ChromaticityPoint(x: 0.708, y: 0.292),
+        green: ChromaticityPoint(x: 0.170, y: 0.797),
+        blue: ChromaticityPoint(x: 0.131, y: 0.046),
+        white: ChromaticityPoint(x: 0.3127, y: 0.3290)
+      )
+    case .fGamutC:
+      RGBPrimaries(
+        red: ChromaticityPoint(x: 0.7347, y: 0.2653),
+        green: ChromaticityPoint(x: 0.0263, y: 0.9737),
+        blue: ChromaticityPoint(x: 0.1173, y: -0.0224),
+        white: ChromaticityPoint(x: 0.3127, y: 0.3290)
+      )
+    case .sonySGamut:
+      RGBPrimaries(
+        red: ChromaticityPoint(x: 0.730, y: 0.280),
+        green: ChromaticityPoint(x: 0.140, y: 0.855),
+        blue: ChromaticityPoint(x: 0.100, y: -0.050),
+        white: ChromaticityPoint(x: 0.3127, y: 0.3290)
+      )
+    case .sonySGamut3Cine:
+      RGBPrimaries(
+        red: ChromaticityPoint(x: 0.766, y: 0.275),
+        green: ChromaticityPoint(x: 0.225, y: 0.800),
+        blue: ChromaticityPoint(x: 0.089, y: -0.087),
+        white: ChromaticityPoint(x: 0.3127, y: 0.3290)
+      )
+    case .djiDGamut:
+      RGBPrimaries(
+        red: ChromaticityPoint(x: 0.710, y: 0.310),
+        green: ChromaticityPoint(x: 0.210, y: 0.880),
+        blue: ChromaticityPoint(x: 0.090, y: -0.080),
+        white: ChromaticityPoint(x: 0.3127, y: 0.3290)
+      )
+    case .canonCinemaGamut:
+      RGBPrimaries(
+        red: ChromaticityPoint(x: 0.740, y: 0.270),
+        green: ChromaticityPoint(x: 0.170, y: 1.140),
+        blue: ChromaticityPoint(x: 0.080, y: -0.100),
+        white: ChromaticityPoint(x: 0.3127, y: 0.3290)
+      )
+    case .panasonicVGamut:
+      RGBPrimaries(
+        red: ChromaticityPoint(x: 0.730, y: 0.280),
+        green: ChromaticityPoint(x: 0.165, y: 0.840),
+        blue: ChromaticityPoint(x: 0.100, y: -0.030),
+        white: ChromaticityPoint(x: 0.3127, y: 0.3290)
+      )
+    }
+  }
+
+  private static func applyLUTInputTransform(
+    to image: CIImage,
+    gamutTransform: simd_double3x3,
+    transferFunction: LUTTransferFunction,
+    isHDRPreserving: Bool
+  ) -> CIImage? {
+    guard let kernel = lutInputTransformKernel else {
+      return nil
+    }
+
+    let rows = matrixRows(from: gamutTransform)
+    return kernel.apply(
+      extent: image.extent,
+      arguments: [
+        image,
+        rows.0,
+        rows.1,
+        rows.2,
+        LUTTransferMode(transferFunction).kernelValue,
+        isHDRPreserving ? 1.0 : 0.0,
+      ]
+    )
+  }
+
+  private static func applyLUTOutputTransform(
+    to image: CIImage,
+    originalImage: CIImage,
+    gamutTransform: simd_double3x3,
+    transferFunction: LUTTransferFunction,
+    isHDRPreserving: Bool
+  ) -> CIImage? {
+    guard let kernel = lutOutputTransformKernel else {
+      return nil
+    }
+
+    let rows = matrixRows(from: gamutTransform)
+    return kernel.apply(
+      extent: image.extent,
+      arguments: [
+        image,
+        originalImage,
+        rows.0,
+        rows.1,
+        rows.2,
+        LUTTransferMode(transferFunction).kernelValue,
+        isHDRPreserving ? 1.0 : 0.0,
+      ]
+    )
+  }
+
+  private static func matrixRows(from matrix: simd_double3x3) -> (
+    CIVector,
+    CIVector,
+    CIVector
+  ) {
+    let row0 = CIVector(
+      x: CGFloat(matrix[0].x),
+      y: CGFloat(matrix[1].x),
+      z: CGFloat(matrix[2].x)
+    )
+    let row1 = CIVector(
+      x: CGFloat(matrix[0].y),
+      y: CGFloat(matrix[1].y),
+      z: CGFloat(matrix[2].y)
+    )
+    let row2 = CIVector(
+      x: CGFloat(matrix[0].z),
+      y: CGFloat(matrix[1].z),
+      z: CGFloat(matrix[2].z)
+    )
+    return (row0, row1, row2)
+  }
 }
 
-private extension CGRect {
-    func constrained(toAspectRatio aspectRatio: CGFloat) -> CGRect {
-        guard aspectRatio > 0, width > 1, height > 1 else { return self }
+extension CGRect {
+  fileprivate func constrained(toAspectRatio aspectRatio: CGFloat) -> CGRect {
+    guard aspectRatio > 0, width > 1, height > 1 else { return self }
 
-        let currentAspectRatio = width / height
-        let targetSize: CGSize
+    let currentAspectRatio = width / height
+    let targetSize: CGSize
 
-        if currentAspectRatio > aspectRatio {
-            targetSize = CGSize(width: height * aspectRatio, height: height)
-        } else {
-            targetSize = CGSize(width: width, height: width / aspectRatio)
-        }
-
-        return CGRect(
-            x: midX - targetSize.width * 0.5,
-            y: midY - targetSize.height * 0.5,
-            width: targetSize.width,
-            height: targetSize.height
-        )
+    if currentAspectRatio > aspectRatio {
+      targetSize = CGSize(width: height * aspectRatio, height: height)
+    } else {
+      targetSize = CGSize(width: width, height: width / aspectRatio)
     }
+
+    return CGRect(
+      x: midX - targetSize.width * 0.5,
+      y: midY - targetSize.height * 0.5,
+      width: targetSize.width,
+      height: targetSize.height
+    )
+  }
 }
