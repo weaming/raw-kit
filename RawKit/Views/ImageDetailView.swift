@@ -58,10 +58,11 @@ struct ImageDetailView: View {
     let imageInfo: ImageInfo
     let session: ImageEditingSession
     @ObservedObject var editingState: ImageEditingState
-    @ObservedObject private var history: AdjustmentHistory
     @ObservedObject private var thumbnailManager: ThumbnailManager
     @Binding var sidebarWidth: CGFloat
     @Binding var adjustmentPanelExpandedSections: Set<AdjustmentSection>
+    @Binding var adjustmentPanelScrollPosition: ScrollPosition
+    @Binding var adjustmentPanelScrollPoint: CGPoint
     let syncTargetCount: Int
     let onSyncAdjustments: ((Set<AdjustmentSyncGroup>) -> Void)?
     let onFilesDrop: (([URL]) -> Void)?
@@ -84,6 +85,8 @@ struct ImageDetailView: View {
     @State private var curvePickSamples = CurvePickSamples()
     @State private var showingSyncDialog = false
     @State private var selectedSyncGroups = Set(AdjustmentSyncGroup.allCases)
+    @State private var canUndo = false
+    @State private var canRedo = false
     @State private var isCropModeEnabled = false
     @State private var draftCropLeft = 0.0
     @State private var draftCropTop = 0.0
@@ -133,6 +136,8 @@ struct ImageDetailView: View {
         thumbnailManager: ThumbnailManager,
         sidebarWidth: Binding<CGFloat>,
         adjustmentPanelExpandedSections: Binding<Set<AdjustmentSection>>,
+        adjustmentPanelScrollPosition: Binding<ScrollPosition>,
+        adjustmentPanelScrollPoint: Binding<CGPoint>,
         syncTargetCount: Int,
         onSyncAdjustments: ((Set<AdjustmentSyncGroup>) -> Void)?,
         onFilesDrop: (([URL]) -> Void)?
@@ -140,10 +145,11 @@ struct ImageDetailView: View {
         self.imageInfo = imageInfo
         self.session = session
         self._editingState = ObservedObject(wrappedValue: editingState)
-        self._history = ObservedObject(wrappedValue: session.history)
         self._thumbnailManager = ObservedObject(wrappedValue: thumbnailManager)
         self._sidebarWidth = sidebarWidth
         self._adjustmentPanelExpandedSections = adjustmentPanelExpandedSections
+        self._adjustmentPanelScrollPosition = adjustmentPanelScrollPosition
+        self._adjustmentPanelScrollPoint = adjustmentPanelScrollPoint
         self.syncTargetCount = syncTargetCount
         self.onSyncAdjustments = onSyncAdjustments
         self.onFilesDrop = onFilesDrop
@@ -170,13 +176,15 @@ struct ImageDetailView: View {
                     resetBaseline: resetBaseline,
                     width: $sidebarWidth,
                     expandedSections: $adjustmentPanelExpandedSections,
+                    scrollPosition: $adjustmentPanelScrollPosition,
+                    scrollPoint: $adjustmentPanelScrollPoint,
                     whiteBalancePickMode: $whiteBalancePickMode
                 )
                 .equatable()
             }
         }
         .task(id: imageInfo.id) {
-            isCropModeEnabled = false
+            await prepareForImageChange()
             syncDraftCropFromAdjustments(editingState.adjustments)
             ensureRenderQueue()
             await loadImageProgressively()
@@ -220,8 +228,10 @@ struct ImageDetailView: View {
                 }
             }
         }
-        .focusedSceneValue(\.undoAction, history.canUndo ? undo : nil)
-        .focusedSceneValue(\.redoAction, history.canRedo ? redo : nil)
+        .focusedSceneValue(\.undoAction, canUndo ? undo : nil)
+        .focusedSceneValue(\.redoAction, canRedo ? redo : nil)
+        .onReceive(session.history.$canUndo) { canUndo = $0 }
+        .onReceive(session.history.$canRedo) { canRedo = $0 }
         .background(
             Button("") {
                 cancelWhiteBalancePickMode()
@@ -243,6 +253,37 @@ struct ImageDetailView: View {
         }
     }
 
+    /// 清理仅属于当前照片的状态，同时保留侧边栏的视图状态。
+    private func prepareForImageChange() async {
+        if let renderQueue {
+            await renderQueue.cancelPending()
+            self.renderQueue = nil
+        }
+
+        nextRenderRequestID += 1
+        latestRenderRequestID = nextRenderRequestID
+        originalCIImage = nil
+        adjustedCIImage = nil
+        previewCIImage = nil
+        displayImage = nil
+        displayImageIsHDR = false
+        previewRevision = 0
+        isLoading = true
+        loadingStage = .thumbnail
+        scale = 1.0
+        whiteBalancePickMode = .none
+        currentPixelInfo = nil
+        showOriginal = false
+        curvePickSamples = CurvePickSamples()
+        showingSyncDialog = false
+        canUndo = session.history.canUndo
+        canRedo = session.history.canRedo
+        isCropModeEnabled = false
+        cachedAdjustedImage = nil
+        cachedAdjustedImageIsHDR = false
+        cachedAdjustments = nil
+    }
+
     private func loadImageProgressively() async {
         // 检查图像尺寸，决定加载策略
         let imageSize = getImageDimensions(from: imageInfo.url)
@@ -254,9 +295,11 @@ struct ImageDetailView: View {
 
             loadingStage = .fullResolution
             if let fullImage = await ImageProcessor.loadCIImage(from: imageInfo.url) {
+                guard !Task.isCancelled else { return }
                 originalCIImage = fullImage
                 print("ImageDetailView: ✓ originalCIImage 已加载（小图）")
                 await waitForViewportSize()
+                guard !Task.isCancelled else { return }
                 await renderCurrentStateImmediately()
                 displayImageID = UUID()
             } else {
@@ -284,9 +327,11 @@ struct ImageDetailView: View {
         await Task.yield()
 
         if let fullImage = await ImageProcessor.loadCIImage(from: imageInfo.url) {
+            guard !Task.isCancelled else { return }
             originalCIImage = fullImage
             print("ImageDetailView: ✓ originalCIImage 已加载（大图）")
             await waitForViewportSize()
+            guard !Task.isCancelled else { return }
             await renderCurrentStateImmediately()
             displayImageID = UUID()
         } else {
@@ -632,10 +677,12 @@ struct ImageDetailView: View {
 
     private func undo() {
         session.undo()
+        editingState.adjustments = session.currentAdjustments
     }
 
     private func redo() {
         session.redo()
+        editingState.adjustments = session.currentAdjustments
     }
 
     /// 执行实际的渲染操作（由渲染队列调用）

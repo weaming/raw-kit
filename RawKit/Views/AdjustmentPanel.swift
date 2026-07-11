@@ -214,6 +214,8 @@ struct ResizableAdjustmentPanel: View, Equatable {
     let resetBaseline: ImageAdjustments
     @Binding var width: CGFloat
     @Binding var expandedSections: Set<AdjustmentSection>
+    @Binding var scrollPosition: ScrollPosition
+    @Binding var scrollPoint: CGPoint
     @Binding var whiteBalancePickMode: CurveAdjustmentView.PickMode
     @State private var isDragging = false
 
@@ -264,7 +266,9 @@ struct ResizableAdjustmentPanel: View, Equatable {
                 histogramRangeMax: histogramRangeMax,
                 resetBaseline: resetBaseline,
                 whiteBalancePickMode: $whiteBalancePickMode,
-                expandedSections: $expandedSections
+                expandedSections: $expandedSections,
+                scrollPosition: $scrollPosition,
+                scrollPoint: $scrollPoint
             )
             .frame(width: width)
         }
@@ -347,6 +351,8 @@ struct AdjustmentPanel: View {
     let resetBaseline: ImageAdjustments
     @Binding var whiteBalancePickMode: CurveAdjustmentView.PickMode
     @Binding var expandedSections: Set<AdjustmentSection>
+    @Binding var scrollPosition: ScrollPosition
+    @Binding var scrollPoint: CGPoint
     @State private var histogram: HistogramData?
     @State private var histogramTask: Task<Void, Never>?
     @State private var autoHDRBrightness = Self.defaultAutoHDRBrightness
@@ -397,8 +403,7 @@ struct AdjustmentPanel: View {
             .background(Color(nsColor: .controlBackgroundColor))
 
             ScrollView {
-                ScrollViewReader { proxy in
-                    VStack(spacing: 0) {
+                VStack(spacing: 0) {
                         CollapsibleSection(
                             section: .transform,
                             isExpanded: expandedSections.contains(.transform),
@@ -486,15 +491,20 @@ struct AdjustmentPanel: View {
                             )
                         }
                         .id(AdjustmentSection.curve)
-                    }
-                    .onAppear {
-                        let scrollKey = "AdjustmentPanelScrollSection"
-                        if let saved = UserDefaults.standard.string(forKey: scrollKey),
-                           let section = AdjustmentSection(persistenceKey: saved) {
-                            proxy.scrollTo(section, anchor: .top)
-                        }
-                    }
                 }
+            }
+            .scrollPosition($scrollPosition)
+            .onChange(of: scrollPosition) { _, newPosition in
+                guard newPosition.isPositionedByUser,
+                      let point = newPosition.point else {
+                    return
+                }
+
+                scrollPoint = point
+            }
+            .task {
+                await Task.yield()
+                scrollPosition.scrollTo(point: scrollPoint)
             }
         }
         .ignoresSafeArea(edges: .top) // 忽略顶部安全区域，让直方图顶到窗口边缘

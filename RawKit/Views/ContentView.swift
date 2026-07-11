@@ -50,6 +50,7 @@ private enum ContentExportError: LocalizedError {
 struct ContentView: View {
   @StateObject private var imageManager = ImageManager()
   @StateObject private var thumbnailManager = ThumbnailManager()
+  @StateObject private var activeEditingState = ImageEditingState(adjustments: .default)
   @State private var selectedIndices: Set<Int> = []
   @State private var displayedIndex: Int?
   @State private var editingSessions: [UUID: ImageEditingSession] = [:]
@@ -57,6 +58,8 @@ struct ContentView: View {
   @AppStorage("AdjustmentPanelExpandedSections") private var panelExpandedSections =
     PanelExpandedSections()
   @AppStorage("LeftSidebarWidth") private var leftSidebarWidth: Double = 250
+  @State private var adjustmentPanelScrollPosition = ScrollPosition()
+  @State private var adjustmentPanelScrollPoint = CGPoint.zero
   @State private var presetsExpanded = true
   @State private var lutExpanded = true
   @State private var showingExportDialog = false
@@ -87,12 +90,14 @@ struct ContentView: View {
             presetsExpanded: $presetsExpanded,
             lutExpanded: $lutExpanded,
             editingSessionID: currentSession.id,
-            editingState: currentSession.state,
+            editingState: activeEditingState,
             onLoadPreset: { preset in
               currentSession.apply(preset)
+              syncActiveAdjustments(from: currentSession)
             },
             onLoadLUT: { url in
               currentSession.applyLUT(url)
+              syncActiveAdjustments(from: currentSession)
             }
           )
         }
@@ -106,13 +111,15 @@ struct ContentView: View {
           ImageDetailView(
             imageInfo: imageInfo,
             session: session,
-            editingState: session.state,
+            editingState: activeEditingState,
             thumbnailManager: thumbnailManager,
             sidebarWidth: Binding<CGFloat>(
               get: { CGFloat(self.rightSidebarWidth) },
               set: { self.rightSidebarWidth = Double($0) }
             ),
             adjustmentPanelExpandedSections: adjustmentPanelExpandedSections,
+            adjustmentPanelScrollPosition: $adjustmentPanelScrollPosition,
+            adjustmentPanelScrollPoint: $adjustmentPanelScrollPoint,
             syncTargetCount: syncTargetIndices(for: index).count,
             onSyncAdjustments: { groups in
               syncCurrentAdjustments(
@@ -125,7 +132,6 @@ struct ContentView: View {
               addImagesAndDisplayFirst(from: urls)
             }
           )
-          .id(imageInfo.id)
         } else {
           EmptyStateView()
             .onTapGesture(count: 2) {
@@ -161,9 +167,23 @@ struct ContentView: View {
     }
     .onAppear {
       syncEditingSessions(for: imageManager.images)
+      syncActiveAdjustmentsFromCurrentSession()
     }
     .onChange(of: imageManager.images.map(\.id)) { _, _ in
       syncEditingSessions(for: imageManager.images)
+      syncActiveAdjustmentsFromCurrentSession()
+    }
+    .onChange(of: displayedIndex) { _, _ in
+      syncActiveAdjustmentsFromCurrentSession()
+    }
+    .onChange(of: activeEditingState.adjustments) { _, newAdjustments in
+      guard let currentSession = getCurrentSession(),
+        currentSession.currentAdjustments != newAdjustments
+      else {
+        return
+      }
+
+      currentSession.state.adjustments = newAdjustments
     }
     .sheet(isPresented: $showingExportDialog) {
       ExportDialog(
@@ -326,6 +346,17 @@ struct ContentView: View {
 
   private func adjustments(for imageID: UUID) -> ImageAdjustments {
     session(for: imageID)?.currentAdjustments ?? .default
+  }
+
+  private func syncActiveAdjustmentsFromCurrentSession() {
+    guard let currentSession = getCurrentSession() else { return }
+    syncActiveAdjustments(from: currentSession)
+  }
+
+  private func syncActiveAdjustments(from session: ImageEditingSession) {
+    let adjustments = session.currentAdjustments
+    guard activeEditingState.adjustments != adjustments else { return }
+    activeEditingState.adjustments = adjustments
   }
 
   private func syncTargetIndices(for sourceIndex: Int) -> [Int] {
