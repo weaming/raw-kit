@@ -259,38 +259,6 @@ struct ImageAdjustments: Equatable, Codable {
         lutProfile = savedLutProfile
     }
 
-    mutating func reset(to baseline: ImageAdjustments) {
-        let savedRotation = rotation
-        let savedStraightenAngle = straightenAngle
-        let savedFlipH = flipHorizontal
-        let savedFlipV = flipVertical
-        let savedCropLeft = cropLeft
-        let savedCropTop = cropTop
-        let savedCropRight = cropRight
-        let savedCropBottom = cropBottom
-        let savedCropAspectRatio = cropAspectRatio
-        let savedLutURL = lutURL
-        let savedLutAlpha = lutAlpha
-        let savedLutColorSpace = lutColorSpace
-        let savedLutProfile = lutProfile
-
-        self = baseline
-
-        rotation = savedRotation
-        straightenAngle = savedStraightenAngle
-        flipHorizontal = savedFlipH
-        flipVertical = savedFlipV
-        cropLeft = savedCropLeft
-        cropTop = savedCropTop
-        cropRight = savedCropRight
-        cropBottom = savedCropBottom
-        cropAspectRatio = savedCropAspectRatio
-        lutURL = savedLutURL
-        lutAlpha = savedLutAlpha
-        lutColorSpace = savedLutColorSpace
-        lutProfile = savedLutProfile
-    }
-
     // 检查基础调整组是否有变化
     var hasBasicAdjustments: Bool {
         exposure != 0.0 ||

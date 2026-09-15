@@ -216,6 +216,11 @@ struct ResizableAdjustmentPanel: View, Equatable {
     @Binding var expandedSections: Set<AdjustmentSection>
     @Binding var scrollPosition: ScrollPosition
     @Binding var scrollPoint: CGPoint
+    @Binding var isCropModeEnabled: Bool
+    let onStartCrop: () -> Void
+    let onApplyCrop: () -> Void
+    let onCancelCrop: () -> Void
+    let onResetAll: () -> Void
     @Binding var whiteBalancePickMode: CurveAdjustmentView.PickMode
     @State private var isDragging = false
 
@@ -224,6 +229,7 @@ struct ResizableAdjustmentPanel: View, Equatable {
         lhs.curvePickSamples == rhs.curvePickSamples &&
         lhs.width == rhs.width &&
         lhs.expandedSections == rhs.expandedSections &&
+        lhs.isCropModeEnabled == rhs.isCropModeEnabled &&
         lhs.whiteBalancePickMode == rhs.whiteBalancePickMode &&
         lhs.previewRevision == rhs.previewRevision &&
         lhs.histogramRangeMax == rhs.histogramRangeMax &&
@@ -268,7 +274,12 @@ struct ResizableAdjustmentPanel: View, Equatable {
                 whiteBalancePickMode: $whiteBalancePickMode,
                 expandedSections: $expandedSections,
                 scrollPosition: $scrollPosition,
-                scrollPoint: $scrollPoint
+                scrollPoint: $scrollPoint,
+                isCropModeEnabled: $isCropModeEnabled,
+                onStartCrop: onStartCrop,
+                onApplyCrop: onApplyCrop,
+                onCancelCrop: onCancelCrop,
+                onResetAll: onResetAll
             )
             .frame(width: width)
         }
@@ -353,6 +364,11 @@ struct AdjustmentPanel: View {
     @Binding var expandedSections: Set<AdjustmentSection>
     @Binding var scrollPosition: ScrollPosition
     @Binding var scrollPoint: CGPoint
+    @Binding var isCropModeEnabled: Bool
+    let onStartCrop: () -> Void
+    let onApplyCrop: () -> Void
+    let onCancelCrop: () -> Void
+    let onResetAll: () -> Void
     @State private var histogram: HistogramData?
     @State private var histogramTask: Task<Void, Never>?
     @State private var autoHDRBrightness = Self.defaultAutoHDRBrightness
@@ -391,13 +407,13 @@ struct AdjustmentPanel: View {
 
                 Spacer()
 
-                if adjustments.hasAdjustments {
+                if adjustments.hasAdjustments || adjustments.hasTransformAdjustments || isCropModeEnabled {
                     Button("重置") {
-                        adjustments.reset(to: resetBaseline)
-                        curvePickSamples.reset()
+                        onResetAll()
                     }
                     .buttonStyle(.borderless)
                     .padding(.trailing, 16)
+                    .help("重置所有调整，包括构图")
                 }
             }
             .background(Color(nsColor: .controlBackgroundColor))
@@ -411,7 +427,13 @@ struct AdjustmentPanel: View {
                             onToggle: { toggleSection(.transform) },
                             onReset: { adjustments.resetTransform() }
                         ) {
-                            TransformAdjustmentsView(adjustments: $adjustments)
+                            TransformAdjustmentsView(
+                                adjustments: $adjustments,
+                                isCropModeEnabled: $isCropModeEnabled,
+                                onStartCrop: onStartCrop,
+                                onApplyCrop: onApplyCrop,
+                                onCancelCrop: onCancelCrop
+                            )
                         }
                         .id(AdjustmentSection.transform)
 

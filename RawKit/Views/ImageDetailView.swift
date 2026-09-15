@@ -92,6 +92,7 @@ struct ImageDetailView: View {
     @State private var draftCropTop = 0.0
     @State private var draftCropRight = 0.0
     @State private var draftCropBottom = 0.0
+    @State private var draftStraightenAngle = 0.0
 
     // Before/After 缓存
     @State private var cachedAdjustedImage: NSImage?  // 缓存的调整后图像
@@ -178,6 +179,11 @@ struct ImageDetailView: View {
                     expandedSections: $adjustmentPanelExpandedSections,
                     scrollPosition: $adjustmentPanelScrollPosition,
                     scrollPoint: $adjustmentPanelScrollPoint,
+                    isCropModeEnabled: $isCropModeEnabled,
+                    onStartCrop: startCropMode,
+                    onApplyCrop: applyCropDraft,
+                    onCancelCrop: cancelCropMode,
+                    onResetAll: resetAllAdjustments,
                     whiteBalancePickMode: $whiteBalancePickMode
                 )
                 .equatable()
@@ -197,11 +203,15 @@ struct ImageDetailView: View {
                 print("Before/After: 在原图模式下修改参数，清空缓存")
             }
 
+            if isCropModeEnabled {
+                draftStraightenAngle = newValue.straightenAngle
+            }
+
             if !isCropModeEnabled {
                 syncDraftCropFromAdjustments(newValue)
             }
 
-            enqueueRender(newValue)
+            enqueueRender(renderAdjustments(for: newValue))
         }
         .onChange(of: showOriginal) { _, newValue in
             if newValue {
@@ -211,7 +221,7 @@ struct ImageDetailView: View {
                     cachedAdjustedImage = displayImage
                     cachedAdjustedImageIsHDR = displayImageIsHDR
                 }
-                enqueueRender(editingState.adjustments)
+                enqueueRender(renderAdjustments(for: editingState.adjustments))
             } else {
                 // 切换回调整效果：检查缓存是否有效
                 if let cached = cachedAdjustedImage, editingState.adjustments == cachedAdjustments {
@@ -224,7 +234,7 @@ struct ImageDetailView: View {
                 } else {
                     // 缓存失效或不存在，重新渲染
                     print("Before/After: 缓存失效，重新渲染调整图像")
-                    enqueueRender(editingState.adjustments)
+                    enqueueRender(renderAdjustments(for: editingState.adjustments))
                 }
             }
         }
@@ -282,6 +292,7 @@ struct ImageDetailView: View {
         cachedAdjustedImage = nil
         cachedAdjustedImageIsHDR = false
         cachedAdjustments = nil
+        draftStraightenAngle = 0.0
     }
 
     private func loadImageProgressively() async {
@@ -371,7 +382,7 @@ struct ImageDetailView: View {
             nextRenderRequestID += 1
             let request = RenderRequest(
                 id: nextRenderRequestID,
-                adjustments: editingState.adjustments,
+                adjustments: renderAdjustments(for: editingState.adjustments),
                 showOriginal: showOriginal,
                 isCropPreview: isCropModeEnabled,
                 retryCount: 0
@@ -422,7 +433,10 @@ struct ImageDetailView: View {
                 let retryCount = output.requestRetryCount
                 if retryCount < 2 {
                     print("ImageDetailView: display render returned nil (retry \(retryCount)/2), retrying")
-                    enqueueRender(editingState.adjustments, retryCount: retryCount + 1)
+                    enqueueRender(
+                        renderAdjustments(for: editingState.adjustments),
+                        retryCount: retryCount + 1
+                    )
                 } else {
                     print("ImageDetailView: display render returned nil after \(retryCount) retries, giving up")
                 }
@@ -470,10 +484,9 @@ struct ImageDetailView: View {
         let fitWidth = imageSize.width * fitRatio
         let fitHeight = imageSize.height * fitRatio
 
-        // 预留 3 倍放大空间（用户可以放大到 3x 查看细节）
-        // 但不超过原图尺寸
-        let renderWidth = min(fitWidth * 3.0, imageSize.width)
-        let renderHeight = min(fitHeight * 3.0, imageSize.height)
+        let renderMultiplier = 3.0
+        let renderWidth = min(fitWidth * renderMultiplier, imageSize.width)
+        let renderHeight = min(fitHeight * renderMultiplier, imageSize.height)
 
         return CGSize(width: renderWidth, height: renderHeight)
     }
@@ -500,7 +513,10 @@ struct ImageDetailView: View {
     }
 
     // 缩放图像到目标显示尺寸
-    private nonisolated static func scaleImageToDisplay(_ image: CIImage, targetSize: CGSize) -> CIImage {
+    private nonisolated static func scaleImageToDisplay(
+        _ image: CIImage,
+        targetSize: CGSize
+    ) -> CIImage {
         let extent = image.extent
         let scaleX = targetSize.width / extent.width
         let scaleY = targetSize.height / extent.height
@@ -510,9 +526,11 @@ struct ImageDetailView: View {
             return image
         }
 
-        // 使用 Lanczos 缩放算法获得最佳质量
         let transform = CGAffineTransform(scaleX: scaleX, y: scaleY)
-        return image.transformed(by: transform, highQualityDownsample: true)
+        return image.transformed(
+            by: transform,
+            highQualityDownsample: true
+        )
     }
 
     private nonisolated static func renderPreview(from snapshot: RenderSnapshot) -> RenderOutput {
@@ -520,7 +538,10 @@ struct ImageDetailView: View {
             imageSize: snapshot.originalImage.extent.size,
             viewportSize: snapshot.viewportSize
         )
-        let scaledImage = scaleImageToDisplay(snapshot.originalImage, targetSize: renderSize)
+        let scaledImage = scaleImageToDisplay(
+            snapshot.originalImage,
+            targetSize: renderSize
+        )
         let previewAdjustments = snapshot.isCropPreview
             ? snapshot.adjustments.withoutCrop()
             : snapshot.adjustments
@@ -691,7 +712,10 @@ struct ImageDetailView: View {
     }
 
     @MainActor
-    private func enqueueRender(_ adjustments: ImageAdjustments, retryCount: Int = 0) {
+    private func enqueueRender(
+        _ adjustments: ImageAdjustments,
+        retryCount: Int = 0
+    ) {
         ensureRenderQueue()
         nextRenderRequestID += 1
         let request = RenderRequest(
@@ -706,6 +730,16 @@ struct ImageDetailView: View {
         Task {
             await renderQueue?.enqueue(request)
         }
+    }
+
+    private func renderAdjustments(for adjustments: ImageAdjustments) -> ImageAdjustments {
+        guard isCropModeEnabled else {
+            return adjustments
+        }
+
+        var result = adjustments
+        result.straightenAngle = draftStraightenAngle
+        return result
     }
 
     @MainActor
@@ -772,11 +806,15 @@ struct ImageDetailView: View {
         .onChange(of: viewportSize) { _, newSize in
             // 视口尺寸变化时，重新渲染（使用当前调整）
             if newSize != .zero {
-                enqueueRender(editingState.adjustments)
+                enqueueRender(renderAdjustments(for: editingState.adjustments))
             }
         }
         .onChange(of: isCropModeEnabled) { _, _ in
-            enqueueRender(editingState.adjustments)
+            enqueueRender(renderAdjustments(for: editingState.adjustments))
+        }
+        .onChange(of: draftStraightenAngle) { _, _ in
+            guard isCropModeEnabled else { return }
+            enqueueRender(renderAdjustments(for: editingState.adjustments))
         }
         .background(
             GeometryReader { geo in
@@ -796,22 +834,11 @@ struct ImageDetailView: View {
         ImageInfoBar(
             imageInfo: imageInfo,
             scale: scale,
-            adjustments: $editingState.adjustments,
-            curvePickSamples: $curvePickSamples,
             showAdjustmentPanel: $showAdjustmentPanel,
             showOriginal: $showOriginal,
-            isCropModeEnabled: $isCropModeEnabled,
-            draftCropLeft: $draftCropLeft,
-            draftCropTop: $draftCropTop,
-            draftCropRight: $draftCropRight,
-            draftCropBottom: $draftCropBottom,
-            resetBaseline: resetBaseline,
             pixelInfo: currentPixelInfo,
             syncTargetCount: syncTargetCount,
-            onSync: syncTargetCount > 0 ? openSyncDialog : nil,
-            onStartCrop: startCropMode,
-            onApplyCrop: applyCropDraft,
-            onCancelCrop: cancelCropMode
+            onSync: syncTargetCount > 0 ? openSyncDialog : nil
         )
     }
 
@@ -820,6 +847,7 @@ struct ImageDetailView: View {
         draftCropTop = adjustments.cropTop
         draftCropRight = adjustments.cropRight
         draftCropBottom = adjustments.cropBottom
+        draftStraightenAngle = adjustments.straightenAngle
     }
 
     private func startCropMode() {
@@ -835,12 +863,20 @@ struct ImageDetailView: View {
         updatedAdjustments.cropTop = draftCropTop
         updatedAdjustments.cropRight = draftCropRight
         updatedAdjustments.cropBottom = draftCropBottom
+        updatedAdjustments.straightenAngle = draftStraightenAngle
         editingState.adjustments = updatedAdjustments
         isCropModeEnabled = false
     }
 
     private func cancelCropMode() {
         syncDraftCropFromAdjustments(editingState.adjustments)
+        isCropModeEnabled = false
+    }
+
+    private func resetAllAdjustments() {
+        editingState.adjustments = resetBaseline
+        curvePickSamples.reset()
+        syncDraftCropFromAdjustments(resetBaseline)
         isCropModeEnabled = false
     }
 
@@ -869,34 +905,11 @@ struct ImageInfoBar: View {
 
     let imageInfo: ImageInfo
     let scale: CGFloat
-    @Binding var adjustments: ImageAdjustments
-    @Binding var curvePickSamples: CurvePickSamples
     @Binding var showAdjustmentPanel: Bool
     @Binding var showOriginal: Bool
-    @Binding var isCropModeEnabled: Bool
-    @Binding var draftCropLeft: Double
-    @Binding var draftCropTop: Double
-    @Binding var draftCropRight: Double
-    @Binding var draftCropBottom: Double
-    let resetBaseline: ImageAdjustments
     let pixelInfo: PixelInfo?
     let syncTargetCount: Int
     let onSync: (() -> Void)?
-    let onStartCrop: () -> Void
-    let onApplyCrop: () -> Void
-    let onCancelCrop: () -> Void
-
-    private var hasCropDraftOrApplied: Bool {
-        draftCropLeft > 0.0001 ||
-            draftCropTop > 0.0001 ||
-            draftCropRight > 0.0001 ||
-            draftCropBottom > 0.0001 ||
-            adjustments.cropLeft > 0.0001 ||
-            adjustments.cropTop > 0.0001 ||
-            adjustments.cropRight > 0.0001 ||
-            adjustments.cropBottom > 0.0001 ||
-            adjustments.cropAspectRatio != .free
-    }
 
     var body: some View {
         HStack(spacing: 12) {
@@ -984,33 +997,6 @@ struct ImageInfoBar: View {
             Spacer()
                 .frame(width: 8)
 
-            // 重置按钮
-            Button(action: {
-                var newAdj = resetBaseline
-                // 保留变换设置
-                newAdj.rotation = adjustments.rotation
-                newAdj.straightenAngle = adjustments.straightenAngle
-                newAdj.flipHorizontal = adjustments.flipHorizontal
-                newAdj.flipVertical = adjustments.flipVertical
-                newAdj.cropLeft = adjustments.cropLeft
-                newAdj.cropTop = adjustments.cropTop
-                newAdj.cropRight = adjustments.cropRight
-                newAdj.cropBottom = adjustments.cropBottom
-                newAdj.cropAspectRatio = adjustments.cropAspectRatio
-                adjustments = newAdj
-                curvePickSamples.reset()
-            }) {
-                HStack(spacing: 4) {
-                    Image(systemName: "arrow.counterclockwise")
-                        .font(.caption)
-                    Text("重置")
-                        .font(.caption)
-                }
-            }
-            .buttonStyle(.bordered)
-            .help("重置所有调整")
-            .disabled(!adjustments.hasAdjustments)
-
             if let onSync, syncTargetCount > 0 {
                 Button(action: onSync) {
                     Text("同步 \(syncTargetCount) 张")
@@ -1022,88 +1008,6 @@ struct ImageInfoBar: View {
 
             Spacer()
                 .frame(width: 16)
-
-            // 变换按钮组
-            HStack(spacing: 8) {
-                if isCropModeEnabled {
-                    Button(action: onCancelCrop) {
-                        Image(systemName: "xmark")
-                            .font(.body)
-                    }
-                    .buttonStyle(.borderless)
-                    .help("取消裁切")
-                    .keyboardShortcut(.escape, modifiers: [])
-
-                    Button(action: onApplyCrop) {
-                        Image(systemName: "checkmark")
-                            .font(.body)
-                            .foregroundColor(.blue)
-                    }
-                    .buttonStyle(.borderless)
-                    .help("应用裁切")
-                    .keyboardShortcut(.return, modifiers: [])
-                } else {
-                    Button(action: onStartCrop) {
-                        Image(systemName: "crop")
-                            .font(.body)
-                            .foregroundColor(hasCropDraftOrApplied ? .blue : .secondary)
-                    }
-                    .buttonStyle(.borderless)
-                    .help("裁切")
-                }
-
-                Spacer()
-                    .frame(width: 8)
-
-                Button(action: {
-                    adjustments.rotation = (adjustments.rotation + 90) % 360
-                }) {
-                    Image(systemName: "rotate.left")
-                        .font(.body)
-                }
-                .buttonStyle(.borderless)
-                .help("向左旋转90° (⌘[)")
-                .keyboardShortcut("[", modifiers: .command)
-
-                Spacer()
-                    .frame(width: 8)
-
-                Button(action: {
-                    adjustments.rotation = (adjustments.rotation - 90 + 360) % 360
-                }) {
-                    Image(systemName: "rotate.right")
-                        .font(.body)
-                }
-                .buttonStyle(.borderless)
-                .help("向右旋转90° (⌘])")
-                .keyboardShortcut("]", modifiers: .command)
-
-                Spacer()
-                    .frame(width: 16)
-
-                Button(action: {
-                    adjustments.flipHorizontal.toggle()
-                }) {
-                    Image(systemName: "arrow.left.and.right")
-                        .font(.body)
-                        .foregroundColor(adjustments.flipHorizontal ? .blue : .secondary)
-                }
-                .buttonStyle(.borderless)
-                .help("水平镜像")
-
-                Spacer()
-                    .frame(width: 8)
-
-                Button(action: {
-                    adjustments.flipVertical.toggle()
-                }) {
-                    Image(systemName: "arrow.up.and.down")
-                        .font(.body)
-                        .foregroundColor(adjustments.flipVertical ? .blue : .secondary)
-                }
-                .buttonStyle(.borderless)
-                .help("垂直镜像")
-            }
 
             Divider()
                 .frame(height: 16)

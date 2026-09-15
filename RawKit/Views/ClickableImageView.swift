@@ -628,8 +628,8 @@ private struct CropOverlayView: View {
                 handleView(for: handle)
             }
         }
+        .coordinateSpace(name: "cropOverlay")
         .contentShape(Rectangle())
-        .gesture(moveGesture)
     }
 
     private var dimmingMask: some View {
@@ -664,19 +664,8 @@ private struct CropOverlayView: View {
         }
         .frame(width: cropRect.width, height: cropRect.height)
         .position(x: cropRect.midX, y: cropRect.midY)
+        .contentShape(Rectangle())
         .gesture(dragGesture(for: .move))
-    }
-
-    private var moveGesture: some Gesture {
-        DragGesture(minimumDistance: 1)
-            .onChanged { value in
-                guard cropRect.contains(value.startLocation) else { return }
-                updateCrop(handle: .move, translation: value.translation)
-            }
-            .onEnded { _ in
-                activeHandle = nil
-                dragStart = nil
-            }
     }
 
     private func handleView(for handle: Handle) -> some View {
@@ -684,12 +673,22 @@ private struct CropOverlayView: View {
             .fill(Color.white)
             .shadow(color: Color.black.opacity(0.35), radius: 2, x: 0, y: 1)
             .frame(width: handleSize(for: handle).width, height: handleSize(for: handle).height)
+            .frame(width: hitSize(for: handle).width, height: hitSize(for: handle).height)
             .position(handlePosition(for: handle))
             .gesture(dragGesture(for: handle))
+            .accessibilityLabel(handleAccessibilityLabel(for: handle))
+            .accessibilityHint("拖动以调整裁切范围")
+            .onHover { isInside in
+                if isInside {
+                    cursor(for: handle).set()
+                } else {
+                    NSCursor.arrow.set()
+                }
+            }
     }
 
     private func dragGesture(for handle: Handle) -> some Gesture {
-        DragGesture(minimumDistance: 1)
+        DragGesture(minimumDistance: 1, coordinateSpace: .named("cropOverlay"))
             .onChanged { value in
                 updateCrop(handle: handle, translation: value.translation)
             }
@@ -757,7 +756,9 @@ private struct CropOverlayView: View {
         let minLength: CGFloat = 48
         var rect = proposed.standardized
 
-        if let ratio = aspectRatio.resolvedValue(for: imageSize), fixedHandle != .move {
+        if let ratio = aspectRatio.resolvedValue(for: imageSize),
+           fixedHandle != .move
+        {
             rect = applyAspectRatio(ratio, to: rect, fixedHandle: fixedHandle)
         }
 
@@ -874,13 +875,62 @@ private struct CropOverlayView: View {
     private func handleSize(for handle: Handle) -> CGSize {
         switch handle {
         case .top, .bottom:
-            return CGSize(width: 34, height: 7)
+            return CGSize(width: 42, height: 9)
         case .left, .right:
-            return CGSize(width: 7, height: 34)
+            return CGSize(width: 9, height: 42)
         case .move:
             return .zero
         default:
-            return CGSize(width: 12, height: 12)
+            return CGSize(width: 16, height: 16)
+        }
+    }
+
+    private func hitSize(for handle: Handle) -> CGSize {
+        switch handle {
+        case .top, .bottom:
+            return CGSize(width: 52, height: 36)
+        case .left, .right:
+            return CGSize(width: 36, height: 52)
+        case .move:
+            return .zero
+        default:
+            return CGSize(width: 42, height: 42)
+        }
+    }
+
+    private func cursor(for handle: Handle) -> NSCursor {
+        switch handle {
+        case .top, .bottom:
+            return .resizeUpDown
+        case .left, .right:
+            return .resizeLeftRight
+        case .move:
+            return .openHand
+        default:
+            return .crosshair
+        }
+    }
+
+    private func handleAccessibilityLabel(for handle: Handle) -> String {
+        switch handle {
+        case .topLeft:
+            "左上角裁切控制柄"
+        case .top:
+            "上边裁切控制柄"
+        case .topRight:
+            "右上角裁切控制柄"
+        case .right:
+            "右边裁切控制柄"
+        case .bottomRight:
+            "右下角裁切控制柄"
+        case .bottom:
+            "下边裁切控制柄"
+        case .bottomLeft:
+            "左下角裁切控制柄"
+        case .left:
+            "左边裁切控制柄"
+        case .move:
+            "移动裁切框"
         }
     }
 }

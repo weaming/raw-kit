@@ -2,6 +2,10 @@ import SwiftUI
 
 struct TransformAdjustmentsView: View {
     @Binding var adjustments: ImageAdjustments
+    @Binding var isCropModeEnabled: Bool
+    let onStartCrop: () -> Void
+    let onApplyCrop: () -> Void
+    let onCancelCrop: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -12,6 +16,7 @@ struct TransformAdjustmentsView: View {
                 }
                 .buttonStyle(.bordered)
                 .help("向左旋转90°")
+                .keyboardShortcut("[", modifiers: .command)
 
                 Button(action: rotateRight) {
                     Image(systemName: "rotate.right")
@@ -19,6 +24,7 @@ struct TransformAdjustmentsView: View {
                 }
                 .buttonStyle(.bordered)
                 .help("向右旋转90°")
+                .keyboardShortcut("]", modifiers: .command)
 
                 Button(action: { adjustments.flipHorizontal.toggle() }) {
                     Image(systemName: "arrow.left.and.right")
@@ -35,6 +41,37 @@ struct TransformAdjustmentsView: View {
                 }
                 .buttonStyle(.bordered)
                 .help("垂直镜像")
+
+                if isCropModeEnabled {
+                    Button(action: onCancelCrop) {
+                        Image(systemName: "xmark")
+                            .font(.title3)
+                    }
+                    .buttonStyle(.bordered)
+                    .help("取消裁切")
+                    .accessibilityLabel("取消裁切")
+                    .keyboardShortcut(.escape, modifiers: [])
+
+                    Button(action: onApplyCrop) {
+                        Image(systemName: "checkmark")
+                            .font(.title3)
+                            .foregroundStyle(.white)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.blue)
+                    .help("应用裁切")
+                    .accessibilityLabel("应用裁切")
+                    .keyboardShortcut(.return, modifiers: [])
+                } else {
+                    Button(action: onStartCrop) {
+                        Image(systemName: "crop")
+                            .font(.title3)
+                            .foregroundColor(hasCrop ? .blue : .primary)
+                    }
+                    .buttonStyle(.bordered)
+                    .help("裁切")
+                    .accessibilityLabel("裁切")
+                }
 
                 Spacer()
             }
@@ -65,48 +102,6 @@ struct TransformAdjustmentsView: View {
                 .frame(width: 120)
             }
 
-            VStack(spacing: 10) {
-                SimpleSlider(
-                    title: "左",
-                    value: cropStartBinding(\.cropLeft, oppositeEnd: \.cropRight),
-                    range: ImageAdjustments.cropCoordinateRange,
-                    validRange: cropStartValidRange(oppositeEnd: adjustments.cropRight),
-                    step: 0.001,
-                    defaultValue: 0.0,
-                    valueFormatter: percentFormatter
-                )
-
-                SimpleSlider(
-                    title: "右",
-                    value: cropEndBinding(\.cropRight, oppositeStart: \.cropLeft),
-                    range: ImageAdjustments.cropCoordinateRange,
-                    validRange: cropEndValidRange(oppositeStart: adjustments.cropLeft),
-                    step: 0.001,
-                    defaultValue: 1.0,
-                    valueFormatter: percentFormatter
-                )
-
-                SimpleSlider(
-                    title: "上",
-                    value: cropStartBinding(\.cropTop, oppositeEnd: \.cropBottom),
-                    range: ImageAdjustments.cropCoordinateRange,
-                    validRange: cropStartValidRange(oppositeEnd: adjustments.cropBottom),
-                    step: 0.001,
-                    defaultValue: 0.0,
-                    valueFormatter: percentFormatter
-                )
-
-                SimpleSlider(
-                    title: "下",
-                    value: cropEndBinding(\.cropBottom, oppositeStart: \.cropTop),
-                    range: ImageAdjustments.cropCoordinateRange,
-                    validRange: cropEndValidRange(oppositeStart: adjustments.cropTop),
-                    step: 0.001,
-                    defaultValue: 1.0,
-                    valueFormatter: percentFormatter
-                )
-            }
-
             HStack {
                 Button("重置裁切") {
                     adjustments.resetCrop()
@@ -135,67 +130,6 @@ struct TransformAdjustmentsView: View {
             adjustments.cropAspectRatio != .free
     }
 
-    private func cropStartBinding(
-        _ keyPath: WritableKeyPath<ImageAdjustments, Double>,
-        oppositeEnd oppositeKeyPath: KeyPath<ImageAdjustments, Double>
-    ) -> Binding<Double> {
-        Binding(
-            get: {
-                adjustments[keyPath: keyPath]
-            },
-            set: { newValue in
-                let endValue = 1.0 - adjustments[keyPath: oppositeKeyPath]
-                let maximumValue = max(0.0, endValue - ImageAdjustments.minimumCropVisibleFraction)
-                let clampedValue = min(
-                    max(newValue, ImageAdjustments.cropCoordinateRange.lowerBound),
-                    maximumValue
-                )
-
-                adjustments[keyPath: keyPath] = clampedValue
-            }
-        )
-    }
-
-    private func cropEndBinding(
-        _ keyPath: WritableKeyPath<ImageAdjustments, Double>,
-        oppositeStart oppositeKeyPath: KeyPath<ImageAdjustments, Double>
-    ) -> Binding<Double> {
-        Binding(
-            get: {
-                1.0 - adjustments[keyPath: keyPath]
-            },
-            set: { newValue in
-                let startValue = adjustments[keyPath: oppositeKeyPath]
-                let minimumValue = min(1.0, startValue + ImageAdjustments.minimumCropVisibleFraction)
-                let clampedValue = min(
-                    max(newValue, minimumValue),
-                    ImageAdjustments.cropCoordinateRange.upperBound
-                )
-
-                adjustments[keyPath: keyPath] = 1.0 - clampedValue
-            }
-        )
-    }
-
-    private func cropStartValidRange(oppositeEnd cropEndInset: Double) -> ClosedRange<Double> {
-        let endValue = 1.0 - cropEndInset
-        let upperBound = max(
-            ImageAdjustments.cropCoordinateRange.lowerBound,
-            endValue - ImageAdjustments.minimumCropVisibleFraction
-        )
-
-        return ImageAdjustments.cropCoordinateRange.lowerBound ... upperBound
-    }
-
-    private func cropEndValidRange(oppositeStart startValue: Double) -> ClosedRange<Double> {
-        let lowerBound = min(
-            ImageAdjustments.cropCoordinateRange.upperBound,
-            startValue + ImageAdjustments.minimumCropVisibleFraction
-        )
-
-        return lowerBound ... ImageAdjustments.cropCoordinateRange.upperBound
-    }
-
     private func rotateLeft() {
         adjustments.rotation = (adjustments.rotation + 90) % 360
     }
@@ -204,7 +138,4 @@ struct TransformAdjustmentsView: View {
         adjustments.rotation = (adjustments.rotation - 90 + 360) % 360
     }
 
-    private func percentFormatter(_ value: Double) -> String {
-        String(format: "%.1f%%", value * 100.0)
-    }
 }
