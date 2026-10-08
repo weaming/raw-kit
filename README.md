@@ -14,7 +14,7 @@ RawKit 是面向 macOS 的本地图像处理工具，重点解决一个常见但
 - 支持 RAW、X3F、JPEG、PNG、TIFF、HEIF、AVIF 等输入。
 - 支持曝光、白平衡、曲线、LUT、清晰度、去雾、锐化和构图调整。
 - 支持 SDR sRGB、Display P3 SDR、Display P3 HLG/PQ HDR、Rec.2020 HLG/PQ HDR 输出预设。
-- 支持 TIFF、JPEG、HEIF、AVIF、Ultra HDR JPEG、DNG 导出。
+- 支持 TIFF、JPEG、HEIF、AVIF、Ultra HDR JPEG 导出；DNG 仅支持作为输入格式。
 - 提供 HEIF、AVIF、Ultra HDR JPEG 和 Exif 对比检查脚本。
 
 完整功能列表见 [docs/features.md](docs/features.md)。

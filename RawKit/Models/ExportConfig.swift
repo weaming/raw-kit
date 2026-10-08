@@ -7,6 +7,7 @@ enum ExportFormat: String, Codable, CaseIterable {
     case heif = "HEIF"
     case avif = "AVIF"
     case ultraHDRJPEG = "Ultra HDR JPEG"
+    // 仅用于解码旧配置：macOS ImageIO 不支持写入 DNG，导出流程不再提供该格式
     case dng = "DNG"
 
     var fileExtension: String {
@@ -27,7 +28,7 @@ enum ExportFormat: String, Codable, CaseIterable {
         case .heif: "10-bit 高效压缩，适合 Apple 生态"
         case .avif: "10-bit 高效压缩，适合支持 AVIF HDR 的平台"
         case .ultraHDRJPEG: "JPG 扩展名，写入 Ultra HDR gain map，适合支持 HDR 图片的平台"
-        case .dng: "16-bit 数字底片格式"
+        case .dng: "当前 macOS 不支持写入 DNG"
         }
     }
 
@@ -76,7 +77,7 @@ enum ExportOutputPreset: String, Codable, CaseIterable {
             return [.heif, .avif, .ultraHDRJPEG]
         }
 
-        return [.jpg, .heif, .tiff, .dng]
+        return [.jpg, .heif, .tiff]
     }
 
     var preferredFormat: ExportFormat {
@@ -166,7 +167,9 @@ struct ExportConfig: Codable, Identifiable {
     ) {
         id = UUID()
         self.name = name
-        self.format = format
+        self.format = format.isCompatible(with: outputPreset)
+            ? format
+            : outputPreset.preferredFormat
         self.outputPreset = outputPreset
         self.maxDimension = maxDimension
         self.quality = quality

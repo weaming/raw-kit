@@ -142,7 +142,7 @@ if test $has_bt2020_primaries -eq 1; and test $has_hdr_transfer -eq 1
     if test $has_bt2020_matrix -eq 1
         echo "OK: Rec.2020 HDR 使用 BT.2020 non-constant matrix"
     else if test $has_bt709_matrix -eq 1
-        echo "BAD: Rec.2020 HDR 使用 BT.709 matrix，浏览器 HDR 兼容风险高"
+        echo "INFO: 使用 BT.709 matrix；是否正确取决于实际编码转换，不能仅凭 primaries 判断"
     else
         echo "WARN: Rec.2020 HDR 的 matrix 未确认是 BT.2020 non-constant"
     end
@@ -150,7 +150,7 @@ else if test $has_p3_primaries -eq 1; and test $has_hdr_transfer -eq 1
     if test $has_bt709_matrix -eq 1
         echo "OK: Display P3 HDR 使用 BT.709 matrix"
     else
-        echo "WARN: Display P3 HDR 的 matrix 不是常见 BT.709"
+        echo "INFO: Display P3 可使用其他 matrix；Apple HDR HEIF 通常使用 BT.2020 non-constant"
     end
 else if test $has_sdr_transfer -eq 1
     if test $has_bt709_matrix -eq 1
@@ -179,7 +179,7 @@ if string match -q "*8*" -- $image_pixel_depths
 end
 
 if test (count $auxiliary_image_types) -gt 0
-    echo "BAD: 存在 AuxiliaryImageType: "(string join ", " $auxiliary_image_types)
+    echo "INFO: 存在合法辅助图像类型，需核对用途: "(string join ", " $auxiliary_image_types)
 else
     echo "OK: 未看到 AuxiliaryImageType"
 end
@@ -196,16 +196,16 @@ if command -q ffprobe
     printf "%s\n" $ffprobe_metadata
 
     echo
-    echo "== AV1 bitstream 判断 =="
+    echo "== 解码器报告（可能包含容器信息，不等同于裸码流验证） =="
     if string match -q "*color_space=bt2020nc*" -- $ffprobe_metadata
         if test $has_bt2020_primaries -eq 1
             echo "OK: AV1 bitstream color_space 是 bt2020nc"
         else
-            echo "WARN: AV1 bitstream color_space 是 bt2020nc，但容器 primaries 不是 BT.2020"
+            echo "INFO: BT.2020 matrix 与 P3 primaries 可以组合使用，须与编码像素一致"
         end
     else if string match -q "*color_space=bt709*" -- $ffprobe_metadata
         if test $has_bt2020_primaries -eq 1; and test $has_hdr_transfer -eq 1
-            echo "BAD: AV1 bitstream color_space 是 bt709，Rec.2020 HDR 兼容风险高"
+            echo "INFO: BT.709 matrix 不代表 BT.709 primaries；需验证实际像素"
         else
             echo "OK: AV1 bitstream color_space 是 bt709，适合 sRGB/P3"
         end

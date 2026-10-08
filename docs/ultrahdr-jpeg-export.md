@@ -1,197 +1,39 @@
 # Ultra HDR JPEG 导出流程
 
-## 背景
+使用 libultrahdr 的 `ultrahdr_app` 编码 JPEG 基图和单通道增益图，再补写兼容 XMP。已用 Homebrew libultrahdr 2.0.2 验证。
 
-RawKit 的 Ultra HDR JPEG 导出依赖 Homebrew `libultrahdr` 提供的 `ultrahdr_app`。当前导出目标是生成普通 JPEG 可回退显示、同时包含 HDR gain map 的 Ultra HDR JPEG。
+## 色彩和亮度
 
-Homebrew `libultrahdr` v1.4.0 的默认编译参数是：
-
-```text
-UHDR_WRITE_XMP=FALSE
-UHDR_WRITE_ISO=TRUE
-```
-
-因此 `ultrahdr_app` 直接输出的文件通常只包含 ISO 21496-1 gain map metadata，不包含 Chrome/Android 路径常用的 `hdrgm` XMP。RawKit 需要在编码完成后补写 XMP，同时保留 ISO 21496-1 metadata。
-
-## 导出路径
-
-核心实现位于 `RawKit/Services/ImageExporter.swift`：
-
-```swift
-exportUltraHDRJPEG(
-    exportReadyImage,
-    to: url,
-    targetHeadroom: targetHDRHeadroom,
-    quality: quality,
-    compression: ultraHDRGainMapCompression,
-    context: context
-)
-```
-
-流程：
-
-1. 查找 `ultrahdr_app`。
-2. 生成临时 HDR raw 和 SDR raw。
-3. 调用 `ultrahdr_app` 编码 Ultra HDR JPEG。
-4. 调用 `ensureUltraHDRJPEGHasXMPMetadata(at:)` 修正 ISO metadata、补写 `hdrgm` XMP。
-
-## 编码输入
-
-HDR 输入：
-
-```swift
-let opaqueImage = makeOpaqueImageForJPEG(normalizedImage)
-let hdrImage = normalizedHDRImage(opaqueImage, targetHeadroom: targetHeadroom)
-```
-
-输出为 RGBA half float raw：
-
-```swift
-renderHDRRawImage(... format: .RGBAh, colorSpace: outputPreset 对应的 linear HDR 色域)
-```
-
-P3 HDR 预设渲染为 `extendedLinearDisplayP3`，Rec.2020 HDR 预设渲染为 `extendedLinearITUR_2020`。
-
-SDR base 输入：
-
-```swift
-let sdrImage = makeOpaqueImageForJPEG(makeSDRBaseImage(from: hdrImage))
-```
-
-输出为 RGBA 8-bit raw：
-
-```swift
-renderSDRRawImage(... format: .RGBA8, colorSpace: sRGB)
-```
-
-## ultrahdr_app 参数
-
-当前使用 encode scenario 1，同时传入 HDR intent 和 SDR intent：
-
-```text
--m 0
--p hdr-rgba16f.raw
--y sdr-rgba8.raw
--a 4
--b 3
--C <按输出预设生成>
--c 0
--t 0
--R 1
--q <base quality>
--Q <gain map quality>
--s <gain map scale factor>
--M 0
--D 1
--k 1.0
--K <max content boost>
--L <target peak nits>
--z <output jpg>
-```
-
-关键含义：
-
-- `-a 4`：HDR raw 是 RGBA half float。
-- `-b 3`：SDR raw 是 RGBA8888。
-- `-C 1`：Display P3 HDR 预设使用 P3 HDR intent 色域。
-- `-C 2`：Rec.2020 HDR 预设使用 BT.2100 HDR intent 色域。
-- `-c 0`：SDR intent 色域是 BT.709。
-- `-t 0`：HDR intent transfer 是 linear。
-- `-R 1`：HDR intent 是 full range。
-- `-M 0`：使用单通道 gain map，优先保证 Chrome/Android 兼容性。
-- `-D 1`：编码 preset 是 best quality。
+- HDR 输入为预设色域的线性 RGBA half float。
+- SDR 基图经过色调映射，使用同一色域、sRGB 传递函数的 RGBA8：P3 使用 Display P3，Rec.2020 使用 ITUR_2020_sRGBGamma。
+- `-C` 和 `-c` 使用相同色域，确保 ISO 的增益应用色域与 XMP v1 的基底色域语义一致。
+- libultrahdr 的线性参考白为 203 nits；`-L` 设置为 `min(max(headroom, 1.01) × 203, 10000)`。纯 SDR 内容也保留最小合法显示区间，避免编码器输出后被解码器以容量上下界相等拒绝。
+- 不限制 `-k/-K`，让编码器从实际 HDR/SDR 像素计算增益范围，避免裁掉变暗区域或高光。
+- 质量和缩放仍按高质量、均衡、小体积三档控制；增益图使用单通道。
 
 ## 元数据后处理
 
-`ultrahdr_app` 完成后，RawKit 会先修正第二张 gain map JPEG 里的 ISO 21496-1 metadata。即使文件已经包含 `http://ns.adobe.com/hdr-gain-map/1.0/`，也仍然会修正 ISO metadata 和 MPF 目录。
+1. 编码到临时目录。
+2. 解析两张 JPEG，从 ISO 21496-1 APP2 读取增益参数，保留 ISO 字节不变。
+3. 移除已有 gain-map XMP，再写入主图 Container Directory 和增益图 hdrgm XMP。
+4. 重新计算主图和增益图长度，以及相对 MPF TIFF header 的第二图起点。
+5. 全部成功后原子写入目标文件；失败不覆盖已有文件。
 
-如果没有 `hdrgm` XMP，RawKit 还会补写 primary/gain map 两处 XMP：
+后处理不改变 GainMapMin/Max、Gamma、Offset 或 HDRCapacity。修改这些参数而不重新编码增益图会改变还原结果。显示 headroom 与最大像素增益也不要求相等。
 
-1. 读取 JPEG 文件为 `Data`。
-2. 定位 MPF 双图像结构。
-3. 定位第一张 primary JPEG 和第二张 gain map JPEG。
-4. 从第二张 JPEG 的 APP2 ISO 21496-1 block 读取 gain map metadata。
-5. 解出 `GainMapMin`、`GainMapMax`、`Gamma`、`OffsetSDR`、`OffsetHDR`、`HDRCapacityMin`、`HDRCapacityMax`。
-6. 归一化 ISO metadata 中的 `GainMapMin`、`HDRCapacityMin` 和 `HDRCapacityMax`。
-7. 给 primary JPEG 插入 container XMP，声明 primary 和 gain map 两个 item。
-8. 给 gain map JPEG 插入 `hdrgm` XMP。
-9. 修正 MPF 中 primary/gain map 的长度和偏移。
-10. 原子写回文件。
+XMP 数值按百分号 `%g` 输出足够的有效位数（必要时带指数形式），保证与 ISO 有理数换算结果一致。不能无损表示为当前 XMP 路径的 ISO 数据（例如反向增益、非基底色域或不同通道的不同参数）会明确报错。当前编码参数产生 SDR 基底、同色域、单通道输出。
 
-后处理不会重编码 JPEG 图像数据，只修改 APP marker 和 MPF 目录。
+## 验证
 
-注意：MPF 目录里的第二图像起点不是文件绝对偏移，而是相对 MPF TIFF header 的偏移。检查时要确认 ExifTool 显示的 `MPImage2Start` 和真实第二个 JPEG SOI 位置一致，否则 Chrome 可能无法按目录找到 gain map。
+`RawKitTests/UltraHDRExportTests.swift` 使用真实 `ultrahdr_app`：
 
-Ultra HDR v1 需要按 Chrome/Android 路径更严格地归一化。由于 Chrome/Skia 在 ISO 和 XMP 同时存在时优先读取 ISO，ISO metadata 和 XMP 必须保持一致：
+- 覆盖四个 HDR 预设和三个压缩档位。
+- 检查普通 JPEG 解码、MPF 偏移及 XMP 声明长度。
+- 探测并解码为线性 half float，比较已知亮度阶梯和目标 headroom。
+- 验证补写 XMP 前后 ISO 字节、HDR 解码像素不变。
+- 禁用 ISO 识别后验证纯 XMP 路径还原相同像素，含非默认 gamma。
+- 验证重复后处理不会重复插入 XMP，以及奇数尺寸、SDR headroom 和失败时文件保留。
 
-- `GainMapMin <= 0`。
-- `GainMapMax >= GainMapMin`。
-- `HDRCapacityMin >= 0`。
-- `HDRCapacityMax > HDRCapacityMin`。
-- `HDRCapacityMax` 尽量与 `GainMapMax` 对齐，避免普通 HDR 显示器上增益权重偏弱。
-- gain map 子图尽量使用单通道。
+手动检查：`fish scripts/check-ultrahdr-jpeg.fish /path/to/file.jpg`。
 
-后处理不会重编码 gain map JPEG 图像，只改 ISO metadata 的 rational 字段和新增 APP1 XMP。这样可以避免 `ultrahdr_app` 默认 `hdrCapacityMax` 明显大于 `maxContentBoost` 时，Chrome 按 ISO 元数据降低 gain map 权重。
-
-## Skia 对照
-
-Chrome 的 JPEG gain map 路径来自 Skia。对照 `skia/src/encode/SkJpegGainmapEncoder.cpp` 后，RawKit 需要关注这些行为：
-
-- Skia 会同时写 ISO 21496-1 metadata 和 Ultra HDR v1 XMP。
-- gain map XMP 里的 `GainMapMin`、`GainMapMax`、`HDRCapacityMin`、`HDRCapacityMax` 都是 log2 值。
-- Skia 写 XMP 时 `HDRCapacityMax` 来自 display ratio 的 log2；Android 文档建议把它设置为 `GainMapMax`。
-- Skia 的解码路径会优先使用 ISO metadata，XMP 主要作为兼容路径。
-- Skia 会在 primary 和 gain map 两张 JPEG 中都写 MPF APP2 segment。RawKit 当前保留 `ultrahdr_app` 的 MPF 结构，只修正 primary MPF 目录；如果单通道和 ISO/XMP 归一化后 Chrome 仍不点亮，应继续对齐 Skia 的双 MPF segment 包装。
-
-## 检查脚本
-
-脚本位于：
-
-```fish
-fish scripts/check-ultrahdr-jpeg.fish /path/to/file.jpg
-```
-
-检查内容：
-
-- JPEG 基础信息。
-- ISO 21496-1 APP2 metadata。
-- MPF 双图像结构。
-- MPF 第二图像偏移是否匹配真实 JPEG SOI。
-- 第二张 gain map JPEG。
-- `hdrgm` XMP 字符串。
-- gain map 子图是否是单通道。
-- gain map 子图里的 `hdrgm` 数值是否适合 Chrome/Android Ultra HDR v1 路径。
-- `ultrahdr_app` 是否能解码并导出 gain map metadata。
-- ISO metadata 中 `hdrCapacityMax` 是否与 `maxContentBoost` 对齐。
-
-样片检查：
-
-```fish
-fish scripts/check-ultrahdr-jpeg.fish DSC03344.jpg
-```
-
-## 预期状态
-
-RawKit 新导出的 Ultra HDR JPEG 应满足：
-
-```text
-ISO 21496-1 metadata : 存在
-MPF 双图像           : 存在
-MPF 第二图像偏移      : 匹配真实 JPEG SOI
-hdrgm XMP            : 存在
-gain map 子图         : 单通道
-ISO hdrCapacityMax   : 与 maxContentBoost 对齐
-ultrahdr_app decode  : 成功
-```
-
-如果缺少 `hdrgm` XMP，Chrome/Android HDR 兼容风险较高。
-
-如果缺少 ISO 21496-1 metadata，`ultrahdr_app` 或其他 ISO 路径解码器可能无法识别 gain map。
-
-## 外部工具边界
-
-Ultra HDR JPEG 导出使用外部工具：
-
-```text
-Ultra HDR JPEG -> Homebrew libultrahdr / ultrahdr_app + Swift JPEG 后处理
-```
+参考：[libultrahdr 增益图编码](https://github.com/google/libultrahdr/blob/main/lib/src/jpegr.cpp)、[ISO 元数据转换](https://github.com/google/libultrahdr/blob/main/lib/src/gainmapmetadata.cpp)。

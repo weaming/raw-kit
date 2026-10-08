@@ -244,7 +244,7 @@ if test -n "$temp_directory"
                         if (capacity_min == "") capacity_min = 0
 
                         if (gain_min > 0) {
-                            print "BAD: GainMapMin 大于 0，Ultra HDR v1 兼容风险高"
+                            print "INFO: GainMapMin 为正；应与实际增益编码一致，不应事后归零"
                         } else {
                             print "OK: GainMapMin 小于等于 0"
                         }
@@ -268,9 +268,9 @@ if test -n "$temp_directory"
                         }
 
                         if (capacity_max > gain_max + 0.001) {
-                            print "WARN: HDRCapacityMax 明显大于 GainMapMax，普通 HDR 显示器上增益可能偏弱"
+                            print "INFO: 显示 headroom 大于最大像素增益；两者不要求相等"
                         } else {
-                            print "OK: HDRCapacityMax 与 GainMapMax 对齐"
+                            print "INFO: 已读取 HDRCapacityMax 和 GainMapMax"
                         }
                     }')
 
@@ -341,7 +341,7 @@ if test -n "$temp_directory"
                         -v capacity_max="$decoded_hdr_capacity_max" \
                         'BEGIN {
                             if (min_boost > 1.001) {
-                                print "WARN: minContentBoost 大于 1，普通 HDR 显示器可能较晚触发增益"
+                                print "INFO: minContentBoost 大于 1；不应在编码后修改增益范围"
                             } else {
                                 print "OK: minContentBoost 不大于 1"
                             }
@@ -359,9 +359,9 @@ if test -n "$temp_directory"
                             }
 
                             if (capacity_max > max_boost * 1.001) {
-                                print "WARN: hdrCapacityMax 大于 maxContentBoost，Chrome/Skia 可能按 ISO 元数据减弱 HDR"
+                                print "INFO: 显示 headroom 与像素增益范围不同，不代表格式错误"
                             } else {
-                                print "OK: hdrCapacityMax 与 maxContentBoost 对齐"
+                                print "INFO: 已读取 hdrCapacityMax 和 maxContentBoost"
                             }
                         }')
 

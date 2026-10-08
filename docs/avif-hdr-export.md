@@ -4,7 +4,7 @@ RawKit 的 AVIF 导出使用 libavif 提供的 `avifenc` 编码。应用先用 C
 
 ## 背景
 
-旧实现使用 Apple ImageIO 写 AVIF。HDR 输出会出现下面的非标准组合：
+旧实现使用 Apple ImageIO 写 AVIF。HDR 输出曾出现下面的组合：
 
 ```text
 ColorPrimaries          : BT.2020
@@ -19,7 +19,11 @@ PQ  HDR : primaries=9 / transfer=16 / matrix=9
 HLG HDR : primaries=9 / transfer=18 / matrix=9
 ```
 
-旧实现曾在导出后修补 `colr/nclx` 和 AV1 sequence header。当前实现不再做二进制后处理，改为让 libavif 在编码阶段写入正确 CICP。
+矩阵编号必须与编码时实际使用的 RGB/YCbCr 转换一致，不能仅凭色域判断组合非法，也不能只改标签来改变矩阵。当前实现让 libavif 在编码阶段配置 CICP，保留生成的容器和 AV1 sequence header。
+
+不再补写推算的 `clli`/`mdcv`：相对线性亮度不能统一乘以 100 当作 PQ/HLG 绝对亮度；输出色域和图片峰值也不代表母版显示设备参数。没有可靠来源时省略这些可选属性。
+
+PNG 同时包含 cICP 和 ICC 时，libavif 会优先读取 cICP，未必复制 ICC。因此应用显式导出目标色彩空间的 ICC，并通过 `--icc` 传入，与 CICP 一起写入 AVIF。
 
 ## 导出路径
 
@@ -60,9 +64,9 @@ brew install libavif
 --speed 6
 --qcolor <导出质量 1...100>
 --depth 10
---yuv 420
+--yuv 444
 --range full
---ignore-profile
+--icc <输出色彩空间的 ICC 文件>
 --cicp <按输出预设生成>
 ```
 
@@ -115,4 +119,6 @@ color_transfer=arib-std-b67
 color_primaries=bt2020
 ```
 
-如果 `MatrixCoefficients` 或 `ffprobe color_space` 仍是 BT.709，说明没有走当前 libavif 参数，或运行时调用到的 `avifenc` 行为不符合预期。
+以上为 Rec.2020 预设的预期值；P3 AVIF 使用编码阶段配置的 BT.709 矩阵。HEIF 保留 Apple 编码器实际选择的矩阵（实测 HDR 输出可能为 BT.709 或 BT.2020），不能用 AVIF 的预期值覆盖 HEIF。
+
+`RawKitTests/HDRExportTests.swift` 检查所有可选 HEIF/AVIF 预设的 box 边界、主图属性关联、`iloc` 数据范围和 10-bit 声明，提取裸码流后用 ffprobe 对比 CICP，并通过 FFmpeg 独立解码比较亮度阶梯和彩色色块。测试需要 ffmpeg 和 libavif；缺少依赖时明确标记跳过。

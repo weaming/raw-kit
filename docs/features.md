@@ -76,10 +76,10 @@
   - Display P3 PQ HDR
   - Rec.2020 HLG HDR
   - Rec.2020 PQ HDR
-- HEIF HDR 会修正 `nclx` 和 HEVC SPS/VUI 色彩信令
-- HEIF 后处理会移除多余 `ImageDescription`
+- HEIF 保留 ImageIO HEIF 编码器生成的 `nclx` 和 HEVC VUI，确保矩阵和范围标记与实际像素一致
+- HEIF 和 AVIF 不再从相对线性亮度推算绝对 `clli`，也不从输出色域和图片峰值伪造母版显示 `mdcv`；保留编码器自身生成的元数据
 - X3F 输入导出 HEIF 时使用 10-bit 4:4:4
-- AVIF 使用 `avifenc` 写入 10-bit 输出和 CICP 色彩信令
+- AVIF 使用 `avifenc` 写入 10-bit 4:4:4，保留 ICC，在编码阶段配置 CICP，不再事后修改容器或码流
 - Ultra HDR JPEG 使用 gain map，并补齐兼容 Chrome/Android 的 XMP/ISO 元数据
 
 ## 导出格式
@@ -89,7 +89,7 @@
 - HEIF
 - AVIF
 - Ultra HDR JPEG
-- DNG 16-bit
+- DNG 不作为导出格式提供；macOS ImageIO 仅支持读取 DNG
 - 可配置质量、尺寸、命名前后缀和输出目录
 - 支持导出预设
 - 支持批量导出当前图片列表
@@ -107,7 +107,7 @@
 
 ## 检查脚本
 
-- `scripts/check-heif.fish`：检查 HEIF 容器、nclx、HEVC bitstream、CLLI、ICC/XMP 和多余结构
+- `scripts/check-heif.fish`：检查 HEIF 容器、nclx、HEVC bitstream、CLLI、ICC/XMP，并提示 ImageDescription 等可选字段
 - `scripts/check-avif.fish`：检查 AVIF 容器与 AV1 bitstream 色彩信令
 - `scripts/check-ultrahdr-jpeg.fish`：检查 Ultra HDR JPEG gain map、XMP、ISO 21496-1 和 MPF
 - `scripts/compare-exif.py`：对比两张图的 ExifTool 元信息，并补充 HEVC bitstream 判断

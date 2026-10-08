@@ -1,3 +1,5 @@
+import CoreImage
+import ImageIO
 import XCTest
 @testable import RawKit
 
@@ -79,6 +81,58 @@ final class RawKitTests: XCTestCase {
     func testAppCommandsExposeAllGlobalActions() {
         XCTAssertEqual(AppCommand.allCases.count, 7)
         XCTAssertEqual(AppCommand.nextImage.title, "下一张图片")
+    }
+
+    func testHDRExportsDecodeThroughPublicExportPipeline() async throws {
+        let fileManager = FileManager.default
+        let temporaryDirectory = fileManager.temporaryDirectory
+            .appendingPathComponent("RawKitTests-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: temporaryDirectory) }
+
+        let sourceURL = temporaryDirectory.appendingPathComponent("source.png")
+        let context = CIContext()
+        let colorSpace = try XCTUnwrap(CGColorSpace(name: CGColorSpace.sRGB))
+        let sourceImage = CIImage(color: CIColor(red: 0.8, green: 0.4, blue: 0.1))
+            .cropped(to: CGRect(x: 0, y: 0, width: 8, height: 8))
+        try context.writePNGRepresentation(
+            of: sourceImage,
+            to: sourceURL,
+            format: .RGBA8,
+            colorSpace: colorSpace
+        )
+
+        let imageInfo = ImageInfo(url: sourceURL)
+        for format in [ExportFormat.heif, .avif] {
+            let outputDirectory = temporaryDirectory.appendingPathComponent(format.fileExtension)
+            let config = ExportConfig(
+                format: format,
+                outputPreset: .rec2020PQHDR,
+                outputDirectory: outputDirectory,
+                suffix: "-hdr"
+            )
+            let outputURL = try await ImageExporter.export(
+                imageInfo: imageInfo,
+                adjustments: .default,
+                config: config,
+                progress: { _ in }
+            )
+
+            let source = try XCTUnwrap(CGImageSourceCreateWithURL(outputURL as CFURL, nil))
+            let decoded = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
+            XCTAssertEqual(decoded.width, 8)
+            XCTAssertEqual(decoded.height, 8)
+        }
+    }
+
+    func testDNGIsNotAdvertisedWithoutAWriter() {
+        XCTAssertFalse(ExportOutputPreset.sdrSRGB.compatibleFormats.contains(.dng))
+
+        let config = ExportConfig(
+            format: .dng,
+            outputPreset: .sdrSRGB
+        )
+        XCTAssertEqual(config.format, .jpg)
     }
 }
 

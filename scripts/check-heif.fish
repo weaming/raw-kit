@@ -96,7 +96,7 @@ end
 if string match -qi "*nclx*" -- $color_profiles
     echo "OK: 使用 nclx 色彩配置"
 else
-    echo "WARN: 未看到 nclx 色彩配置"
+    echo "INFO: 未看到 nclx；SDR P3 可以使用 ICC 配置"
 end
 
 set -l has_bt2020_primaries 0
@@ -157,7 +157,7 @@ if test $has_bt2020_primaries -eq 1; and test $has_hdr_transfer -eq 1
     if test $has_bt2020_matrix -eq 1
         echo "OK: Rec.2020 HDR 使用 BT.2020 non-constant matrix"
     else if test $has_bt709_matrix -eq 1
-        echo "BAD: Rec.2020 HDR 使用 BT.709 matrix，浏览器 HDR 兼容风险高"
+        echo "INFO: 使用 BT.709 matrix；是否正确取决于实际编码转换，不能仅凭 primaries 判断"
     else
         echo "WARN: Rec.2020 HDR 的 matrix 未确认是 BT.2020 non-constant"
     end
@@ -165,13 +165,13 @@ else if test $has_p3_primaries -eq 1; and test $has_hdr_transfer -eq 1
     if test $has_bt709_matrix -eq 1
         echo "OK: Display P3 HDR 使用 BT.709 matrix"
     else
-        echo "WARN: Display P3 HDR 的 matrix 不是常见 BT.709"
+        echo "INFO: Display P3 可使用其他 matrix；Apple HDR HEIF 通常使用 BT.2020 non-constant"
     end
 else if test $has_sdr_transfer -eq 1
     if test $has_bt709_matrix -eq 1
         echo "OK: SDR HEIF 使用 BT.709 matrix"
     else
-        echo "WARN: SDR HEIF 的 matrix 不是常见 BT.709"
+        echo "INFO: Apple SDR HEIF 通常使用 BT.601 matrix；应与码流和像素交叉验证"
     end
 else
     echo "WARN: 无法判断 matrix 是否符合当前色彩预设"
@@ -192,12 +192,12 @@ end
 if test -z "$image_description"
     echo "OK: 未看到 ImageDescription"
 else
-    echo "BAD: 仍存在 ImageDescription: "(joined_or_none $image_description)
+    echo "INFO: ImageDescription 是合法的 EXIF 字段: "(joined_or_none $image_description)
 end
 
 if test -n "$max_content_light_level"
     if test "$max_pic_average_light_level" = "0"
-        echo "WARN: CLLI 存在，但 MaxFALL 为 0"
+        echo "INFO: CLLI 的 MaxFALL 为 0，表示未知"
     else if test -n "$max_pic_average_light_level"
         echo "OK: CLLI 包含 MaxCLL 和 MaxFALL"
     else
@@ -225,16 +225,16 @@ if command -q ffprobe
     printf "%s\n" $ffprobe_metadata
 
     echo
-    echo "== HEVC bitstream 判断 =="
+    echo "== 解码器报告（可能包含容器信息，不等同于裸码流验证） =="
     if string match -q "*color_space=bt2020nc*" -- $ffprobe_metadata
         if test $has_bt2020_primaries -eq 1
             echo "OK: HEVC bitstream color_space 是 bt2020nc"
         else
-            echo "WARN: HEVC bitstream color_space 是 bt2020nc，但容器 primaries 不是 BT.2020"
+            echo "INFO: BT.2020 matrix 与 P3 primaries 可以组合使用，须与编码像素一致"
         end
     else if string match -q "*color_space=bt709*" -- $ffprobe_metadata
         if test $has_bt2020_primaries -eq 1; and test $has_hdr_transfer -eq 1
-            echo "BAD: HEVC bitstream color_space 是 bt709，Rec.2020 HDR 兼容风险高"
+            echo "INFO: BT.709 matrix 不代表 BT.709 primaries；需验证实际像素"
         else
             echo "OK: HEVC bitstream color_space 是 bt709，适合 sRGB/P3"
         end
@@ -280,7 +280,7 @@ if command -q strings
     end
 
     if test (count $icc_profile_description) -gt 0
-        echo "WARN: 包含 ICC Profile: "(joined_or_none $icc_profile_description)
+        echo "INFO: 包含 ICC Profile: "(joined_or_none $icc_profile_description)
     else
         echo "OK: 未看到 ICC Profile"
     end
