@@ -76,7 +76,7 @@ struct ContentView: View {
       // 顶部工具栏
       ToolbarView(
         imageManager: imageManager,
-        showingExportDialog: $showingExportDialog
+        onCommand: dispatch
       )
 
       Divider()
@@ -172,10 +172,18 @@ struct ContentView: View {
     .onChange(of: imageManager.images.map(\.id)) { _, _ in
       syncEditingSessions(for: imageManager.images)
       syncActiveAdjustmentsFromCurrentSession()
+      if let displayedIndex {
+        prefetchNeighborThumbnails(around: displayedIndex)
+      }
     }
-    .onChange(of: displayedIndex) { _, _ in
+    .onChange(of: displayedIndex) { _, newIndex in
       syncActiveAdjustmentsFromCurrentSession()
+      if let newIndex {
+        prefetchNeighborThumbnails(around: newIndex)
+      }
     }
+    .focusedSceneValue(\.undoAction, displayedIndex == nil ? nil : { dispatch(.undo) })
+    .focusedSceneValue(\.redoAction, displayedIndex == nil ? nil : { dispatch(.redo) })
     .onChange(of: activeEditingState.adjustments) { _, newAdjustments in
       guard let currentSession = getCurrentSession(),
         currentSession.currentAdjustments != newAdjustments
@@ -204,49 +212,35 @@ struct ContentView: View {
       ZStack {
         // 导出快捷键
         Button("") {
-          showingExportDialog = true
+          dispatch(.export)
         }
         .keyboardShortcut("e", modifiers: [.command, .shift])
         .hidden()
 
-        // 撤销快捷键
-        Button("") {
-          handleUndo()
-        }
-        .keyboardShortcut("z", modifiers: .command)
-        .hidden()
-
-        // 重做快捷键
-        Button("") {
-          handleRedo()
-        }
-        .keyboardShortcut("z", modifiers: [.command, .shift])
-        .hidden()
-
         // 删除快捷键
         Button("") {
-          handleDeleteSelected()
+          dispatch(.deleteSelected)
         }
         .keyboardShortcut(.delete, modifiers: [])
         .hidden()
 
         // 全选照片快捷键
         Button("") {
-          handleSelectAll()
+          dispatch(.selectAll)
         }
         .keyboardShortcut("a", modifiers: .command)
         .disabled(imageManager.images.isEmpty)
         .hidden()
 
         Button("") {
-          navigateImage(by: -1)
+          dispatch(.previousImage)
         }
         .keyboardShortcut(.leftArrow, modifiers: [])
         .disabled(imageManager.images.count <= 1)
         .hidden()
 
         Button("") {
-          navigateImage(by: 1)
+          dispatch(.nextImage)
         }
         .keyboardShortcut(.rightArrow, modifiers: [])
         .disabled(imageManager.images.count <= 1)
@@ -558,11 +552,15 @@ struct ContentView: View {
   }
 
   private func handleUndo() {
-    getCurrentSession()?.undo()
+    guard let currentSession = getCurrentSession() else { return }
+    currentSession.undo()
+    syncActiveAdjustments(from: currentSession)
   }
 
   private func handleRedo() {
-    getCurrentSession()?.redo()
+    guard let currentSession = getCurrentSession() else { return }
+    currentSession.redo()
+    syncActiveAdjustments(from: currentSession)
   }
 
   private func handleDeleteSelected() {
@@ -594,11 +592,38 @@ struct ContentView: View {
     displayedIndex = targetIndex
     selectedIndices = [targetIndex]
   }
+
+  private func dispatch(_ command: AppCommand) {
+    switch command {
+    case .export:
+      showingExportDialog = true
+    case .undo:
+      handleUndo()
+    case .redo:
+      handleRedo()
+    case .deleteSelected:
+      handleDeleteSelected()
+    case .selectAll:
+      handleSelectAll()
+    case .previousImage:
+      navigateImage(by: -1)
+    case .nextImage:
+      navigateImage(by: 1)
+    }
+  }
+
+  private func prefetchNeighborThumbnails(around index: Int) {
+    thumbnailManager.prefetchNeighbors(
+      images: imageManager.images,
+      currentIndex: index,
+      adjustmentsForImageID: adjustments(for:)
+    )
+  }
 }
 
 struct ToolbarView: View {
   @ObservedObject var imageManager: ImageManager
-  @Binding var showingExportDialog: Bool
+  let onCommand: (AppCommand) -> Void
 
   var body: some View {
     HStack(spacing: 12) {
@@ -622,7 +647,7 @@ struct ToolbarView: View {
 
       if !imageManager.images.isEmpty {
         Button(action: {
-          showingExportDialog = true
+          onCommand(.export)
         }) {
           Label("导出", systemImage: "square.and.arrow.up")
         }

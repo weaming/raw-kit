@@ -81,11 +81,7 @@ B G B G B G
 
 ```python
 # 颜色空间转换是矩阵运算
-RGB_to_XYZ = [
-    [0.4124, 0.3576, 0.1805],
-    [0.2126, 0.7152, 0.0722],
-    [0.0193, 0.1192, 0.9505]
-]
+RGB_to_XYZ = [[0.4124, 0.3576, 0.1805], [0.2126, 0.7152, 0.0722], [0.0193, 0.1192, 0.9505]]
 
 XYZ = RGB @ RGB_to_XYZ  # 矩阵乘法
 ```
@@ -102,11 +98,7 @@ XYZ = RGB @ RGB_to_XYZ  # 矩阵乘法
 
 ```python
 # 高斯模糊
-kernel = [
-    [1, 2, 1],
-    [2, 4, 2],
-    [1, 2, 1]
-] / 16
+kernel = [[1, 2, 1], [2, 4, 2], [1, 2, 1]] / 16
 
 output = convolve(image, kernel)
 ```
@@ -312,8 +304,7 @@ def demosaic_bilinear(bayer):
     # R 通道（位置 [0::2, 1::2]）
     rgb[0::2, 1::2, 0] = bayer[0::2, 1::2]
     # 插值其他位置
-    rgb[:, :, 0] = cv2.resize(rgb[::2, 1::2, 0], (w, h),
-                               interpolation=cv2.INTER_LINEAR)
+    rgb[:, :, 0] = cv2.resize(rgb[::2, 1::2, 0], (w, h), interpolation=cv2.INTER_LINEAR)
 
     # G 通道（位置 [0::2, 0::2] 和 [1::2, 1::2]）
     rgb[0::2, 0::2, 1] = bayer[0::2, 0::2]
@@ -345,22 +336,10 @@ def demosaic_bilinear(bayer):
 
 ```python
 # G 在 R 位置的卷积核
-G_at_R = [
-    [0,  0, -1,  0,  0],
-    [0,  0,  2,  0,  0],
-    [-1, 2,  4,  2, -1],
-    [0,  0,  2,  0,  0],
-    [0,  0, -1,  0,  0]
-] / 8
+G_at_R = [[0, 0, -1, 0, 0], [0, 0, 2, 0, 0], [-1, 2, 4, 2, -1], [0, 0, 2, 0, 0], [0, 0, -1, 0, 0]] / 8
 
 # R 在 B 位置的卷积核
-R_at_B = [
-    [0,  0, -3/2, 0,   0],
-    [0,  2,  0,   2,   0],
-    [-3/2, 0, 6,  0, -3/2],
-    [0,  2,  0,   2,   0],
-    [0,  0, -3/2, 0,   0]
-] / 8
+R_at_B = [[0, 0, -3 / 2, 0, 0], [0, 2, 0, 2, 0], [-3 / 2, 0, 6, 0, -3 / 2], [0, 2, 0, 2, 0], [0, 0, -3 / 2, 0, 0]] / 8
 ```
 
 **优点：**
@@ -421,11 +400,7 @@ RGB_sRGB = CCM × RGB_camera
 
 ```python
 # 相机厂商提供（在 EXIF 中）
-CCM = np.array([
-    [ 1.5, -0.3, -0.2],
-    [-0.1,  1.3, -0.2],
-    [ 0.0, -0.4,  1.4]
-])
+CCM = np.array([[1.5, -0.3, -0.2], [-0.1, 1.3, -0.2], [0.0, -0.4, 1.4]])
 
 rgb_corrected = rgb @ CCM.T
 ```
@@ -481,12 +456,13 @@ def non_local_means(image, h=10):
 ```python
 import bm3d
 
+
 def denoise_bm3d(image, sigma=25):
     """
     BM3D 降噪
     sigma: 噪声标准差（0-255）
     """
-    return bm3d.bm3d(image, sigma_psd=sigma/255, stage_arg=bm3d.BM3DStages.ALL_STAGES)
+    return bm3d.bm3d(image, sigma_psd=sigma / 255, stage_arg=bm3d.BM3DStages.ALL_STAGES)
 ```
 
 **原理：**
@@ -557,11 +533,7 @@ def log_sharpen(image):
     """
     拉普拉斯锐化
     """
-    kernel = np.array([
-        [0, -1,  0],
-        [-1, 5, -1],
-        [0, -1,  0]
-    ])
+    kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
     return cv2.filter2D(image, -1, kernel)
 ```
 
@@ -604,7 +576,7 @@ def reinhard_local(hdr, scale=0.5):
     局部 Reinhard（保留更多细节）
     """
     # 计算局部适应亮度
-    luminance = 0.27*hdr[:,:,0] + 0.67*hdr[:,:,1] + 0.06*hdr[:,:,2]
+    luminance = 0.27 * hdr[:, :, 0] + 0.67 * hdr[:, :, 1] + 0.06 * hdr[:, :, 2]
 
     # 高斯金字塔
     # ...
@@ -628,7 +600,7 @@ def filmic_tone_mapping(hdr):
     A, B, C, D, E, F = 0.22, 0.30, 0.10, 0.20, 0.01, 0.30
 
     def filmic_curve(x):
-        return ((x*(A*x+C*B)+D*E)/(x*(A*x+B)+D*F))-E/F
+        return ((x * (A * x + C * B) + D * E) / (x * (A * x + B) + D * F)) - E / F
 
     # 曝光
     exposure = 2.0
@@ -823,7 +795,7 @@ with rawpy.imread('image.NEF') as raw:
     rgb = raw.postprocess(
         use_camera_wb=True,  # 相机白平衡
         no_auto_bright=True,  # 不自动亮度
-        output_bps=16        # 16-bit 输出
+        output_bps=16,  # 16-bit 输出
     )
 
     # 保存

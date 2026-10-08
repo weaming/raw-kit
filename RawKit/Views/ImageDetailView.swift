@@ -75,6 +75,8 @@ struct ImageDetailView: View {
     @State private var displayImageIsHDR = false
     @State private var displayImageID = UUID() // HDR 状态变化时强制重建视图
     @State private var isLoading = true
+    @State private var showsLoadingIndicator = true
+    @State private var loadingIndicatorTask: Task<Void, Never>?
     @State private var loadingStage: LoadingStage = .thumbnail
     @State private var scale: CGFloat = 1.0
     @State private var showAdjustmentPanel = true
@@ -85,8 +87,6 @@ struct ImageDetailView: View {
     @State private var curvePickSamples = CurvePickSamples()
     @State private var showingSyncDialog = false
     @State private var selectedSyncGroups = Set(AdjustmentSyncGroup.allCases)
-    @State private var canUndo = false
-    @State private var canRedo = false
     @State private var isCropModeEnabled = false
     @State private var draftCropLeft = 0.0
     @State private var draftCropTop = 0.0
@@ -100,7 +100,7 @@ struct ImageDetailView: View {
     @State private var cachedAdjustments: ImageAdjustments?  // 缓存对应的调整参数
 
     // 渲染队列（延迟初始化）
-    @State private var renderQueue: RenderQueue<RenderRequest>?
+    @State private var renderCoordinator: RenderCoordinator<RenderRequest>?
     @State private var nextRenderRequestID = 0
     @State private var latestRenderRequestID = 0
 
@@ -117,6 +117,8 @@ struct ImageDetailView: View {
     private var resetBaseline: ImageAdjustments {
         ImageAdjustments.sourceHDRBaseline(headroom: imageInfo.hdrHeadroom)
     }
+
+    private let loadingIndicatorDelayNanoseconds: UInt64 = 180_000_000
 
     private var histogramRangeMax: Double {
         guard isDisplayedImageHDR else {
@@ -192,7 +194,7 @@ struct ImageDetailView: View {
         .task(id: imageInfo.id) {
             await prepareForImageChange()
             syncDraftCropFromAdjustments(editingState.adjustments)
-            ensureRenderQueue()
+            ensureRenderCoordinator()
             await loadImageProgressively()
         }
         .onChange(of: editingState.adjustments) { _, newValue in
@@ -238,10 +240,6 @@ struct ImageDetailView: View {
                 }
             }
         }
-        .focusedSceneValue(\.undoAction, canUndo ? undo : nil)
-        .focusedSceneValue(\.redoAction, canRedo ? redo : nil)
-        .onReceive(session.history.$canUndo) { canUndo = $0 }
-        .onReceive(session.history.$canRedo) { canRedo = $0 }
         .background(
             Button("") {
                 cancelWhiteBalancePickMode()
@@ -259,15 +257,17 @@ struct ImageDetailView: View {
             )
         }
         .onDisappear {
+            loadingIndicatorTask?.cancel()
+            loadingIndicatorTask = nil
             session.flushPendingEdits()
         }
     }
 
     /// 清理仅属于当前照片的状态，同时保留侧边栏的视图状态。
     private func prepareForImageChange() async {
-        if let renderQueue {
-            await renderQueue.cancelPending()
-            self.renderQueue = nil
+        if let renderCoordinator {
+            await renderCoordinator.cancelAll()
+            self.renderCoordinator = nil
         }
 
         nextRenderRequestID += 1
@@ -275,10 +275,9 @@ struct ImageDetailView: View {
         originalCIImage = nil
         adjustedCIImage = nil
         previewCIImage = nil
-        displayImage = nil
-        displayImageIsHDR = false
         previewRevision = 0
         isLoading = true
+        scheduleLoadingIndicator()
         loadingStage = .thumbnail
         scale = 1.0
         whiteBalancePickMode = .none
@@ -286,13 +285,39 @@ struct ImageDetailView: View {
         showOriginal = false
         curvePickSamples = CurvePickSamples()
         showingSyncDialog = false
-        canUndo = session.history.canUndo
-        canRedo = session.history.canRedo
         isCropModeEnabled = false
         cachedAdjustedImage = nil
         cachedAdjustedImageIsHDR = false
         cachedAdjustments = nil
         draftStraightenAngle = 0.0
+    }
+
+    private func scheduleLoadingIndicator() {
+        loadingIndicatorTask?.cancel()
+
+        guard displayImage != nil else {
+            showsLoadingIndicator = true
+            return
+        }
+
+        showsLoadingIndicator = false
+        loadingIndicatorTask = Task { [loadingIndicatorDelayNanoseconds] in
+            try? await Task.sleep(nanoseconds: loadingIndicatorDelayNanoseconds)
+            guard !Task.isCancelled else { return }
+
+            await MainActor.run {
+                guard isLoading else { return }
+                showsLoadingIndicator = true
+            }
+        }
+    }
+
+    @MainActor
+    private func finishLoading() {
+        loadingIndicatorTask?.cancel()
+        loadingIndicatorTask = nil
+        isLoading = false
+        showsLoadingIndicator = false
     }
 
     private func loadImageProgressively() async {
@@ -317,7 +342,7 @@ struct ImageDetailView: View {
                 print("ImageDetailView: ✗ 加载 CIImage 失败（小图）")
             }
 
-            isLoading = false
+            finishLoading()
             return
         }
 
@@ -330,7 +355,6 @@ struct ImageDetailView: View {
                 if let thumbnailImage = ImageProcessor.convertToNSImage(thumbnail) {
                     setDisplayImage(thumbnailImage, isHDR: false)
                 }
-                isLoading = false
             }
         }
 
@@ -349,7 +373,7 @@ struct ImageDetailView: View {
             print("ImageDetailView: ✗ 加载 CIImage 失败（大图）")
         }
 
-        isLoading = false
+        finishLoading()
     }
 
     // 等待视口尺寸可用
@@ -447,7 +471,6 @@ struct ImageDetailView: View {
 
             if !output.showOriginal {
                 adjustedCIImage = output.image
-
                 if !output.isCropPreview, !displayResult.didFallbackToSDR {
                     cachedAdjustedImage = displayImage
                     cachedAdjustedImageIsHDR = displayResult.isHDR
@@ -696,16 +719,6 @@ struct ImageDetailView: View {
         )
     }
 
-    private func undo() {
-        session.undo()
-        editingState.adjustments = session.currentAdjustments
-    }
-
-    private func redo() {
-        session.redo()
-        editingState.adjustments = session.currentAdjustments
-    }
-
     /// 执行实际的渲染操作（由渲染队列调用）
     private func performRender(_ request: RenderRequest) async {
         await applyAdjustmentsAsync(request)
@@ -716,7 +729,7 @@ struct ImageDetailView: View {
         _ adjustments: ImageAdjustments,
         retryCount: Int = 0
     ) {
-        ensureRenderQueue()
+        ensureRenderCoordinator()
         nextRenderRequestID += 1
         let request = RenderRequest(
             id: nextRenderRequestID,
@@ -726,9 +739,15 @@ struct ImageDetailView: View {
             retryCount: retryCount
         )
         latestRenderRequestID = request.id
+        let key = RenderKey(
+            imageID: imageInfo.id,
+            adjustments: adjustments,
+            viewportSize: viewportSize,
+            isCropPreview: isCropModeEnabled
+        )
 
         Task {
-            await renderQueue?.enqueue(request)
+            await renderCoordinator?.enqueue(request, key: key, slot: .main, priority: 100)
         }
     }
 
@@ -754,9 +773,9 @@ struct ImageDetailView: View {
     }
 
     @MainActor
-    private func ensureRenderQueue() {
-        guard renderQueue == nil else { return }
-        renderQueue = RenderQueue(maxFPS: 30) { request in
+    private func ensureRenderCoordinator() {
+        guard renderCoordinator == nil else { return }
+        renderCoordinator = RenderCoordinator { request in
             await self.performRender(request)
         }
     }
@@ -764,44 +783,51 @@ struct ImageDetailView: View {
     @ViewBuilder
     private func buildImageView() -> some View {
         GeometryReader { geometry in
-            if isLoading {
-                ProgressView("加载中...")
-                    .progressViewStyle(.circular)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if let image = displayImage {
-                let maxScale = originalCIImage.map { original in
-                    Self.calculateMaxScale(
-                        imageSize: original.extent.size,
-                        viewportSize: geometry.size
-                    )
-                } ?? 10.0
+            ZStack {
+                if let image = displayImage {
+                    let maxScale = originalCIImage.map { original in
+                        Self.calculateMaxScale(
+                            imageSize: original.extent.size,
+                            viewportSize: geometry.size
+                        )
+                    } ?? 10.0
 
-                ClickableImageView(
-                    image: image,
-                    scale: $scale,
-                    maxScale: maxScale,
-                    currentPixelInfo: $currentPixelInfo,
-                    originalCIImage: originalCIImage,
-                    displayedCIImage: previewCIImage ?? adjustedCIImage ?? originalCIImage,
-                    isHDREnabled: isDisplayedImageHDR,
-                    pickMode: whiteBalancePickMode,
-                    onColorPick: whiteBalancePickMode != .none ? handleColorPick : nil,
-                    onCancelPickMode: cancelWhiteBalancePickMode,
-                    onFilesDrop: onFilesDrop,
-                    isCropModeEnabled: isCropModeEnabled && !showOriginal,
-                    cropLeft: $draftCropLeft,
-                    cropTop: $draftCropTop,
-                    cropRight: $draftCropRight,
-                    cropBottom: $draftCropBottom,
-                    cropAspectRatio: editingState.adjustments.cropAspectRatio
-                )
-                .clipped()
-                .id(displayImageID) // 使用 displayImageID 强制刷新
-            } else {
-                Text("无法加载图像")
-                    .foregroundColor(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    ClickableImageView(
+                        image: image,
+                        scale: $scale,
+                        maxScale: maxScale,
+                        currentPixelInfo: $currentPixelInfo,
+                        originalCIImage: originalCIImage,
+                        displayedCIImage: previewCIImage ?? adjustedCIImage ?? originalCIImage,
+                        isHDREnabled: isDisplayedImageHDR,
+                        pickMode: whiteBalancePickMode,
+                        onColorPick: whiteBalancePickMode != .none ? handleColorPick : nil,
+                        onCancelPickMode: cancelWhiteBalancePickMode,
+                        onFilesDrop: onFilesDrop,
+                        isCropModeEnabled: isCropModeEnabled && !showOriginal,
+                        cropLeft: $draftCropLeft,
+                        cropTop: $draftCropTop,
+                        cropRight: $draftCropRight,
+                        cropBottom: $draftCropBottom,
+                        cropAspectRatio: editingState.adjustments.cropAspectRatio
+                    )
+                    .clipped()
+                    .allowsHitTesting(!isLoading)
+                    .id(displayImageID) // 使用 displayImageID 强制刷新
+                } else if !showsLoadingIndicator {
+                    Text("无法加载图像")
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+
+                if showsLoadingIndicator {
+                    ProgressView("加载中...")
+                        .progressViewStyle(.circular)
+                        .padding(14)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+                }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .onChange(of: viewportSize) { _, newSize in
             // 视口尺寸变化时，重新渲染（使用当前调整）
@@ -979,7 +1005,6 @@ struct ImageInfoBar: View {
 
             Spacer()
 
-            // Before/After 切换按钮
             Button(action: {
                 showOriginal.toggle()
             }) {

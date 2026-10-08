@@ -1018,52 +1018,38 @@ struct BasicAdjustmentsView: View, Equatable {
     var body: some View {
         VStack(spacing: 16) {
             SliderControl(
-                title: "曝光",
-                value: $adjustments.exposure,
-                range: ImageAdjustments.exposureRange,
-                step: 0.1
+                spec: .exposure,
+                value: $adjustments.exposure
             )
 
             SliderControl(
-                title: "感知曝光",
-                value: $adjustments.perceptualExposure,
-                range: ImageAdjustments.perceptualExposureRange,
-                step: 0.01
+                spec: .perceptualExposure,
+                value: $adjustments.perceptualExposure
             )
 
             SliderControl(
-                title: "对比度",
-                value: $adjustments.contrast,
-                range: ImageAdjustments.contrastRange,
-                step: 0.01
+                spec: .contrast,
+                value: $adjustments.contrast
             )
 
             SliderControl(
-                title: "白色",
-                value: $adjustments.whites,
-                range: ImageAdjustments.whitesRange,
-                step: 0.01
+                spec: .whites,
+                value: $adjustments.whites
             )
 
             SliderControl(
-                title: "高光",
-                value: $adjustments.highlights,
-                range: ImageAdjustments.highlightsRange,
-                step: 0.01
+                spec: .highlights,
+                value: $adjustments.highlights
             )
 
             SliderControl(
-                title: "阴影",
-                value: $adjustments.shadows,
-                range: ImageAdjustments.shadowsRange,
-                step: 0.01
+                spec: .shadows,
+                value: $adjustments.shadows
             )
 
             SliderControl(
-                title: "黑色",
-                value: $adjustments.blacks,
-                range: ImageAdjustments.blacksRange,
-                step: 0.01
+                spec: .blacks,
+                value: $adjustments.blacks
             )
         }
         .padding(.horizontal, 16)
@@ -1128,34 +1114,26 @@ private struct HDRAdjustmentsView: View, Equatable {
             }
 
             SliderControl(
-                title: "HDR 亮度",
-                value: $adjustments.hdrBrightness,
-                range: ImageAdjustments.hdrBrightnessRange,
-                step: 0.01
+                spec: .hdrBrightness,
+                value: $adjustments.hdrBrightness
             )
             .disabled(!adjustments.isHDREnabled)
 
             SliderControl(
-                title: "高光亮度",
-                value: $adjustments.hdrHighlights,
-                range: ImageAdjustments.hdrHighlightsRange,
-                step: 0.01
+                spec: .hdrHighlights,
+                value: $adjustments.hdrHighlights
             )
             .disabled(!adjustments.isHDREnabled)
 
             SliderControl(
-                title: "白色亮度",
-                value: $adjustments.hdrWhites,
-                range: ImageAdjustments.hdrWhitesRange,
-                step: 0.01
+                spec: .hdrWhites,
+                value: $adjustments.hdrWhites
             )
             .disabled(!adjustments.isHDREnabled)
 
             SliderControl(
-                title: "HDR 峰值",
+                spec: .hdrHeadroom(range: hdrHeadroomRange),
                 value: $adjustments.hdrHeadroom,
-                range: hdrHeadroomRange,
-                step: 0.1
             )
             .help(hdrHelpText)
             .disabled(!adjustments.isHDREnabled)
@@ -1261,34 +1239,26 @@ struct ColorAdjustmentsView: View, Equatable {
             }
 
             SliderControl(
-                title: "色温",
-                value: $adjustments.temperature,
-                range: ImageAdjustments.temperatureRange,
-                step: 1
+                spec: .temperature,
+                value: $adjustments.temperature
             )
 
             SliderControl(
-                title: "色调",
-                value: $adjustments.tint,
-                range: ImageAdjustments.tintRange,
-                step: 1
+                spec: .tint,
+                value: $adjustments.tint
             )
 
             Divider()
                 .padding(.vertical, 8)
 
             SliderControl(
-                title: "饱和度",
-                value: $adjustments.saturation,
-                range: ImageAdjustments.saturationRange,
-                step: 0.01
+                spec: .saturation,
+                value: $adjustments.saturation
             )
 
             SliderControl(
-                title: "自然饱和度",
-                value: $adjustments.vibrance,
-                range: ImageAdjustments.vibranceRange,
-                step: 0.01
+                spec: .vibrance,
+                value: $adjustments.vibrance
             )
         }
         .padding(.horizontal, 16)
@@ -1326,24 +1296,18 @@ struct DetailAdjustmentsView: View, Equatable {
     var body: some View {
         VStack(spacing: 16) {
             SliderControl(
-                title: "清晰度",
-                value: $adjustments.clarity,
-                range: ImageAdjustments.clarityRange,
-                step: 0.01
+                spec: .clarity,
+                value: $adjustments.clarity
             )
 
             SliderControl(
-                title: "去雾",
-                value: $adjustments.dehaze,
-                range: ImageAdjustments.dehazeRange,
-                step: 0.01
+                spec: .dehaze,
+                value: $adjustments.dehaze
             )
 
             SliderControl(
-                title: "锐化",
-                value: $adjustments.sharpness,
-                range: ImageAdjustments.sharpnessRange,
-                step: 0.01
+                spec: .sharpness,
+                value: $adjustments.sharpness
             )
         }
         .padding(.horizontal, 16)
@@ -1351,42 +1315,35 @@ struct DetailAdjustmentsView: View, Equatable {
 }
 
 struct SliderControl: View, Equatable {
-    let title: String
+    let spec: AdjustmentControlSpec
     @Binding var value: Double
-    let range: ClosedRange<Double>
-    let step: Double
     @State private var displayValue: Double
 
     static func == (lhs: SliderControl, rhs: SliderControl) -> Bool {
-        lhs.title == rhs.title &&
+        lhs.spec == rhs.spec &&
         lhs.value == rhs.value &&
-        lhs.range == rhs.range &&
-        lhs.step == rhs.step
+        lhs.spec.range == rhs.spec.range
     }
 
     init(
-        title: String,
-        value: Binding<Double>,
-        range: ClosedRange<Double>,
-        step: Double
+        spec: AdjustmentControlSpec,
+        value: Binding<Double>
     ) {
-        self.title = title
+        self.spec = spec
         self._value = value
-        self.range = range
-        self.step = step
         self._displayValue = State(initialValue: value.wrappedValue)
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Text(title)
+                Text(spec.title)
                     .font(.subheadline)
                     .foregroundColor(.secondary)
 
                 Spacer()
 
-                Text(formatValue(displayValue))
+                Text(spec.format(displayValue))
                     .font(.body)
                     .foregroundColor(.secondary)
                     .monospacedDigit()
@@ -1399,7 +1356,7 @@ struct SliderControl: View, Equatable {
                         get: { displayValue },
                         set: handleDisplayValueChange
                     ),
-                    range: range,
+                    range: spec.range,
                     onDoubleTap: { resetToDefault() }
                 )
 
@@ -1418,7 +1375,7 @@ struct SliderControl: View, Equatable {
                 displayValue = newValue
             }
         }
-        .onChange(of: range) { _, newRange in
+        .onChange(of: spec.range) { _, newRange in
             let clampedValue = clamp(displayValue, to: newRange)
             guard abs(clampedValue - displayValue) > 0.0001 else { return }
 
@@ -1432,44 +1389,12 @@ struct SliderControl: View, Equatable {
         }
     }
 
-    private func formatValue(_ value: Double) -> String {
-        if range.upperBound > 100 {
-            String(format: "%.0f", value)
-        } else if step >= 1 {
-            String(format: "%.0f", value)
-        } else {
-            String(format: "%.2f", value)
-        }
-    }
-
     private var isDefaultValue: Bool {
-        let defaultAdjustments = ImageAdjustments.default
-
-        switch title {
-        case "曝光": return displayValue == defaultAdjustments.exposure
-        case "感知曝光": return displayValue == defaultAdjustments.perceptualExposure
-        case "对比度": return displayValue == defaultAdjustments.contrast
-        case "饱和度": return displayValue == defaultAdjustments.saturation
-        case "高光": return displayValue == defaultAdjustments.highlights
-        case "阴影": return displayValue == defaultAdjustments.shadows
-        case "白色": return displayValue == defaultAdjustments.whites
-        case "黑色": return displayValue == defaultAdjustments.blacks
-        case "清晰度": return displayValue == defaultAdjustments.clarity
-        case "去雾": return displayValue == defaultAdjustments.dehaze
-        case "色温": return abs(displayValue - defaultAdjustments.temperature) < AppConfig.whitePointTolerance
-        case "色调": return displayValue == defaultAdjustments.tint
-        case "自然饱和度": return displayValue == defaultAdjustments.vibrance
-        case "锐化": return displayValue == defaultAdjustments.sharpness
-        case "HDR 亮度": return displayValue == defaultAdjustments.hdrBrightness
-        case "高光亮度": return displayValue == defaultAdjustments.hdrHighlights
-        case "白色亮度": return displayValue == defaultAdjustments.hdrWhites
-        case "HDR 峰值": return displayValue == defaultAdjustments.hdrHeadroom
-        default: return false
-        }
+        abs(displayValue - spec.defaultValue) < max(spec.step * 0.5, 0.0001)
     }
 
     private func handleDisplayValueChange(_ newValue: Double) {
-        let steppedValue = clamp(round(newValue / step) * step, to: range)
+        let steppedValue = clamp(round(newValue / spec.step) * spec.step, to: spec.range)
         if abs(displayValue - steppedValue) > 0.0001 {
             displayValue = steppedValue
         }
@@ -1484,35 +1409,10 @@ struct SliderControl: View, Equatable {
     }
 
     private func resetToDefault() {
-        let defaultAdjustments = ImageAdjustments.default
+        displayValue = spec.defaultValue
 
-        let resetValue: Double
-        switch title {
-        case "曝光": resetValue = defaultAdjustments.exposure
-        case "感知曝光": resetValue = defaultAdjustments.perceptualExposure
-        case "对比度": resetValue = defaultAdjustments.contrast
-        case "饱和度": resetValue = defaultAdjustments.saturation
-        case "高光": resetValue = defaultAdjustments.highlights
-        case "阴影": resetValue = defaultAdjustments.shadows
-        case "白色": resetValue = defaultAdjustments.whites
-        case "黑色": resetValue = defaultAdjustments.blacks
-        case "清晰度": resetValue = defaultAdjustments.clarity
-        case "去雾": resetValue = defaultAdjustments.dehaze
-        case "色温": resetValue = defaultAdjustments.temperature
-        case "色调": resetValue = defaultAdjustments.tint
-        case "自然饱和度": resetValue = defaultAdjustments.vibrance
-        case "锐化": resetValue = defaultAdjustments.sharpness
-        case "HDR 亮度": resetValue = defaultAdjustments.hdrBrightness
-        case "高光亮度": resetValue = defaultAdjustments.hdrHighlights
-        case "白色亮度": resetValue = defaultAdjustments.hdrWhites
-        case "HDR 峰值": resetValue = defaultAdjustments.hdrHeadroom
-        default: return
-        }
-
-        displayValue = resetValue
-
-        if abs(_value.wrappedValue - resetValue) > 0.0001 {
-            _value.wrappedValue = resetValue
+        if abs(_value.wrappedValue - spec.defaultValue) > 0.0001 {
+            _value.wrappedValue = spec.defaultValue
         }
     }
 }

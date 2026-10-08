@@ -10,7 +10,17 @@ class ThumbnailManager: ObservableObject {
     @Published var adjustedThumbnailIsHDR: [UUID: Bool] = [:]
 
     private let thumbnailSize: CGFloat = 120
-    private var generationTasks: [UUID: Task<Void, Never>] = [:]
+    private enum ThumbnailTaskKind: Hashable {
+        case base
+        case adjusted
+    }
+
+    private struct ThumbnailTaskKey: Hashable {
+        let imageID: UUID
+        let kind: ThumbnailTaskKind
+    }
+
+    private var generationTasks: [ThumbnailTaskKey: Task<Void, Never>] = [:]
 
     private struct ThumbnailRenderResult {
         let image: NSImage
@@ -21,7 +31,8 @@ class ThumbnailManager: ObservableObject {
         for imageInfo: ImageInfo,
         with adjustments: ImageAdjustments
     ) {
-        generationTasks[imageInfo.id]?.cancel()
+        let taskKey = ThumbnailTaskKey(imageID: imageInfo.id, kind: .adjusted)
+        generationTasks[taskKey]?.cancel()
 
         let task = Task {
             guard !Task.isCancelled else { return }
@@ -47,7 +58,7 @@ class ThumbnailManager: ObservableObject {
             }
         }
 
-        generationTasks[imageInfo.id] = task
+        generationTasks[taskKey] = task
     }
 
     func generateBaseThumbnail(for imageInfo: ImageInfo) {
@@ -55,7 +66,8 @@ class ThumbnailManager: ObservableObject {
             return
         }
 
-        generationTasks[imageInfo.id]?.cancel()
+        let taskKey = ThumbnailTaskKey(imageID: imageInfo.id, kind: .base)
+        generationTasks[taskKey]?.cancel()
 
         let task = Task {
             guard !Task.isCancelled else { return }
@@ -78,12 +90,43 @@ class ThumbnailManager: ObservableObject {
             }
         }
 
-        generationTasks[imageInfo.id] = task
+        generationTasks[taskKey] = task
+    }
+
+    func prefetchNeighbors(
+        images: [ImageInfo],
+        currentIndex: Int,
+        adjustmentsForImageID: (UUID) -> ImageAdjustments
+    ) {
+        guard images.indices.contains(currentIndex) else {
+            return
+        }
+
+        for offset in [-1, 1] {
+            let neighborIndex = currentIndex + offset
+            guard images.indices.contains(neighborIndex) else {
+                continue
+            }
+
+            let imageInfo = images[neighborIndex]
+            let adjustments = adjustmentsForImageID(imageInfo.id)
+
+            if imageInfo.thumbnail == nil || imageInfo.fileType == .raw(.x3f) {
+                generateBaseThumbnail(for: imageInfo)
+            }
+
+            if adjustments.hasAdjustments || adjustments.lutURL != nil {
+                generateAdjustedThumbnail(for: imageInfo, with: adjustments)
+            }
+        }
     }
 
     func clearThumbnail(for id: UUID) {
-        generationTasks[id]?.cancel()
-        generationTasks.removeValue(forKey: id)
+        for kind in [ThumbnailTaskKind.base, .adjusted] {
+            let key = ThumbnailTaskKey(imageID: id, kind: kind)
+            generationTasks[key]?.cancel()
+            generationTasks.removeValue(forKey: key)
+        }
         baseThumbnails.removeValue(forKey: id)
         adjustedThumbnails.removeValue(forKey: id)
         baseThumbnailIsHDR.removeValue(forKey: id)

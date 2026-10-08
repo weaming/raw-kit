@@ -8,6 +8,7 @@
 
 /* Begin PBXFileReference section */
 		99B55F6B2EBBBACD00E3AFA2 /* RawKit.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = RawKit.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A1B2C3D4E5F60718293A4B5C /* RawKitTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = RawKitTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -16,10 +17,22 @@
 			path = RawKit;
 			sourceTree = "<group>";
 		};
+		A1B2C3D4E5F60718293A4B5D /* RawKitTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = RawKitTests;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		99B55F682EBBBACD00E3AFA2 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A1B2C3D4E5F60718293A4B5E /* RawKitTests Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -33,6 +46,7 @@
 			isa = PBXGroup;
 			children = (
 				99B55F6D2EBBBACD00E3AFA2 /* RawKit */,
+				A1B2C3D4E5F60718293A4B5D /* RawKitTests */,
 				99B55F6C2EBBBACD00E3AFA2 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -41,6 +55,7 @@
 			isa = PBXGroup;
 			children = (
 				99B55F6B2EBBBACD00E3AFA2 /* RawKit.app */,
+				A1B2C3D4E5F60718293A4B5C /* RawKitTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -70,7 +85,41 @@
 			productReference = 99B55F6B2EBBBACD00E3AFA2 /* RawKit.app */;
 			productType = "com.apple.product-type.application";
 		};
+		A1B2C3D4E5F60718293A4B5F /* RawKitTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A1B2C3D4E5F60718293A4B65 /* Build configuration list for PBXNativeTarget "RawKitTests" */;
+			buildPhases = (
+				A1B2C3D4E5F60718293A4B60 /* RawKitTests Sources */,
+				A1B2C3D4E5F60718293A4B5E /* RawKitTests Frameworks */,
+				A1B2C3D4E5F60718293A4B61 /* RawKitTests Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				A1B2C3D4E5F60718293A4B64 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				A1B2C3D4E5F60718293A4B5D /* RawKitTests */,
+			);
+			name = RawKitTests;
+			packageProductDependencies = (
+			);
+			productName = RawKitTests;
+			productReference = A1B2C3D4E5F60718293A4B5C /* RawKitTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
+
+/* Begin PBXContainerItemProxy section */
+		A1B2C3D4E5F60718293A4B63 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 99B55F632EBBBACD00E3AFA2 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 99B55F6A2EBBBACD00E3AFA2;
+			remoteInfo = RawKit;
+		};
+/* End PBXContainerItemProxy section */
+
 
 /* Begin PBXProject section */
 		99B55F632EBBBACD00E3AFA2 /* Project object */ = {
@@ -82,6 +131,10 @@
 				TargetAttributes = {
 					99B55F6A2EBBBACD00E3AFA2 = {
 						CreatedOnToolsVersion = 16.2;
+					};
+					A1B2C3D4E5F60718293A4B5F = {
+						CreatedOnToolsVersion = 16.2;
+						TestTargetID = 99B55F6A2EBBBACD00E3AFA2;
 					};
 				};
 			};
@@ -100,12 +153,20 @@
 			projectRoot = "";
 			targets = (
 				99B55F6A2EBBBACD00E3AFA2 /* RawKit */,
+				A1B2C3D4E5F60718293A4B5F /* RawKitTests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
 		99B55F692EBBBACD00E3AFA2 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A1B2C3D4E5F60718293A4B61 /* RawKitTests Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -122,7 +183,23 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A1B2C3D4E5F60718293A4B60 /* RawKitTests Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		A1B2C3D4E5F60718293A4B64 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 99B55F6A2EBBBACD00E3AFA2 /* RawKit */;
+			targetProxy = A1B2C3D4E5F60718293A4B63 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
 
 /* Begin XCBuildConfiguration section */
 		99B55F782EBBBACE00E3AFA2 /* Debug */ = {
@@ -262,7 +339,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 2.11;
+				MARKETING_VERSION = 2.12;
 				OTHER_LDFLAGS = (
 					"-framework",
 					AppIntents,
@@ -293,7 +370,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 2.11;
+				MARKETING_VERSION = 2.12;
 				OTHER_LDFLAGS = (
 					"-framework",
 					AppIntents,
@@ -302,6 +379,44 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		A1B2C3D4E5F60718293A4B66 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@loader_path/../Frameworks",
+					"@loader_path/../../../../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 15.1;
+				PRODUCT_BUNDLE_IDENTIFIER = org.bitsflow.RawKitTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/RawKit.app/Contents/MacOS/RawKit";
+			};
+			name = Debug;
+		};
+		A1B2C3D4E5F60718293A4B67 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@loader_path/../Frameworks",
+					"@loader_path/../../../../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 15.1;
+				PRODUCT_BUNDLE_IDENTIFIER = org.bitsflow.RawKitTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/RawKit.app/Contents/MacOS/RawKit";
 			};
 			name = Release;
 		};
@@ -322,6 +437,15 @@
 			buildConfigurations = (
 				99B55F7B2EBBBACE00E3AFA2 /* Debug */,
 				99B55F7C2EBBBACE00E3AFA2 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A1B2C3D4E5F60718293A4B65 /* Build configuration list for PBXNativeTarget "RawKitTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A1B2C3D4E5F60718293A4B66 /* Debug */,
+				A1B2C3D4E5F60718293A4B67 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

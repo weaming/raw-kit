@@ -42,7 +42,7 @@ struct FilmstripView: View {
 
                 // 水平滚动的缩略图列表
                 HorizontalWheelScrollContainer {
-                    HStack(spacing: 4) {
+                    LazyHStack(spacing: 4) {
                         ForEach(Array(images.enumerated()), id: \.element.id) { index, imageInfo in
                             let adjustments = adjustmentsForImageID(imageInfo.id)
 

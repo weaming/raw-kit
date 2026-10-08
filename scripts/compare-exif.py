@@ -197,10 +197,7 @@ def add_hevc_bitstream_checks(metadata: dict[str, str]) -> None:
     bitstream_primaries = metadata.get('FFProbe:ColorPrimaries', '')
 
     has_bt2020_primaries = 'bt.2020' in color_primaries.lower()
-    has_hdr_transfer = any(
-        token in transfer_characteristics.lower()
-        for token in ['hlg', 'pq', '2084', 'arib']
-    )
+    has_hdr_transfer = any(token in transfer_characteristics.lower() for token in ['hlg', 'pq', '2084', 'arib'])
 
     if color_space == 'bt2020nc':
         if has_bt2020_primaries:
@@ -235,9 +232,7 @@ def add_hevc_bitstream_checks(metadata: dict[str, str]) -> None:
     elif bitstream_primaries == 'bt709':
         metadata['Check:HEVCBitstreamPrimaries'] = 'OK: HEVC bitstream primaries 是 bt709'
     elif bitstream_primaries:
-        metadata['Check:HEVCBitstreamPrimaries'] = (
-            f'WARN: HEVC bitstream primaries 未确认: {bitstream_primaries}'
-        )
+        metadata['Check:HEVCBitstreamPrimaries'] = f'WARN: HEVC bitstream primaries 未确认: {bitstream_primaries}'
 
 
 def normalize_value(value: Any) -> str:

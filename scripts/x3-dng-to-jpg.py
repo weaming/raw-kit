@@ -94,7 +94,7 @@ def calculate_auto_exposure(raw, dng_path, target_brightness=DEFAULT_TARGET_BRIG
                 parts.append(f'{ev_compensation:+.1f}EV')
 
             if parts:
-                print(f"  EXIF: {', '.join(parts)}")
+                print(f'  EXIF: {", ".join(parts)}')
         except Exception as error:
             print(f'  无法读取 EXIF: {error}')
 
@@ -112,11 +112,7 @@ def calculate_auto_exposure(raw, dng_path, target_brightness=DEFAULT_TARGET_BRIG
     preview_float = preview.astype(np.float32) / 65535.0
 
     # 计算亮度（使用 Rec. 709 系数）
-    luminance = (
-        0.2126 * preview_float[:, :, 0]
-        + 0.7152 * preview_float[:, :, 1]
-        + 0.0722 * preview_float[:, :, 2]
-    )
+    luminance = 0.2126 * preview_float[:, :, 0] + 0.7152 * preview_float[:, :, 1] + 0.0722 * preview_float[:, :, 2]
 
     # 去除过亮和过暗区域（前后 5%）
     lower, upper = np.percentile(luminance, [5, 95])
@@ -137,7 +133,7 @@ def calculate_auto_exposure(raw, dng_path, target_brightness=DEFAULT_TARGET_BRIG
     # 限制范围，避免极端输入放大误差
     final_exposure = np.clip(final_exposure, 0.3, 5.0)
 
-    print(f"  曝光: {final_exposure:.2f} (目标亮度: {target_brightness:.2f}, 当前: {current_brightness:.2f})")
+    print(f'  曝光: {final_exposure:.2f} (目标亮度: {target_brightness:.2f}, 当前: {current_brightness:.2f})')
 
     return final_exposure
 
@@ -236,16 +232,14 @@ def apply_tone_mapping_improved(image, method='aces', exposure=1.0):
             c = (
                 np.power(hdr_max, a * d) * np.power(mid_in, a)
                 - np.power(hdr_max, a) * np.power(mid_in, a * d) * mid_out
-            ) / (
-                (np.power(hdr_max, a * d) - np.power(mid_in, a * d)) * mid_out
-            )
+            ) / ((np.power(hdr_max, a * d) - np.power(mid_in, a * d)) * mid_out)
 
             return np.power(x, a) / (np.power(x, a * d) * b + c)
 
         return np.clip(lottes_tonemap(img), 0, 1)
 
     else:
-        raise ValueError(f"Unknown tone mapping method: {method}")
+        raise ValueError(f'Unknown tone mapping method: {method}')
 
 
 def unsharp_mask(image, sigma=1.0, strength=1.5):
@@ -284,20 +278,20 @@ def convert_dng_to_srgb(
         sharpen: 是否锐化
         quality: JPEG 质量 (1-100)
     """
-    print(f"处理: {dng_path}")
+    print(f'处理: {dng_path}')
 
     # 1. 读取 DNG
-    print("  [1/6] 读取 DNG 元数据")
+    print('  [1/6] 读取 DNG 元数据')
     with rawpy.imread(str(dng_path)) as raw:
         # 2. 自动计算曝光（未提供手动曝光时）
         if exposure is None:
-            print("  [2/6] 自动曝光分析")
+            print('  [2/6] 自动曝光分析')
             exposure = calculate_auto_exposure(raw, dng_path)
         else:
-            print(f"  [2/6] 使用手动曝光: {exposure}")
+            print(f'  [2/6] 使用手动曝光: {exposure}')
 
         # 3. RAW → RGB（线性空间）
-        print("  [3/6] RAW 解码 (去马赛克 AHD, 线性空间, 相机白平衡)")
+        print('  [3/6] RAW 解码 (去马赛克 AHD, 线性空间, 相机白平衡)')
         params = rawpy.Params(
             use_camera_wb=True,
             use_auto_wb=False,
@@ -312,23 +306,25 @@ def convert_dng_to_srgb(
 
         # 转换到浮点 [0, 1]
         rgb_float = rgb.astype(np.float32) / 65535.0
-        print(f"      尺寸: {rgb_float.shape[1]}x{rgb_float.shape[0]}, 范围: [{rgb_float.min():.3f}, {rgb_float.max():.3f}]")
+        print(
+            f'      尺寸: {rgb_float.shape[1]}x{rgb_float.shape[0]}, 范围: [{rgb_float.min():.3f}, {rgb_float.max():.3f}]'
+        )
 
     # 4. 色调映射
-    print(f"  [4/6] 色调映射 ({tone_mapping}, 曝光系数: {exposure:.2f})")
+    print(f'  [4/6] 色调映射 ({tone_mapping}, 曝光系数: {exposure:.2f})')
     rgb_mapped = apply_tone_mapping_improved(rgb_float, method=tone_mapping, exposure=exposure)
     rgb_mapped = np.clip(rgb_mapped, 0, None)
 
     # 5. Gamma 校正（sRGB）
-    print("  [5/6] Gamma 2.2 校正")
+    print('  [5/6] Gamma 2.2 校正')
     rgb_gamma = np.power(rgb_mapped, 1.0 / 2.2)
 
     # 6. 锐化（可选）
     if sharpen:
-        print(f"  [6/6] 反锐化掩模 (强度: {DEFAULT_SHARPEN_STRENGTH})")
+        print(f'  [6/6] 反锐化掩模 (强度: {DEFAULT_SHARPEN_STRENGTH})')
         rgb_gamma = unsharp_mask(rgb_gamma, sigma=DEFAULT_SHARPEN_SIGMA, strength=DEFAULT_SHARPEN_STRENGTH)
     else:
-        print("  [6/6] 跳过锐化")
+        print('  [6/6] 跳过锐化')
 
     # 8. 保存
     output_path = Path(output_path)
@@ -336,7 +332,7 @@ def convert_dng_to_srgb(
     rgb_8bit = (np.clip(rgb_gamma, 0, 1) * 255).astype(np.uint8)
     imageio.imwrite(output_path, rgb_8bit, quality=quality)
 
-    print(f"✓ 完成: {output_path} (JPEG 质量: {quality})")
+    print(f'✓ 完成: {output_path} (JPEG 质量: {quality})')
     print()
 
 
@@ -350,17 +346,17 @@ def batch_convert(input_dir, output_dir, **kwargs):
 
     dng_files = sorted({*input_path.glob('*.dng'), *input_path.glob('*.DNG')})
 
-    print(f"找到 {len(dng_files)} 个 DNG 文件")
+    print(f'找到 {len(dng_files)} 个 DNG 文件')
     print()
 
     for i, dng_file in enumerate(dng_files, 1):
-        output_file = output_path / f"{dng_file.stem}.jpg"
-        print(f"[{i}/{len(dng_files)}]")
+        output_file = output_path / f'{dng_file.stem}.jpg'
+        print(f'[{i}/{len(dng_files)}]')
 
         try:
             convert_dng_to_srgb(dng_file, output_file, **kwargs)
         except Exception as e:
-            print(f"✗ 错误: {e}")
+            print(f'✗ 错误: {e}')
             print()
             continue
 
@@ -441,7 +437,7 @@ def main():
     elif input_path.is_dir():
         batch_convert(input_path, args.output, **convert_kwargs)
     else:
-        print(f"错误: {args.input} 不存在")
+        print(f'错误: {args.input} 不存在')
         return 1
 
     return 0
