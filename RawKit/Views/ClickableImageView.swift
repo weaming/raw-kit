@@ -953,6 +953,7 @@ struct ClickableImageRepresentable: NSViewRepresentable {
         let view = ClickableNSImageView()
         view.imageView.image = image
         view.currentScale = scale
+        view.currentOffset = offset
         view.isHDREnabled = isHDREnabled
         view.onScrollWheel = onScrollWheel
         view.pickMode = pickMode
@@ -967,11 +968,17 @@ struct ClickableImageRepresentable: NSViewRepresentable {
 
     func updateNSView(_ nsView: ClickableNSImageView, context _: Context) {
         let imageChanged = nsView.imageView.image !== image
+        let hdrChanged = nsView.isHDREnabled != isHDREnabled
 
-        // 更新图像
+        nsView.isHDREnabled = isHDREnabled
+
+        // HDR/SDR 切换时原地刷新 NSImageView backing store，避免重建视图导致平移/缩放状态丢失或画面移位
+        if hdrChanged {
+            nsView.imageView.image = nil
+        }
         nsView.imageView.image = image
-        // 强制标记需要重绘，避免 HDR 场景下 imageView 不刷新
-        if imageChanged {
+
+        if imageChanged || hdrChanged {
             nsView.imageView.setNeedsDisplay(nsView.imageView.bounds)
         }
 
@@ -979,7 +986,6 @@ struct ClickableImageRepresentable: NSViewRepresentable {
         nsView.onScrollWheel = onScrollWheel
         nsView.onDragChanged = onDragChanged
         nsView.onDragEnded = onDragEnded
-        nsView.isHDREnabled = isHDREnabled
         nsView.pickMode = pickMode
         nsView.onColorPick = onColorPick
         nsView.onCancelPickMode = onCancelPickMode

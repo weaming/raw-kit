@@ -419,6 +419,124 @@ final class RawKitTests: XCTestCase {
         XCTAssertEqual(floats[midOffset], 0.687, accuracy: 0.03)
     }
 
+    @MainActor
+    func testSessionApplyLUTAtomicallyUpdatesProfileAndAlpha() {
+        let imageInfo = ImageInfo(url: URL(fileURLWithPath: "/tmp/nonexistent-lut-test.jpg"))
+        let session = ImageEditingSession(
+            imageInfo: imageInfo,
+            thumbnailManager: ThumbnailManager()
+        )
+        let firstURL = URL(fileURLWithPath: "/tmp/slog3.cube")
+        let slogProfile = LUTColorProfile(
+            inputGamut: .sonySGamut3Cine,
+            inputTransfer: .sLog3,
+            outputGamut: .rec709,
+            outputTransfer: .rec709
+        )
+        session.applyLUT(firstURL, profile: slogProfile, alpha: 0.7)
+        XCTAssertEqual(session.currentAdjustments.lutURL, firstURL)
+        XCTAssertEqual(session.currentAdjustments.lutColorProfile, slogProfile)
+        XCTAssertEqual(session.currentAdjustments.lutAlpha, 0.7, accuracy: 1e-6)
+
+        let secondURL = URL(fileURLWithPath: "/tmp/srgb.cube")
+        session.applyLUT(secondURL, profile: .default, alpha: 1.0)
+        XCTAssertEqual(session.currentAdjustments.lutURL, secondURL)
+        XCTAssertEqual(session.currentAdjustments.lutColorProfile, .default)
+        XCTAssertEqual(session.currentAdjustments.lutAlpha, 1.0, accuracy: 1e-6)
+    }
+
+    func testAllAdjustmentsEnabledSimultaneouslyProduceValidOpaqueImage() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("RawKitAllParams-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let lutURL = tempDir.appendingPathComponent("test.cube")
+        let cubeText = """
+        LUT_3D_SIZE 2
+        0 0 0
+        1 0 0
+        0 1 0
+        1 1 0
+        0 0 1
+        1 0 1
+        0 1 1
+        1 1 1
+        """
+        try cubeText.write(to: lutURL, atomically: true, encoding: .utf8)
+
+        let source = makeLinearColorImage(r: 0.4, g: 0.25, b: 0.15)
+        var adjustments = ImageAdjustments.default
+        adjustments.exposure = 3.5
+        adjustments.perceptualExposure = 1.5
+        adjustments.contrast = 0.8
+        adjustments.highlights = 1.8
+        adjustments.shadows = 0.7
+        adjustments.whites = 0.8
+        adjustments.blacks = -0.5
+        adjustments.saturation = 1.8
+        adjustments.vibrance = 0.9
+        adjustments.temperature = 9000
+        adjustments.tint = 40
+        adjustments.clarity = 0.8
+        adjustments.dehaze = 0.8
+        adjustments.sharpness = 1.5
+        adjustments.rotation = 90
+        adjustments.straightenAngle = 5.0
+        adjustments.cropLeft = 0.05
+        adjustments.cropRight = 0.05
+        _ = adjustments.rgbCurve.addPoint(input: 0.5, output: 0.65)
+        _ = adjustments.redCurve.addPoint(input: 0.5, output: 0.55)
+        _ = adjustments.greenCurve.addPoint(input: 0.5, output: 0.5)
+        _ = adjustments.blueCurve.addPoint(input: 0.5, output: 0.45)
+        _ = adjustments.luminanceCurve.addPoint(input: 0.5, output: 0.6)
+        adjustments.lutURL = lutURL
+        adjustments.lutAlpha = 0.75
+        adjustments.lutColorProfile = LUTColorProfile(
+            inputGamut: .rec2020,
+            inputTransfer: .pq,
+            outputGamut: .rec709,
+            outputTransfer: .gamma24
+        )
+        adjustments.isHDREnabled = true
+        adjustments.hdrHeadroom = 4.0
+        adjustments.hdrBrightness = 1.2
+        adjustments.hdrHighlights = 0.8
+        adjustments.hdrWhites = 0.8
+
+        let output = ImageProcessor.applyAdjustments(to: source, adjustments: adjustments)
+        XCTAssertFalse(output.extent.isEmpty)
+        XCTAssertFalse(output.extent.isInfinite)
+
+        let pixel = renderLinearPixel(output)
+        XCTAssertTrue(pixel.r.isFinite && pixel.g.isFinite && pixel.b.isFinite, "像素含非有限值: \(pixel)")
+
+        // 验证极端值（纯黑、广色域负值、超高亮、NaN）经全参数管线后仍为不透明有限像素
+        let extremeSource = makeLinearColorImage(r: 0.0, g: -0.2, b: 25.0)
+        let extremeOutput = ImageProcessor.applyAdjustments(to: extremeSource, adjustments: adjustments)
+        var rgba = [Float](repeating: 0, count: 4)
+        CIContextManager.shared.getRenderContext().render(
+            extremeOutput,
+            toBitmap: &rgba,
+            rowBytes: 4 * MemoryLayout<Float>.size,
+            bounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+            format: .RGBAf,
+            colorSpace: CGColorSpace(name: CGColorSpace.extendedLinearSRGB)
+        )
+        XCTAssertTrue(rgba.allSatisfy { $0.isFinite }, "极端像素含非有限值: \(rgba)")
+        XCTAssertEqual(rgba[3], 1.0, accuracy: 1e-4, "Alpha 不应变为透明")
+
+        let displayResult = try XCTUnwrap(ImageProcessor.convertToDisplayCGImage(output, adjustments: adjustments))
+        XCTAssertGreaterThan(displayResult.cgImage.width, 0)
+        XCTAssertGreaterThan(displayResult.cgImage.height, 0)
+
+        // 同时验证 SDR 模式（isHDREnabled = false）
+        adjustments.isHDREnabled = false
+        let sdrOutput = ImageProcessor.applyAdjustments(to: source, adjustments: adjustments)
+        let sdrResult = try XCTUnwrap(ImageProcessor.convertToDisplayCGImage(sdrOutput, adjustments: adjustments))
+        XCTAssertGreaterThan(sdrResult.cgImage.width, 0)
+    }
+
     private func makeLinearColorImage(r: Float, g: Float, b: Float) -> CIImage {
         let width = 8
         let height = 8

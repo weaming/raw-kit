@@ -73,7 +73,6 @@ struct ImageDetailView: View {
     @State private var previewRevision = 0
     @State private var displayImage: NSImage?
     @State private var displayImageIsHDR = false
-    @State private var displayImageID = UUID() // HDR 状态变化时强制重建视图
     @State private var isLoading = true
     @State private var showsLoadingIndicator = true
     @State private var loadingIndicatorTask: Task<Void, Never>?
@@ -337,7 +336,6 @@ struct ImageDetailView: View {
                 await waitForViewportSize()
                 guard !Task.isCancelled else { return }
                 await renderCurrentStateImmediately()
-                displayImageID = UUID()
             } else {
                 print("ImageDetailView: ✗ 加载 CIImage 失败（小图）")
             }
@@ -368,7 +366,6 @@ struct ImageDetailView: View {
             await waitForViewportSize()
             guard !Task.isCancelled else { return }
             await renderCurrentStateImmediately()
-            displayImageID = UUID()
         } else {
             print("ImageDetailView: ✗ 加载 CIImage 失败（大图）")
         }
@@ -763,13 +760,8 @@ struct ImageDetailView: View {
 
     @MainActor
     private func setDisplayImage(_ image: NSImage, isHDR: Bool) {
-        let hdrChanged = displayImageIsHDR != isHDR
         displayImage = image
         displayImageIsHDR = isHDR
-        // 仅在 HDR 状态变化时重建视图；常规刷新走 updateNSView 更新 image 属性
-        if hdrChanged {
-            displayImageID = UUID()
-        }
     }
 
     @MainActor
@@ -813,7 +805,7 @@ struct ImageDetailView: View {
                     )
                     .clipped()
                     .allowsHitTesting(!isLoading)
-                    .id(displayImageID) // 使用 displayImageID 强制刷新
+                    .id(imageInfo.id)
                 } else if !showsLoadingIndicator {
                     Text("无法加载图像")
                         .foregroundColor(.secondary)

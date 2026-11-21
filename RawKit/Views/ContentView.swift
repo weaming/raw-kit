@@ -95,8 +95,8 @@ struct ContentView: View {
               currentSession.apply(preset)
               syncActiveAdjustments(from: currentSession)
             },
-            onLoadLUT: { url in
-              currentSession.applyLUT(url)
+            onLoadLUT: { url, profile, alpha in
+              currentSession.applyLUT(url, profile: profile, alpha: alpha)
               syncActiveAdjustments(from: currentSession)
             }
           )

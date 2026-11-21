@@ -58,9 +58,15 @@ final class ImageEditingSession: Identifiable {
         commit(adjustments, recordMode: .immediate, syncState: true)
     }
 
-    func applyLUT(_ url: URL?) {
+    func applyLUT(_ url: URL?, profile: LUTColorProfile? = nil, alpha: Double? = nil) {
         var updated = state.adjustments
         updated.lutURL = url
+        if let profile {
+            updated.lutColorProfile = profile
+        }
+        if let alpha {
+            updated.lutAlpha = alpha
+        }
         apply(updated)
     }
 

@@ -8,7 +8,7 @@ struct LeftSidebarView: View {
     let editingSessionID: UUID
     @ObservedObject var editingState: ImageEditingState
     let onLoadPreset: (ImageAdjustments) -> Void
-    let onLoadLUT: (URL?) -> Void
+    let onLoadLUT: (URL?, LUTColorProfile?, Double?) -> Void
 
     private let minWidth = 200.0
     private let maxWidth = 400.0

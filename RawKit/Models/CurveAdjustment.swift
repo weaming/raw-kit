@@ -9,81 +9,99 @@ struct CurveAdjustment: Equatable, Codable {
     #include <CoreImage/CoreImage.h>
     using namespace metal;
     extern "C" namespace coreimage {
+        float safeFinite(float value, float fallback) {
+            return isfinite(value) ? value : fallback;
+        }
+
+        float safePow(float base, float exponent) {
+            if (!isfinite(base) || base <= 1e-7) {
+                return 0.0;
+            }
+            float result = pow(base, exponent);
+            return isfinite(result) ? result : 0.0;
+        }
+
         float encodeSRGB(float value) {
-            float v = max(value, 0.0);
+            float v = max(safeFinite(value, 0.0), 0.0);
             if (v <= 0.0031308) {
                 return 12.92 * v;
             }
-            return 1.055 * pow(v, 1.0 / 2.4) - 0.055;
+            return 1.055 * safePow(v, 1.0 / 2.4) - 0.055;
         }
 
         float decodeSRGB(float value) {
-            float v = max(value, 0.0);
+            float v = max(safeFinite(value, 0.0), 0.0);
             if (v <= 0.04045) {
                 return v / 12.92;
             }
-            return pow((v + 0.055) / 1.055, 2.4);
+            return safePow((v + 0.055) / 1.055, 2.4);
         }
 
         float sampleCurve1D(sampler curveTex, float x) {
-            float clamped = clamp(x, 0.0, 1.0);
+            float clamped = clamp(safeFinite(x, 0.0), 0.0, 1.0);
             float coordX = clamped * 255.0 + 0.5;
-            return curveTex.sample(curveTex.transform(float2(coordX, 0.5))).r;
+            return safeFinite(curveTex.sample(curveTex.transform(float2(coordX, 0.5))).r, clamped);
         }
 
         float mapLinearChannelWithPerceptualCurve(float linearValue, sampler curveTex) {
-            if (linearValue < 0.0) {
+            float safeValue = clamp(safeFinite(linearValue, 0.0), -64.0, 64.0);
+            if (safeValue < 0.0) {
                 float blackOut = decodeSRGB(sampleCurve1D(curveTex, 0.0));
-                return linearValue + blackOut;
+                return safeValue + blackOut;
             }
 
-            if (linearValue <= 1.0) {
-                float encoded = encodeSRGB(linearValue);
+            if (safeValue <= 1.0) {
+                float encoded = encodeSRGB(safeValue);
                 float mappedEncoded = sampleCurve1D(curveTex, encoded);
                 return decodeSRGB(mappedEncoded);
             }
 
             // HDR 高光 (> 1.0)：锚定在 1.0 处的曲线输出，平滑延续超白动态范围，避免截断 HDR
             float whiteOut = decodeSRGB(sampleCurve1D(curveTex, 1.0));
-            return whiteOut + (linearValue - 1.0);
+            return whiteOut + (safeValue - 1.0);
         }
 
         [[ stitchable ]] float4 applyPerceptualCurveKernel(sampler image, sampler curveTex, float mode) {
             float4 pixel = image.sample(image.coord());
-            float3 rgb = pixel.rgb;
+            float3 rgb = float3(
+                clamp(safeFinite(pixel.r, 0.0), -64.0, 64.0),
+                clamp(safeFinite(pixel.g, 0.0), -64.0, 64.0),
+                clamp(safeFinite(pixel.b, 0.0), -64.0, 64.0)
+            );
+            float alpha = clamp(safeFinite(pixel.a, 1.0), 0.0, 1.0);
 
             // mode: 0 = RGB, 1 = Red, 2 = Green, 3 = Blue, 4 = Luminance
             if (mode < 0.5) {
                 rgb.r = mapLinearChannelWithPerceptualCurve(rgb.r, curveTex);
                 rgb.g = mapLinearChannelWithPerceptualCurve(rgb.g, curveTex);
                 rgb.b = mapLinearChannelWithPerceptualCurve(rgb.b, curveTex);
-                return float4(rgb, pixel.a);
+                return float4(rgb, alpha);
             }
 
             if (mode < 1.5) {
                 rgb.r = mapLinearChannelWithPerceptualCurve(rgb.r, curveTex);
-                return float4(rgb, pixel.a);
+                return float4(rgb, alpha);
             }
 
             if (mode < 2.5) {
                 rgb.g = mapLinearChannelWithPerceptualCurve(rgb.g, curveTex);
-                return float4(rgb, pixel.a);
+                return float4(rgb, alpha);
             }
 
             if (mode < 3.5) {
                 rgb.b = mapLinearChannelWithPerceptualCurve(rgb.b, curveTex);
-                return float4(rgb, pixel.a);
+                return float4(rgb, alpha);
             }
 
             float luminance = max(dot(rgb, float3(0.2126, 0.7152, 0.0722)), 0.0);
             if (luminance <= 1e-5) {
                 float blackLift = decodeSRGB(sampleCurve1D(curveTex, 0.0));
-                return float4(rgb + float3(blackLift), pixel.a);
+                return float4(rgb + float3(blackLift), alpha);
             }
 
             float mappedLuminance = mapLinearChannelWithPerceptualCurve(luminance, curveTex);
             float scale = mappedLuminance / luminance;
-            return float4(rgb * scale, pixel.a);
+            return float4(rgb * scale, alpha);
         }
     }
     """

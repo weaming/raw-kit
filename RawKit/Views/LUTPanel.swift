@@ -10,7 +10,7 @@ struct LUTPanel: View, Equatable {
     }
 
     let editingSessionID: UUID
-    let onLoadLUT: (URL?) -> Void
+    let onLoadLUT: (URL?, LUTColorProfile?, Double?) -> Void
     @Binding var lutAlpha: Double
     @Binding var currentLUTURL: URL?
     @Binding var adjustments: ImageAdjustments
@@ -124,7 +124,7 @@ struct LUTPanel: View, Equatable {
                             isSelected: selectedLUT == nil,
                             onSelect: {
                                 selectedLUT = nil
-                                onLoadLUT(nil)
+                                onLoadLUT(nil, nil, nil)
                             },
                             onDelete: nil
                         )
@@ -221,11 +221,9 @@ struct LUTPanel: View, Equatable {
         if collapsedGroupIDs.remove(lutFile.sourceGroup.id) != nil {
             saveCollapsedGroupIDs()
         }
-        lutAlpha = 1.0
 
         let nextProfile = lutProfiles[lutFile.url.path] ?? .default
-        adjustments.lutColorProfile = nextProfile
-        onLoadLUT(lutFile.url)
+        onLoadLUT(lutFile.url, nextProfile, 1.0)
     }
 
     private func syncSelectedLUT() {

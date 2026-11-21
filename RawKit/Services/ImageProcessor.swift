@@ -194,8 +194,32 @@ class ImageProcessor {
   }
 
   private static let colorKernelHelpers = """
+    float safeFinite(float value, float fallback) {
+        return isfinite(value) ? value : fallback;
+    }
+
+    vec3 safeFiniteVec3(vec3 color) {
+        return vec3(
+            clamp(safeFinite(color.r, 0.0), -64.0, 64.0),
+            clamp(safeFinite(color.g, 0.0), -64.0, 64.0),
+            clamp(safeFinite(color.b, 0.0), -64.0, 64.0)
+        );
+    }
+
+    float safeAlpha(float alpha) {
+        return clamp(safeFinite(alpha, 1.0), 0.0, 1.0);
+    }
+
+    float safePow(float base, float exponent) {
+        if (!isfinite(base) || base <= 1e-7) {
+            return 0.0;
+        }
+        float result = pow(base, exponent);
+        return isfinite(result) ? result : 0.0;
+    }
+
     float positive(float value) {
-        return max(value, 0.0);
+        return max(safeFinite(value, 0.0), 0.0);
     }
 
     float encodeSRGBValue(float value) {
@@ -203,7 +227,7 @@ class ImageProcessor {
         if (v <= 0.0031308) {
             return 12.92 * v;
         }
-        return 1.055 * pow(v, 1.0 / 2.4) - 0.055;
+        return 1.055 * safePow(v, 1.0 / 2.4) - 0.055;
     }
 
     float decodeSRGBValue(float value) {
@@ -211,15 +235,15 @@ class ImageProcessor {
         if (v <= 0.04045) {
             return v / 12.92;
         }
-        return pow((v + 0.055) / 1.055, 2.4);
+        return safePow((v + 0.055) / 1.055, 2.4);
     }
 
     float encodeGammaValue(float value, float gamma) {
-        return pow(positive(value), 1.0 / gamma);
+        return safePow(positive(value), 1.0 / gamma);
     }
 
     float decodeGammaValue(float value, float gamma) {
-        return pow(positive(value), gamma);
+        return safePow(positive(value), gamma);
     }
 
     float encodeRec709Value(float value) {
@@ -227,7 +251,7 @@ class ImageProcessor {
         if (v < 0.018) {
             return 4.5 * v;
         }
-        return 1.099 * pow(v, 0.45) - 0.099;
+        return 1.099 * safePow(v, 0.45) - 0.099;
     }
 
     float decodeRec709Value(float value) {
@@ -235,7 +259,7 @@ class ImageProcessor {
         if (v < 0.081) {
             return v / 4.5;
         }
-        return pow((v + 0.099) / 1.099, 1.0 / 0.45);
+        return safePow((v + 0.099) / 1.099, 1.0 / 0.45);
     }
 
     float encodeHLGValue(float value) {
@@ -243,11 +267,11 @@ class ImageProcessor {
         if (v <= (1.0 / 12.0)) {
             return sqrt(3.0 * v);
         }
-        return 0.17883277 * log(12.0 * v - 0.28466892) + 0.55991073;
+        return 0.17883277 * log(max(12.0 * v - 0.28466892, 1e-6)) + 0.55991073;
     }
 
     float decodeHLGValue(float value) {
-        float v = positive(value);
+        float v = clamp(safeFinite(value, 0.0), 0.0, 1.25);
         if (v <= 0.5) {
             return (v * v) / 3.0;
         }
@@ -255,29 +279,29 @@ class ImageProcessor {
     }
 
     float encodePQValue(float value) {
-        float v = positive(value);
+        float v = clamp(positive(value), 0.0, 1.0);
         float m1 = 0.1593017578125;
         float m2 = 78.84375;
         float c1 = 0.8359375;
         float c2 = 18.8515625;
         float c3 = 18.6875;
-        float powered = pow(v, m1);
+        float powered = safePow(v, m1);
         float numerator = c1 + c2 * powered;
         float denominator = 1.0 + c3 * powered;
-        return pow(numerator / denominator, m2);
+        return safePow(numerator / max(denominator, 1e-6), m2);
     }
 
     float decodePQValue(float value) {
-        float v = positive(value);
+        float v = clamp(safeFinite(value, 0.0), 0.0, 1.0);
         float m1 = 0.1593017578125;
         float m2 = 78.84375;
         float c1 = 0.8359375;
         float c2 = 18.8515625;
         float c3 = 18.6875;
-        float powered = pow(v, 1.0 / m2);
+        float powered = safePow(v, 1.0 / m2);
         float numerator = max(powered - c1, 0.0);
-        float denominator = c2 - c3 * powered;
-        return pow(numerator / denominator, 1.0 / m1);
+        float denominator = max(c2 - c3 * powered, 1e-6);
+        return safePow(numerator / denominator, 1.0 / m1);
     }
 
     float encodeFLogValue(float value) {
@@ -289,7 +313,7 @@ class ImageProcessor {
     }
 
     float decodeFLogValue(float value) {
-        float v = positive(value);
+        float v = clamp(safeFinite(value, 0.0), 0.0, 1.2);
         if (v >= 0.100537775223865) {
             return exp(((v - 0.790453) / 0.344676) * log(10.0)) / 0.555556 - 0.009468 / 0.555556;
         }
@@ -305,7 +329,7 @@ class ImageProcessor {
     }
 
     float decodeFLog2Value(float value) {
-        float v = positive(value);
+        float v = clamp(safeFinite(value, 0.0), 0.0, 1.2);
         if (v >= 0.100686685370811) {
             return exp(((v - 0.384316) / 0.245281) * log(10.0)) / 5.555556 - 0.064829 / 5.555556;
         }
@@ -313,7 +337,7 @@ class ImageProcessor {
     }
 
     float encodeSLog2Value(float value) {
-        float v = value;
+        float v = safeFinite(value, 0.0);
         if (v >= 0.0) {
             return 0.432699 * log(155.0 * v / 219.0 + 0.037584) / log(10.0) + 0.646596;
         }
@@ -321,10 +345,11 @@ class ImageProcessor {
     }
 
     float decodeSLog2Value(float value) {
-        if (value >= 0.030001222851889303) {
-            return 219.0 * (pow(10.0, (value - 0.646596) / 0.432699) - 0.037584) / 155.0;
+        float v = clamp(safeFinite(value, 0.0), -0.5, 1.2);
+        if (v >= 0.030001222851889303) {
+            return 219.0 * (pow(10.0, (v - 0.646596) / 0.432699) - 0.037584) / 155.0;
         }
-        return (value - 0.030001222851889303) / 3.53881278538813;
+        return (v - 0.030001222851889303) / 3.53881278538813;
     }
 
     float encodeSLog3Value(float value) {
@@ -336,7 +361,7 @@ class ImageProcessor {
     }
 
     float decodeSLog3Value(float value) {
-        float v = positive(value);
+        float v = clamp(safeFinite(value, 0.0), 0.0, 1.2);
         if (v >= 171.2102946929 / 1023.0) {
             return pow(10.0, (v * 1023.0 - 420.0) / 261.5) * 0.19 - 0.01;
         }
@@ -352,7 +377,7 @@ class ImageProcessor {
     }
 
     float decodeDLogValue(float value) {
-        float v = positive(value);
+        float v = clamp(safeFinite(value, 0.0), 0.0, 1.2);
         if (v <= 0.14) {
             return (v - 0.0929) / 6.025;
         }
@@ -368,7 +393,7 @@ class ImageProcessor {
     }
 
     float decodeCanonLog3Value(float value) {
-        float v = positive(value);
+        float v = clamp(safeFinite(value, 0.0), 0.0, 1.2);
         if (v < 0.15742) {
             return (v - 0.12512219) / 2.3069815;
         }
@@ -384,7 +409,7 @@ class ImageProcessor {
     }
 
     float decodeVLogValue(float value) {
-        float v = positive(value);
+        float v = clamp(safeFinite(value, 0.0), 0.0, 1.2);
         if (v < 0.181) {
             return (v - 0.125) / 5.6;
         }
@@ -576,37 +601,44 @@ class ImageProcessor {
     using namespace metal;
     extern "C" namespace coreimage {
     """ + colorKernelHelpers + """
+      [[ stitchable ]] float4 sanitizePixels(sample_t image) {
+          return float4(safeFiniteVec3(image.rgb), safeAlpha(image.a));
+      }
+
       [[ stitchable ]] float4 lutInputTransform(sample_t image, float3 row0, float3 row1, float3 row2, float transferMode, float preserveHDRHighlights, float3 domainMin, float3 domainMax) {
-          float3 linearColor = applyMatrix(image.rgb, row0, row1, row2);
+          float3 safeRGB = safeFiniteVec3(image.rgb);
+          float3 linearColor = applyMatrix(safeRGB, row0, row1, row2);
           float maxComponent = max(linearColor.r, max(linearColor.g, linearColor.b));
           float scale = lutHDRCompressionScale(maxComponent, preserveHDRHighlights);
-          float3 normalizedColor = linearColor / scale;
+          float3 normalizedColor = linearColor / max(scale, 1e-6);
           float3 encodedColor = encodeTransfer(normalizedColor, transferMode);
           float3 domainSpan = max(domainMax - domainMin, float3(1e-5));
-          float3 domainNormalized = (encodedColor - domainMin) / domainSpan;
-          return float4(domainNormalized, image.a);
+          float3 domainNormalized = clamp((encodedColor - domainMin) / domainSpan, float3(0.0), float3(1.0));
+          return float4(domainNormalized, safeAlpha(image.a));
       }
 
       [[ stitchable ]] float4 lutOutputTransform(sample_t image, sample_t originalImage, float3 outRow0, float3 outRow1, float3 outRow2, float3 inRow0, float3 inRow1, float3 inRow2, float transferMode, float preserveHDRHighlights) {
-          float3 linearColor = decodeTransfer(image.rgb, transferMode);
+          float3 linearColor = decodeTransfer(safeFiniteVec3(image.rgb), transferMode);
           float3 workingColor = applyMatrix(linearColor, outRow0, outRow1, outRow2);
-          float3 originalInInputGamut = applyMatrix(originalImage.rgb, inRow0, inRow1, inRow2);
+          float3 originalInInputGamut = applyMatrix(safeFiniteVec3(originalImage.rgb), inRow0, inRow1, inRow2);
           float maxComponent = max(originalInInputGamut.r, max(originalInInputGamut.g, originalInInputGamut.b));
           float highlightScale = lutHDRCompressionScale(maxComponent, preserveHDRHighlights);
-          return float4(workingColor * highlightScale, originalImage.a);
+          return float4(safeFiniteVec3(workingColor * highlightScale), safeAlpha(originalImage.a));
       }
 
       [[ stitchable ]] float4 lerpImages(sample_t original, sample_t target, float alpha) {
-          float t = clamp(alpha, 0.0, 1.0);
-          return mix(original, target, t);
+          float t = clamp(safeFinite(alpha, 1.0), 0.0, 1.0);
+          float3 rgb = mix(safeFiniteVec3(original.rgb), safeFiniteVec3(target.rgb), t);
+          return float4(rgb, safeAlpha(original.a));
       }
 
       [[ stitchable ]] float4 perceptualLuminanceShift(sample_t image, float amount, float pivot, float focusSigma, float maxShift) {
-          float3 color = image.rgb;
+          float3 color = safeFiniteVec3(image.rgb);
+          float alpha = safeAlpha(image.a);
           float luminance = sceneLuminance(color);
 
           if (luminance <= 1e-6 || fabs(amount) <= 1e-6) {
-              return float4(color, image.a);
+              return float4(color, alpha);
           }
 
           float compressedLuma = compressPerceptualLuminance(luminance);
@@ -617,15 +649,16 @@ class ImageProcessor {
           float shiftedLuminance = expandPerceptualLuminance(shiftedCompressedLuma);
           float scale = safeLuminanceScale(luminance, shiftedLuminance);
 
-          return float4(color * scale, image.a);
+          return float4(safeFiniteVec3(color * scale), alpha);
       }
 
       [[ stitchable ]] float4 hdrContrastAdjust(sample_t image, float amount) {
-          float3 color = image.rgb;
+          float3 color = safeFiniteVec3(image.rgb);
+          float alpha = safeAlpha(image.a);
           float luminance = sceneLuminance(color);
 
           if (luminance <= 1e-6 || fabs(amount) <= 1e-6) {
-              return float4(color, image.a);
+              return float4(color, alpha);
           }
 
           float compressedLuma = compressPerceptualLuminance(luminance);
@@ -637,15 +670,16 @@ class ImageProcessor {
           float shiftedLuminance = expandPerceptualLuminance(shiftedCompressedLuma);
           float scale = safeLuminanceScale(luminance, shiftedLuminance);
 
-          return float4(color * scale, image.a);
+          return float4(safeFiniteVec3(color * scale), alpha);
       }
 
       [[ stitchable ]] float4 hdrTonalRangeAdjust(sample_t image, float highlights, float shadows, float whites, float blacks) {
-          float3 color = image.rgb;
+          float3 color = safeFiniteVec3(image.rgb);
+          float alpha = safeAlpha(image.a);
           float luminance = sceneLuminance(color);
 
           if (luminance <= 1e-6) {
-              return float4(color, image.a);
+              return float4(color, alpha);
           }
 
           float compressedLuma = compressPerceptualLuminance(luminance);
@@ -661,7 +695,7 @@ class ImageProcessor {
               whites * 0.68 * whiteWeight;
 
           if (fabs(shift) <= 1e-6) {
-              return float4(color, image.a);
+              return float4(color, alpha);
           }
 
           float shiftedDisplayLuma = logisticValue(logitValue(displayLuma) + shift);
@@ -669,11 +703,12 @@ class ImageProcessor {
           float shiftedLuminance = expandPerceptualLuminance(shiftedCompressedLuma);
           float scale = safeLuminanceScale(luminance, shiftedLuminance);
 
-          return float4(color * scale, image.a);
+          return float4(safeFiniteVec3(color * scale), alpha);
       }
 
       [[ stitchable ]] float4 hdrColorfulnessAdjust(sample_t image, float saturation, float vibrance) {
-          float3 color = image.rgb;
+          float3 color = safeFiniteVec3(image.rgb);
+          float alpha = safeAlpha(image.a);
           float luminance = sceneLuminance(color);
           float3 grayColor = float3(luminance);
           float maxComponent = max(max(color.r, max(color.g, color.b)), 0.0);
@@ -686,15 +721,16 @@ class ImageProcessor {
           float saturationScale = max(0.0, saturation * vibranceScale);
           float3 adjustedColor = grayColor + (color - grayColor) * saturationScale;
 
-          return float4(adjustedColor, image.a);
+          return float4(safeFiniteVec3(adjustedColor), alpha);
       }
 
       [[ stitchable ]] float4 hdrDisplayBoost(sample_t image, float brightness, float highlights, float whites, float headroom) {
-          float3 color = image.rgb;
+          float3 color = safeFiniteVec3(image.rgb);
+          float alpha = safeAlpha(image.a);
           float luminance = sceneLuminance(color);
 
           if (luminance <= 1e-6) {
-              return float4(color, image.a);
+              return float4(color, alpha);
           }
 
           float displayLuma = encodeSRGBValue(compressPerceptualLuminance(luminance));
@@ -717,7 +753,7 @@ class ImageProcessor {
               boostedColor *= (finalPeak / peak);
           }
 
-          return float4(boostedColor, image.a);
+          return float4(safeFiniteVec3(boostedColor), alpha);
       }
       }
       """
@@ -735,6 +771,8 @@ class ImageProcessor {
       return [:]
     }
   }()
+
+  private static let sanitizePixelsKernel: CIColorKernel? = colorKernels["sanitizePixels"]
 
   private static let lutInputTransformKernel: CIColorKernel? = colorKernels["lutInputTransform"]
 
@@ -1359,18 +1397,24 @@ class ImageProcessor {
   private static func createStandardDisplayCGImage(_ ciImage: CIImage, from extent: CGRect)
     -> CGImage?
   {
-    ciContext.createCGImage(
-      ciImage,
+    let safeImage = sanitizeImagePixels(ciImage)
+    return ciContext.createCGImage(
+      safeImage,
       from: extent,
-      format: .RGBAh,
+      format: .RGBA16,
       colorSpace: standardDisplayColorSpace
     )
       ?? ciContext.createCGImage(
-        ciImage,
+        safeImage,
         from: extent,
         format: .RGBA8,
         colorSpace: standardDisplayColorSpace
       )
+  }
+
+  private static func sanitizeImagePixels(_ image: CIImage) -> CIImage {
+    guard let kernel = sanitizePixelsKernel else { return image }
+    return kernel.apply(extent: image.extent, arguments: [image]) ?? image
   }
 
   private static func loadWithCoreImage(from url: URL) -> CIImage? {
@@ -2207,12 +2251,12 @@ class ImageProcessor {
       )
     }
 
-    if adjustments.saturation != 1.0 {
-      result = applySaturation(to: result, value: adjustments.saturation)
-    }
-
-    if adjustments.vibrance != 0.0 {
-      result = applyVibrance(to: result, value: adjustments.vibrance)
+    if adjustments.saturation != 1.0 || adjustments.vibrance != 0.0 {
+      result = applyColorfulness(
+        to: result,
+        saturation: adjustments.saturation,
+        vibrance: adjustments.vibrance
+      )
     }
 
     // 检查是否需要应用白平衡调整（从 D65 基准调整到目标白平衡）
@@ -2227,7 +2271,7 @@ class ImageProcessor {
     }
 
     if adjustments.clarity != 0.0 {
-      result = applyClarity(to: result, value: adjustments.clarity)
+      result = applyClarity(to: sanitizeImagePixels(result), value: adjustments.clarity)
     }
 
     if adjustments.dehaze != 0.0 {
@@ -2276,7 +2320,12 @@ class ImageProcessor {
 
     // 输出锐化/柔化放在 LUT 与 HDR 之后，避免将锐化振铃或模糊边缘送入 3D LUT。
     if adjustments.sharpness != 0.0 {
-      result = applySharpness(to: result, value: adjustments.sharpness)
+      result = applySharpness(to: sanitizeImagePixels(result), value: adjustments.sharpness)
+    }
+
+    result = sanitizeImagePixels(result)
+    if result.extent.isEmpty || result.extent.isInfinite {
+      return image
     }
 
     return result
@@ -2296,11 +2345,12 @@ class ImageProcessor {
       return nil
     }
 
+    let safeImage = sanitizeImagePixels(ciImage)
     let outputImage: CIImage
     if #available(macOS 16.0, *) {
-      outputImage = ciImage.settingContentHeadroom(Float(adjustments.hdrHeadroom))
+      outputImage = safeImage.settingContentHeadroom(Float(adjustments.hdrHeadroom))
     } else {
-      outputImage = ciImage
+      outputImage = safeImage
     }
 
     let hdrColorSpace =
@@ -2452,14 +2502,6 @@ class ImageProcessor {
         CGFloat(value),
       ]
     ) ?? image
-  }
-
-  private static func applySaturation(to image: CIImage, value: Double) -> CIImage {
-    applyColorfulness(to: image, saturation: value, vibrance: 0.0)
-  }
-
-  private static func applyVibrance(to image: CIImage, value: Double) -> CIImage {
-    applyColorfulness(to: image, saturation: 1.0, vibrance: value)
   }
 
   private static func applyColorfulness(
