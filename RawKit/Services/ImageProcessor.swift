@@ -321,11 +321,10 @@ class ImageProcessor {
     }
 
     float decodeSLog2Value(float value) {
-        float v = positive(value);
-        if (v >= 0.030001222851889303) {
-            return 219.0 * (pow(10.0, (v - 0.646596) / 0.432699) - 0.037584) / 155.0;
+        if (value >= 0.030001222851889303) {
+            return 219.0 * (pow(10.0, (value - 0.646596) / 0.432699) - 0.037584) / 155.0;
         }
-        return (v - 0.030001222851889303) / 3.53881278538813;
+        return (value - 0.030001222851889303) / 3.53881278538813;
     }
 
     float encodeSLog3Value(float value) {
@@ -2261,18 +2260,7 @@ class ImageProcessor {
       result = adjustments.luminanceCurve.apply(to: result, channel: .luminance)
     }
 
-    if adjustments.sharpness != 0.0 {
-      result = applySharpness(to: result, value: adjustments.sharpness)
-    }
-
-    var hasAppliedHDRAdjustments = false
-
     if let lutURL = adjustments.lutURL {
-      if adjustments.isHDREnabled {
-        result = applyHDRAdjustmentsIfNeeded(to: result, adjustments: adjustments)
-        hasAppliedHDRAdjustments = true
-      }
-
       result = applyLUT(
         to: result,
         lutURL: lutURL,
@@ -2280,14 +2268,15 @@ class ImageProcessor {
         profile: adjustments.lutColorProfile,
         isHDRPreserving: adjustments.isHDREnabled
       )
-
-      if hasAppliedHDRAdjustments, #available(macOS 16.0, *) {
-        result = result.settingContentHeadroom(Float(adjustments.hdrHeadroom))
-      }
     }
 
-    if !hasAppliedHDRAdjustments {
-      result = applyHDRAdjustmentsIfNeeded(to: result, adjustments: adjustments)
+    // HDR 增强与 headroom 肩部保护统一在 LUT 之后执行，
+    // 避免 LUT 冲破 hdrHeadroom 或被 Log/PQ LUT 抵消 HDR 增益。
+    result = applyHDRAdjustmentsIfNeeded(to: result, adjustments: adjustments)
+
+    // 输出锐化/柔化放在 LUT 与 HDR 之后，避免将锐化振铃或模糊边缘送入 3D LUT。
+    if adjustments.sharpness != 0.0 {
+      result = applySharpness(to: result, value: adjustments.sharpness)
     }
 
     return result
@@ -2623,16 +2612,23 @@ class ImageProcessor {
   }
 
   private static func applyClarity(to image: CIImage, value: Double) -> CIImage {
+    let originalExtent = image.extent
+    let clamped = image.clampedToExtent()
+
+    if value < 0 {
+      guard let blurFilter = CIFilter(name: "CIGaussianBlur") else { return image }
+      blurFilter.setValue(clamped, forKey: kCIInputImageKey)
+      blurFilter.setValue(abs(value) * 6.0, forKey: kCIInputRadiusKey)
+      guard let blurred = blurFilter.outputImage?.cropped(to: originalExtent) else { return image }
+      return applyLUTAlpha(original: image, lutApplied: blurred, alpha: min(abs(value) * 0.5, 0.5))
+    }
+
     guard let filter = CIFilter(name: "CIUnsharpMask") else { return image }
-    filter.setValue(image, forKey: kCIInputImageKey)
+    filter.setValue(clamped, forKey: kCIInputImageKey)
+    filter.setValue(value * 10.0, forKey: kCIInputRadiusKey)
+    filter.setValue(value * 2.0, forKey: kCIInputIntensityKey)
 
-    let radius = abs(value) * 10.0
-    let intensity = value > 0 ? value * 2.0 : value
-
-    filter.setValue(radius, forKey: kCIInputRadiusKey)
-    filter.setValue(intensity, forKey: kCIInputIntensityKey)
-
-    return filter.outputImage ?? image
+    return filter.outputImage?.cropped(to: originalExtent) ?? image
   }
 
   private static func applyDehaze(to image: CIImage, value: Double) -> CIImage {
@@ -2645,16 +2641,19 @@ class ImageProcessor {
   }
 
   private static func applySharpness(to image: CIImage, value: Double) -> CIImage {
+    let originalExtent = image.extent
+    let clamped = image.clampedToExtent()
+
     if value < 0 {
       guard let filter = CIFilter(name: "CIGaussianBlur") else { return image }
-      filter.setValue(image, forKey: kCIInputImageKey)
+      filter.setValue(clamped, forKey: kCIInputImageKey)
       filter.setValue(abs(value) * 2.0, forKey: kCIInputRadiusKey)
-      return filter.outputImage ?? image
+      return filter.outputImage?.cropped(to: originalExtent) ?? image
     } else {
       guard let filter = CIFilter(name: "CISharpenLuminance") else { return image }
-      filter.setValue(image, forKey: kCIInputImageKey)
+      filter.setValue(clamped, forKey: kCIInputImageKey)
       filter.setValue(value, forKey: kCIInputSharpnessKey)
-      return filter.outputImage ?? image
+      return filter.outputImage?.cropped(to: originalExtent) ?? image
     }
   }
 
@@ -2692,6 +2691,10 @@ class ImageProcessor {
     profile: LUTColorProfile,
     isHDRPreserving: Bool
   ) -> CIImage {
+    guard alpha > 0.001 else {
+      return image
+    }
+
     guard let parsedLUT = cachedLUTData(from: lutURL) else {
       return image
     }

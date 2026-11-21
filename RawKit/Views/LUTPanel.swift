@@ -217,26 +217,13 @@ struct LUTPanel: View, Equatable {
     }
 
     private func selectLUT(_ lutFile: LUTFile) {
-        let previousSelectionExisted = selectedLUT != nil
-        let previousProfile = adjustments.lutColorProfile
-
         selectedLUT = lutFile.id
         if collapsedGroupIDs.remove(lutFile.sourceGroup.id) != nil {
             saveCollapsedGroupIDs()
         }
         lutAlpha = 1.0
 
-        let nextProfile: LUTColorProfile
-        if let savedProfile = lutProfiles[lutFile.url.path] {
-            nextProfile = savedProfile
-        } else if previousSelectionExisted {
-            nextProfile = previousProfile
-            lutProfiles[lutFile.url.path] = previousProfile
-            saveLUTColorProfiles()
-        } else {
-            nextProfile = .default
-        }
-
+        let nextProfile = lutProfiles[lutFile.url.path] ?? .default
         adjustments.lutColorProfile = nextProfile
         onLoadLUT(lutFile.url)
     }

@@ -14,10 +14,15 @@ class LUTGenerator {
 
         print("LUTGenerator: Identity LUT 创建成功，尺寸: \(identityLUT.extent)")
 
-        // 应用所有调整到identity LUT
+        // 仅保留点运算色彩调整：移除构图变换与空间卷积滤镜（清晰度/锐化），避免破坏 LUT 像素网格
+        var colorOnlyAdjustments = adjustments
+        colorOnlyAdjustments.resetTransform()
+        colorOnlyAdjustments.clarity = 0.0
+        colorOnlyAdjustments.sharpness = 0.0
+
         let adjustedLUT = ImageProcessor.applyAdjustments(
             to: identityLUT,
-            adjustments: adjustments
+            adjustments: colorOnlyAdjustments
         )
 
         print("LUTGenerator: 调整应用完成")

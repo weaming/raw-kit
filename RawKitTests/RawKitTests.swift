@@ -363,6 +363,62 @@ final class RawKitTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: outputURL), savedData)
     }
 
+    func testLUTStackedWithSharpnessClarityHDRAndLUTGenerator() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("RawKitLUTStack-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let lutURL = tempDir.appendingPathComponent("boost.cube")
+        let cubeText = """
+        LUT_3D_SIZE 2
+        0 0 0
+        1 0 0
+        0 1 0
+        1 1 0
+        0 0 1
+        1 0 1
+        0 1 1
+        1 1 1
+        """
+        try cubeText.write(to: lutURL, atomically: true, encoding: .utf8)
+
+        let source = makeLinearColorImage(r: 0.5, g: 0.5, b: 0.5)
+        var adjustments = ImageAdjustments.default
+        adjustments.lutURL = lutURL
+        adjustments.lutAlpha = 1.0
+        adjustments.sharpness = -1.0
+        adjustments.clarity = -0.8
+        adjustments.isHDREnabled = true
+        adjustments.hdrHeadroom = 2.0
+        adjustments.hdrBrightness = 2.0
+
+        let output = ImageProcessor.applyAdjustments(to: source, adjustments: adjustments)
+        // 负锐化 + 负清晰度 + LUT 叠加后，extent 不应膨胀
+        XCTAssertEqual(output.extent, source.extent)
+
+        // HDR 增强在 LUT 之后执行，输出受 hdrHeadroom 上限保护
+        let pixel = renderLinearPixel(output)
+        XCTAssertLessThanOrEqual(pixel.r, 2.01)
+        XCTAssertGreaterThan(pixel.r, 0.5)
+
+        // 含旋转/裁切/锐化的调整生成 .cube LUT 不应破坏网格尺寸与色彩
+        adjustments.rotation = 90
+        adjustments.cropLeft = 0.2
+        adjustments.exposure = 1.0
+        adjustments.isHDREnabled = false
+        adjustments.lutURL = nil
+        let generated = await LUTGenerator.generateLUT(from: adjustments, sourceImage: nil, size: 9)
+        let lutImage = try XCTUnwrap(generated)
+        XCTAssertEqual(lutImage.extent, CGRect(x: 0, y: 0, width: 81, height: 9))
+        let cubeURL = tempDir.appendingPathComponent("stacked.cube")
+        try LUTGenerator.saveLUTToCube(lutImage: lutImage, to: cubeURL, size: 9)
+        let parsed = try XCTUnwrap(ImageProcessor.parseLUTData(from: cubeURL))
+        let floats = parsed.data.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+        let midOffset = (4 * 9 * 9 + 4 * 9 + 4) * 4
+        XCTAssertEqual(floats[midOffset], 0.687, accuracy: 0.03)
+    }
+
     private func makeLinearColorImage(r: Float, g: Float, b: Float) -> CIImage {
         let width = 8
         let height = 8
