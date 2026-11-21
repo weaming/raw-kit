@@ -36,7 +36,14 @@ class ImageProcessor {
     case x3fExtract(URL)
   }
 
-  private static var lutCache: [LUTCacheKey: (data: Data, size: Int)] = [:]
+  struct ParsedLUTData {
+    let data: Data
+    let size: Int
+    let domainMin: SIMD3<Float>
+    let domainMax: SIMD3<Float>
+  }
+
+  private static var lutCache: [LUTCacheKey: ParsedLUTData] = [:]
   private static var lutCacheOrder: [LUTCacheKey] = []
   private static let lutCacheLimit = 16
   private static let lutCacheLock = NSLock()
@@ -519,8 +526,7 @@ class ImageProcessor {
     }
 
     float sceneLuminance(vec3 color) {
-        vec3 safeColor = max(color, vec3(0.0));
-        return dot(safeColor, vec3(0.2126, 0.7152, 0.0722));
+        return max(dot(color, vec3(0.2126, 0.7152, 0.0722)), 0.0);
     }
 
     float compressPerceptualLuminance(float value) {
@@ -571,29 +577,37 @@ class ImageProcessor {
     using namespace metal;
     extern "C" namespace coreimage {
     """ + colorKernelHelpers + """
-      [[ stitchable ]] float4 lutInputTransform(sample_t image, float3 row0, float3 row1, float3 row2, float transferMode, float preserveHDRHighlights) {
+      [[ stitchable ]] float4 lutInputTransform(sample_t image, float3 row0, float3 row1, float3 row2, float transferMode, float preserveHDRHighlights, float3 domainMin, float3 domainMax) {
           float3 linearColor = applyMatrix(image.rgb, row0, row1, row2);
           float maxComponent = max(linearColor.r, max(linearColor.g, linearColor.b));
           float scale = lutHDRCompressionScale(maxComponent, preserveHDRHighlights);
           float3 normalizedColor = linearColor / scale;
           float3 encodedColor = encodeTransfer(normalizedColor, transferMode);
-          return float4(encodedColor, image.a);
+          float3 domainSpan = max(domainMax - domainMin, float3(1e-5));
+          float3 domainNormalized = (encodedColor - domainMin) / domainSpan;
+          return float4(domainNormalized, image.a);
       }
 
-      [[ stitchable ]] float4 lutOutputTransform(sample_t image, sample_t originalImage, float3 row0, float3 row1, float3 row2, float transferMode, float preserveHDRHighlights) {
+      [[ stitchable ]] float4 lutOutputTransform(sample_t image, sample_t originalImage, float3 outRow0, float3 outRow1, float3 outRow2, float3 inRow0, float3 inRow1, float3 inRow2, float transferMode, float preserveHDRHighlights) {
           float3 linearColor = decodeTransfer(image.rgb, transferMode);
-          float3 workingColor = applyMatrix(linearColor, row0, row1, row2);
-          float maxComponent = max(originalImage.r, max(originalImage.g, originalImage.b));
+          float3 workingColor = applyMatrix(linearColor, outRow0, outRow1, outRow2);
+          float3 originalInInputGamut = applyMatrix(originalImage.rgb, inRow0, inRow1, inRow2);
+          float maxComponent = max(originalInInputGamut.r, max(originalInInputGamut.g, originalInInputGamut.b));
           float highlightScale = lutHDRCompressionScale(maxComponent, preserveHDRHighlights);
           return float4(workingColor * highlightScale, originalImage.a);
       }
 
+      [[ stitchable ]] float4 lerpImages(sample_t original, sample_t target, float alpha) {
+          float t = clamp(alpha, 0.0, 1.0);
+          return mix(original, target, t);
+      }
+
       [[ stitchable ]] float4 perceptualLuminanceShift(sample_t image, float amount, float pivot, float focusSigma, float maxShift) {
-          float3 safeColor = max(image.rgb, float3(0.0));
-          float luminance = sceneLuminance(safeColor);
+          float3 color = image.rgb;
+          float luminance = sceneLuminance(color);
 
           if (luminance <= 1e-6 || fabs(amount) <= 1e-6) {
-              return float4(safeColor, image.a);
+              return float4(color, image.a);
           }
 
           float compressedLuma = compressPerceptualLuminance(luminance);
@@ -604,15 +618,15 @@ class ImageProcessor {
           float shiftedLuminance = expandPerceptualLuminance(shiftedCompressedLuma);
           float scale = safeLuminanceScale(luminance, shiftedLuminance);
 
-          return float4(safeColor * scale, image.a);
+          return float4(color * scale, image.a);
       }
 
       [[ stitchable ]] float4 hdrContrastAdjust(sample_t image, float amount) {
-          float3 safeColor = max(image.rgb, float3(0.0));
-          float luminance = sceneLuminance(safeColor);
+          float3 color = image.rgb;
+          float luminance = sceneLuminance(color);
 
           if (luminance <= 1e-6 || fabs(amount) <= 1e-6) {
-              return float4(safeColor, image.a);
+              return float4(color, image.a);
           }
 
           float compressedLuma = compressPerceptualLuminance(luminance);
@@ -624,15 +638,15 @@ class ImageProcessor {
           float shiftedLuminance = expandPerceptualLuminance(shiftedCompressedLuma);
           float scale = safeLuminanceScale(luminance, shiftedLuminance);
 
-          return float4(safeColor * scale, image.a);
+          return float4(color * scale, image.a);
       }
 
       [[ stitchable ]] float4 hdrTonalRangeAdjust(sample_t image, float highlights, float shadows, float whites, float blacks) {
-          float3 safeColor = max(image.rgb, float3(0.0));
-          float luminance = sceneLuminance(safeColor);
+          float3 color = image.rgb;
+          float luminance = sceneLuminance(color);
 
           if (luminance <= 1e-6) {
-              return float4(safeColor, image.a);
+              return float4(color, image.a);
           }
 
           float compressedLuma = compressPerceptualLuminance(luminance);
@@ -648,7 +662,7 @@ class ImageProcessor {
               whites * 0.68 * whiteWeight;
 
           if (fabs(shift) <= 1e-6) {
-              return float4(safeColor, image.a);
+              return float4(color, image.a);
           }
 
           float shiftedDisplayLuma = logisticValue(logitValue(displayLuma) + shift);
@@ -656,32 +670,32 @@ class ImageProcessor {
           float shiftedLuminance = expandPerceptualLuminance(shiftedCompressedLuma);
           float scale = safeLuminanceScale(luminance, shiftedLuminance);
 
-          return float4(safeColor * scale, image.a);
+          return float4(color * scale, image.a);
       }
 
       [[ stitchable ]] float4 hdrColorfulnessAdjust(sample_t image, float saturation, float vibrance) {
-          float3 safeColor = max(image.rgb, float3(0.0));
-          float luminance = sceneLuminance(safeColor);
+          float3 color = image.rgb;
+          float luminance = sceneLuminance(color);
           float3 grayColor = float3(luminance);
-          float maxComponent = max(safeColor.r, max(safeColor.g, safeColor.b));
-          float minComponent = min(safeColor.r, min(safeColor.g, safeColor.b));
-          float chroma = (maxComponent - minComponent) / max(maxComponent, 1e-5);
+          float maxComponent = max(max(color.r, max(color.g, color.b)), 0.0);
+          float minComponent = min(color.r, min(color.g, color.b));
+          float chroma = clamp((maxComponent - minComponent) / max(maxComponent, 1e-5), 0.0, 1.0);
           float lowChromaWeight = 1.0 - smoothstep(0.04, 0.78, chroma);
           float positiveVibrance = max(vibrance, 0.0) * lowChromaWeight;
           float negativeVibrance = min(vibrance, 0.0) * mix(0.55, 1.0, smoothstep(0.0, 0.85, chroma));
           float vibranceScale = 1.0 + (positiveVibrance + negativeVibrance) * 1.25;
           float saturationScale = max(0.0, saturation * vibranceScale);
-          float3 adjustedColor = grayColor + (safeColor - grayColor) * saturationScale;
+          float3 adjustedColor = grayColor + (color - grayColor) * saturationScale;
 
-          return float4(max(adjustedColor, float3(0.0)), image.a);
+          return float4(adjustedColor, image.a);
       }
 
       [[ stitchable ]] float4 hdrDisplayBoost(sample_t image, float brightness, float highlights, float whites, float headroom) {
-          float3 safeColor = max(image.rgb, float3(0.0));
-          float luminance = sceneLuminance(safeColor);
+          float3 color = image.rgb;
+          float luminance = sceneLuminance(color);
 
           if (luminance <= 1e-6) {
-              return float4(safeColor, image.a);
+              return float4(color, image.a);
           }
 
           float displayLuma = encodeSRGBValue(compressPerceptualLuminance(luminance));
@@ -693,12 +707,18 @@ class ImageProcessor {
           float whiteScale = 1.0 + whites * 1.60 * whiteWeight;
           float combinedScale = max(0.05, baseScale * max(0.05, highlightScale) * max(0.05, whiteScale));
 
-          float3 boostedColor = safeColor * combinedScale;
+          float3 boostedColor = color * combinedScale;
           float safeHeadroom = max(headroom, 1.0);
-          float3 shoulder = safeHeadroom * boostedColor / (boostedColor + safeHeadroom);
-          float3 protectedColor = mix(boostedColor, shoulder, smoothstep(safeHeadroom * 0.72, safeHeadroom * 1.35, boostedColor));
+          float peak = max(boostedColor.r, max(boostedColor.g, boostedColor.b));
 
-          return float4(min(protectedColor, float3(safeHeadroom)), image.a);
+          if (peak > 1e-6) {
+              float shoulderPeak = safeHeadroom * peak / (peak + safeHeadroom);
+              float protectedPeak = mix(peak, shoulderPeak, smoothstep(safeHeadroom * 0.72, safeHeadroom * 1.35, peak));
+              float finalPeak = min(protectedPeak, safeHeadroom);
+              boostedColor *= (finalPeak / peak);
+          }
+
+          return float4(boostedColor, image.a);
       }
       }
       """
@@ -721,6 +741,8 @@ class ImageProcessor {
 
   private static let lutOutputTransformKernel: CIColorKernel? = colorKernels["lutOutputTransform"]
 
+  private static let lerpImagesKernel: CIColorKernel? = colorKernels["lerpImages"]
+
   private static let perceptualLuminanceShiftKernel: CIColorKernel? = colorKernels[
     "perceptualLuminanceShift"]
 
@@ -740,7 +762,9 @@ class ImageProcessor {
   }
 
   private static var standardDisplayColorSpace: CGColorSpace {
-    CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+    CGColorSpace(name: CGColorSpace.displayP3)
+      ?? CGColorSpace(name: CGColorSpace.sRGB)
+      ?? CGColorSpaceCreateDeviceRGB()
   }
 
   private static func isRawFormat(_ ext: String) -> Bool {
@@ -1339,9 +1363,15 @@ class ImageProcessor {
     ciContext.createCGImage(
       ciImage,
       from: extent,
-      format: .RGBA8,
+      format: .RGBAh,
       colorSpace: standardDisplayColorSpace
     )
+      ?? ciContext.createCGImage(
+        ciImage,
+        from: extent,
+        format: .RGBA8,
+        colorSpace: standardDisplayColorSpace
+      )
   }
 
   private static func loadWithCoreImage(from url: URL) -> CIImage? {
@@ -1832,117 +1862,6 @@ class ImageProcessor {
     return 0.0
   }
 
-  private static func extractPixelData(from ciImage: CIImage) -> [(
-    r: Double, g: Double, b: Double
-  )]? {
-    let extent = ciImage.extent
-    guard extent.width > 0, extent.height > 0 else {
-      return nil
-    }
-
-    let bytesPerPixel = 4
-    let bytesPerRow = Int(extent.width) * bytesPerPixel * MemoryLayout<Float>.size
-    let totalFloats = Int(extent.width) * Int(extent.height) * bytesPerPixel
-
-    var pixelData = [Float](repeating: 0, count: totalFloats)
-
-    let colorSpace = CGColorSpaceCreateDeviceRGB()
-    ciContext.render(
-      ciImage,
-      toBitmap: &pixelData,
-      rowBytes: bytesPerRow,
-      bounds: extent,
-      format: .RGBAf,
-      colorSpace: colorSpace
-    )
-
-    var result: [(r: Double, g: Double, b: Double)] = []
-    let pixelCount = Int(extent.width) * Int(extent.height)
-
-    for i in 0..<pixelCount {
-      let offset = i * bytesPerPixel
-      let r = Double(pixelData[offset])
-      let g = Double(pixelData[offset + 1])
-      let b = Double(pixelData[offset + 2])
-      result.append((r: r, g: g, b: b))
-    }
-
-    return result
-  }
-
-  private static func calculateAverageRGB(from ciImage: CIImage) -> (
-    red: Double, green: Double, blue: Double
-  )? {
-    let extent = ciImage.extent
-    guard extent.width > 0, extent.height > 0 else {
-      return nil
-    }
-
-    let bytesPerPixel = 4
-    let bytesPerRow = Int(extent.width) * bytesPerPixel * MemoryLayout<Float>.size
-    let totalFloats = Int(extent.width) * Int(extent.height) * bytesPerPixel
-
-    var pixelData = [Float](repeating: 0, count: totalFloats)
-
-    let colorSpace = CGColorSpaceCreateDeviceRGB()
-    ciContext.render(
-      ciImage,
-      toBitmap: &pixelData,
-      rowBytes: bytesPerRow,
-      bounds: extent,
-      format: .RGBAf,
-      colorSpace: colorSpace
-    )
-
-    let pixelCount = Int(extent.width) * Int(extent.height)
-
-    // 收集所有亮度值
-    var brightnessValues: [Double] = []
-    for i in 0..<pixelCount {
-      let offset = i * bytesPerPixel
-      let r = Double(pixelData[offset])
-      let g = Double(pixelData[offset + 1])
-      let b = Double(pixelData[offset + 2])
-      let luminance = r * 0.299 + g * 0.587 + b * 0.114
-      brightnessValues.append(luminance)
-    }
-
-    // 使用百分位数确定范围
-    brightnessValues.sort()
-    let lowerBound = brightnessValues[Int(Double(brightnessValues.count) * 0.05)]
-    let upperBound = brightnessValues[Int(Double(brightnessValues.count) * 0.95)]
-
-    var redSum: Double = 0
-    var greenSum: Double = 0
-    var blueSum: Double = 0
-    var validPixelCount = 0
-
-    for i in 0..<pixelCount {
-      let offset = i * bytesPerPixel
-      let r = Double(pixelData[offset])
-      let g = Double(pixelData[offset + 1])
-      let b = Double(pixelData[offset + 2])
-      let luminance = brightnessValues[i]
-
-      if luminance > lowerBound && luminance < upperBound {
-        redSum += r
-        greenSum += g
-        blueSum += b
-        validPixelCount += 1
-      }
-    }
-
-    guard validPixelCount > 0 else {
-      return nil
-    }
-
-    let avgRed = redSum / Double(validPixelCount)
-    let avgGreen = greenSum / Double(validPixelCount)
-    let avgBlue = blueSum / Double(validPixelCount)
-
-    return (avgRed, avgGreen, avgBlue)
-  }
-
   private static func isX3fRawDNG(url: URL) -> Bool {
     guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil),
       let properties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [String: Any],
@@ -2298,7 +2217,9 @@ class ImageProcessor {
     }
 
     // 检查是否需要应用白平衡调整（从 D65 基准调整到目标白平衡）
-    if abs(adjustments.temperature - 6500.0) > 0.01 || abs(adjustments.tint) > 0.01 {
+    if abs(adjustments.temperature - AppConfig.defaultWhitePoint) > 0.01
+      || abs(adjustments.tint) > 0.01
+    {
       result = applyWhiteBalance(
         to: result,
         temperature: adjustments.temperature,
@@ -2514,8 +2435,9 @@ class ImageProcessor {
       return image
     }
 
-    if adjustments.isHDRAutoAdjustmentEnabled || abs(adjustments.hdrBrightness) > 0.0001
-      || abs(adjustments.hdrHighlights) > 0.0001 || abs(adjustments.hdrWhites) > 0.0001
+    if abs(adjustments.hdrBrightness) > 0.0001
+      || abs(adjustments.hdrHighlights) > 0.0001
+      || abs(adjustments.hdrWhites) > 0.0001
     {
       return applyHDRDisplayBoost(to: image, adjustments: adjustments)
     }
@@ -2621,23 +2543,27 @@ class ImageProcessor {
   static func whiteBalanceFromNeutralSample(
     linearRGB: (r: Double, g: Double, b: Double)
   ) -> (temperature: Double, tint: Double)? {
+    guard linearRGB.r.isFinite, linearRGB.g.isFinite, linearRGB.b.isFinite else {
+      return nil
+    }
+
     let r = max(linearRGB.r, 0.000_01)
     let g = max(linearRGB.g, 0.000_01)
     let b = max(linearRGB.b, 0.000_01)
 
     let luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
-    guard luminance > 0.02, max(r, max(g, b)) < 0.99 else {
+    guard luminance > 0.002 else {
       return nil
     }
 
     let inverseGains = (r: 1.0 / r, g: 1.0 / g, b: 1.0 / b)
-    let maxGain = max(inverseGains.r, max(inverseGains.g, inverseGains.b))
-    guard maxGain > 0 else { return nil }
+    let gainLuma = 0.2126 * inverseGains.r + 0.7152 * inverseGains.g + 0.0722 * inverseGains.b
+    guard gainLuma > 0 else { return nil }
 
     let normalizedGains = (
-      r: inverseGains.r / maxGain,
-      g: inverseGains.g / maxGain,
-      b: inverseGains.b / maxGain
+      r: inverseGains.r / gainLuma,
+      g: inverseGains.g / gainLuma,
+      b: inverseGains.b / gainLuma
     )
 
     let rbRatio = normalizedGains.r / max(normalizedGains.b, 0.000_01)
@@ -2661,43 +2587,38 @@ class ImageProcessor {
     return (temperature, tint)
   }
 
-  private static func calculateWhiteBalanceGains(
+  static func calculateWhiteBalanceGains(
     temperature: Double,
     tint: Double
   ) -> (r: Double, g: Double, b: Double) {
-    // 将色温转换为 RGB 增益
-    // 基于 Planckian locus 简化算法
+    // 将色温转换为 RGB 增益（以 AppConfig.defaultWhitePoint D65 为基准）
+    let temp = max(
+      ImageAdjustments.temperatureRange.lowerBound,
+      min(ImageAdjustments.temperatureRange.upperBound, temperature)
+    )
+    let tempRatio = temp / AppConfig.defaultWhitePoint
 
-    // 1. 将色温转换为归一化值 (以 6500K D65 为基准)
-    let temp = max(2000.0, min(25000.0, temperature))
-    let tempRatio = temp / 6500.0
-
-    // 2. 计算基础 R/B 增益（基于色温）
     var rGain: Double
     var bGain: Double
 
     if tempRatio < 1.0 {
-      // 低色温（偏暖/偏黄）-> 增加蓝色，减少红色
       rGain = 1.0
-      bGain = 1.0 / pow(tempRatio, 0.6)  // 温度越低，蓝色增益越高
+      bGain = 1.0 / pow(tempRatio, 0.6)
     } else {
-      // 高色温（偏冷/偏蓝）-> 增加红色，减少蓝色
       rGain = pow(tempRatio, 0.6)
       bGain = 1.0
     }
 
-    // 3. 计算绿色增益（基于色调）
-    // tint > 0: 偏绿，需要减少绿色
-    // tint < 0: 偏品红，需要增加绿色
-    let gGain = 1.0 - (tint / 100.0) * 0.3  // 色调影响相对较小
+    // tint > 0: 偏绿，减少绿色；tint < 0: 偏品红，增加绿色
+    let gGain = max(0.1, 1.0 - (tint / 100.0) * 0.3)
 
-    // 4. 归一化到绿色通道（类似 Python 脚本的做法）
-    let maxGain = max(rGain, max(gGain, bGain))
+    // 按 Rec.709 亮度系数做亮度守恒归一化，避免调节色温/色调时画面整体变暗
+    let gainLuma = max(0.2126 * rGain + 0.7152 * gGain + 0.0722 * bGain, 1e-6)
 
     return (
-      r: rGain / maxGain,
-      g: gGain / maxGain,
-      b: bGain / maxGain
+      r: rGain / gainLuma,
+      g: gGain / gainLuma,
+      b: bGain / gainLuma
     )
   }
 
@@ -2755,6 +2676,15 @@ class ImageProcessor {
     return filter.outputImage
   }
 
+  private static func supportsNativeHDRInput(_ transferFunction: LUTTransferFunction) -> Bool {
+    switch transferFunction {
+    case .hlg, .pq, .fLog, .fLog2, .fLog2C, .sLog2, .sLog3, .dLog, .canonLog3, .vLog:
+      true
+    case .linear, .sRGB, .gamma22, .gamma24, .gamma26, .rec709:
+      false
+    }
+  }
+
   private static func applyLUT(
     to image: CIImage,
     lutURL: URL,
@@ -2762,7 +2692,7 @@ class ImageProcessor {
     profile: LUTColorProfile,
     isHDRPreserving: Bool
   ) -> CIImage {
-    guard let (data, size) = cachedLUTData(from: lutURL) else {
+    guard let parsedLUT = cachedLUTData(from: lutURL) else {
       return image
     }
 
@@ -2775,12 +2705,18 @@ class ImageProcessor {
       to: .sRGB
     )
 
+    // 仅对 SDR 有限域输入传递函数启用 HDR 高光压缩；Log / HLG / PQ 原生支持 > 1.0 场景高光
+    let shouldCompressHDRHighlights =
+      isHDRPreserving && !supportsNativeHDRInput(profile.inputTransfer)
+
     guard
       let imageInLUTSpace = applyLUTInputTransform(
         to: image,
         gamutTransform: workingToInputGamut,
         transferFunction: profile.inputTransfer,
-        isHDRPreserving: isHDRPreserving
+        isHDRPreserving: shouldCompressHDRHighlights,
+        domainMin: parsedLUT.domainMin,
+        domainMax: parsedLUT.domainMax
       )
     else {
       print("ImageProcessor: ⚠️ 无法创建 LUT 输入变换，跳过 LUT")
@@ -2792,8 +2728,8 @@ class ImageProcessor {
     }
 
     filter.setValue(imageInLUTSpace, forKey: kCIInputImageKey)
-    filter.setValue(size, forKey: "inputCubeDimension")
-    filter.setValue(data, forKey: "inputCubeData")
+    filter.setValue(parsedLUT.size, forKey: "inputCubeDimension")
+    filter.setValue(parsedLUT.data, forKey: "inputCubeData")
 
     guard let lutAppliedInLUTSpace = filter.outputImage else {
       return image
@@ -2803,9 +2739,10 @@ class ImageProcessor {
       let lutApplied = applyLUTOutputTransform(
         to: lutAppliedInLUTSpace,
         originalImage: image,
-        gamutTransform: outputToWorkingGamut,
+        outputGamutTransform: outputToWorkingGamut,
+        inputGamutTransform: workingToInputGamut,
         transferFunction: profile.outputTransfer,
-        isHDRPreserving: isHDRPreserving
+        isHDRPreserving: shouldCompressHDRHighlights
       )
     else {
       print("ImageProcessor: ⚠️ 无法创建 LUT 输出变换，跳过 LUT")
@@ -2815,7 +2752,7 @@ class ImageProcessor {
     return applyLUTAlpha(original: image, lutApplied: lutApplied, alpha: alpha)
   }
 
-  private static func cachedLUTData(from url: URL) -> (data: Data, size: Int)? {
+  private static func cachedLUTData(from url: URL) -> ParsedLUTData? {
     guard let key = lutCacheKey(for: url) else {
       return parseLUTData(from: url)
     }
@@ -2833,13 +2770,13 @@ class ImageProcessor {
     return parsed
   }
 
-  private static func cachedLUTData(for key: LUTCacheKey) -> (data: Data, size: Int)? {
+  private static func cachedLUTData(for key: LUTCacheKey) -> ParsedLUTData? {
     lutCacheLock.lock()
     defer { lutCacheLock.unlock() }
     return lutCache[key]
   }
 
-  private static func storeLUTData(_ parsed: (data: Data, size: Int), for key: LUTCacheKey) {
+  private static func storeLUTData(_ parsed: ParsedLUTData, for key: LUTCacheKey) {
     lutCacheLock.lock()
     defer { lutCacheLock.unlock() }
 
@@ -2866,7 +2803,7 @@ class ImageProcessor {
     )
   }
 
-  private static func parseLUTData(from url: URL) -> (data: Data, size: Int)? {
+  static func parseLUTData(from url: URL) -> ParsedLUTData? {
     let fileExtension = url.pathExtension.lowercased()
 
     return switch fileExtension {
@@ -2881,72 +2818,77 @@ class ImageProcessor {
     }
   }
 
-  // 应用LUT的alpha混合
+  // 应用 LUT 的线性混合（避免未预乘 Alpha 导致过曝，并保留 HDR/广色域）
   private static func applyLUTAlpha(
     original: CIImage,
     lutApplied: CIImage,
     alpha: Double
   ) -> CIImage {
-    // 如果alpha接近1，直接返回LUT结果
-    if abs(alpha - 1.0) < 0.001 {
+    let clampedAlpha = min(max(alpha, 0.0), 1.0)
+    if clampedAlpha <= 0.001 {
+      return original
+    }
+    if clampedAlpha >= 0.999 {
       return lutApplied
     }
 
-    // 使用 CIBlendWithMask 或直接插值
-    guard let blendFilter = CIFilter(name: "CISourceOverCompositing") else {
+    guard let kernel = lerpImagesKernel else {
       return lutApplied
     }
 
-    // 调整 LUT 结果的不透明度
-    let alphaFilter = CIFilter(name: "CIColorMatrix")
-    alphaFilter?.setValue(lutApplied, forKey: kCIInputImageKey)
-    alphaFilter?.setValue(CIVector(x: 1, y: 0, z: 0, w: 0), forKey: "inputRVector")
-    alphaFilter?.setValue(CIVector(x: 0, y: 1, z: 0, w: 0), forKey: "inputGVector")
-    alphaFilter?.setValue(CIVector(x: 0, y: 0, z: 1, w: 0), forKey: "inputBVector")
-    alphaFilter?.setValue(CIVector(x: 0, y: 0, z: 0, w: CGFloat(alpha)), forKey: "inputAVector")
-
-    guard let alphaAdjusted = alphaFilter?.outputImage else {
-      return lutApplied
-    }
-
-    blendFilter.setValue(alphaAdjusted, forKey: kCIInputImageKey)
-    blendFilter.setValue(original, forKey: kCIInputBackgroundImageKey)
-
-    return blendFilter.outputImage ?? original
+    return kernel.apply(
+      extent: original.extent,
+      arguments: [original, lutApplied, CGFloat(clampedAlpha)]
+    ) ?? lutApplied
   }
 
-  // 解析 .cube 格式 LUT（Adobe 标准格式）
-  private static func parseCubeLUT(from url: URL) -> (data: Data, size: Int)? {
+  // 解析 .cube 格式 LUT（Adobe 标准格式，支持 DOMAIN_MIN / DOMAIN_MAX）
+  private static func parseCubeLUT(from url: URL) -> ParsedLUTData? {
     guard let lutString = try? String(contentsOf: url, encoding: .utf8) else {
       return nil
     }
 
     let lines = lutString.components(separatedBy: .newlines)
     var cubeSize: Int?
+    var domainMin = SIMD3<Float>(0, 0, 0)
+    var domainMax = SIMD3<Float>(1, 1, 1)
     var floatData: [Float] = []
 
-    // 解析 LUT_3D_SIZE
     for line in lines {
       let trimmed = line.trimmingCharacters(in: .whitespaces)
+      if trimmed.isEmpty || trimmed.hasPrefix("#") || trimmed.hasPrefix("TITLE") {
+        continue
+      }
+
       if trimmed.hasPrefix("LUT_3D_SIZE") {
-        let parts = trimmed.components(separatedBy: .whitespaces)
+        let parts = trimmed.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
         if parts.count >= 2, let size = Int(parts[1]) {
           cubeSize = size
-          break
         }
+        continue
       }
-    }
 
-    guard let size = cubeSize else {
-      return nil
-    }
+      if trimmed.hasPrefix("DOMAIN_MIN") {
+        let values = trimmed.components(separatedBy: .whitespaces).dropFirst().compactMap {
+          Float($0)
+        }
+        if values.count == 3 {
+          domainMin = SIMD3<Float>(values[0], values[1], values[2])
+        }
+        continue
+      }
 
-    // 解析数据
-    for line in lines {
-      let trimmed = line.trimmingCharacters(in: .whitespaces)
-      if trimmed.isEmpty || trimmed.hasPrefix("#") || trimmed.hasPrefix("TITLE")
-        || trimmed.hasPrefix("LUT_") || trimmed.hasPrefix("DOMAIN_")
-      {
+      if trimmed.hasPrefix("DOMAIN_MAX") {
+        let values = trimmed.components(separatedBy: .whitespaces).dropFirst().compactMap {
+          Float($0)
+        }
+        if values.count == 3 {
+          domainMax = SIMD3<Float>(values[0], values[1], values[2])
+        }
+        continue
+      }
+
+      if trimmed.hasPrefix("LUT_") || trimmed.hasPrefix("DOMAIN_") {
         continue
       }
 
@@ -2959,17 +2901,21 @@ class ImageProcessor {
       }
     }
 
+    guard let size = cubeSize else {
+      return nil
+    }
+
     let expectedCount = size * size * size * 4
     guard floatData.count == expectedCount else {
       return nil
     }
 
     let data = Data(bytes: floatData, count: floatData.count * MemoryLayout<Float>.size)
-    return (data, size)
+    return ParsedLUTData(data: data, size: size, domainMin: domainMin, domainMax: domainMax)
   }
 
-  // 解析 .3dl 格式 LUT（Autodesk/Lustre 格式）
-  private static func parse3DLLUT(from url: URL) -> (data: Data, size: Int)? {
+  // 解析 .3dl 格式 LUT（Autodesk/Lustre 格式：B 轴最快，需转置为 CIColorCube 的 R 轴最快）
+  private static func parse3DLLUT(from url: URL) -> ParsedLUTData? {
     guard let lutString = try? String(contentsOf: url, encoding: .utf8) else {
       return nil
     }
@@ -2978,20 +2924,16 @@ class ImageProcessor {
     var rawTriples: [(Float, Float, Float)] = []
     var meshSize: Int?
 
-    // 查找 Mesh 行
     for line in lines {
       let trimmed = line.trimmingCharacters(in: .whitespaces)
       if trimmed.hasPrefix("Mesh") {
-        let parts = trimmed.components(separatedBy: .whitespaces)
+        let parts = trimmed.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
         if parts.count >= 2, let size = Int(parts[1]) {
           meshSize = size
         }
       }
     }
 
-    let size = meshSize ?? 32
-
-    // 解析数据行
     for line in lines {
       let trimmed = line.trimmingCharacters(in: .whitespaces)
       if trimmed.isEmpty || trimmed.hasPrefix("#") || trimmed.hasPrefix("Mesh") {
@@ -3004,42 +2946,62 @@ class ImageProcessor {
       }
     }
 
-    // .3dl 格式值范围常见为 0-1023 或 0-4095。必须用全局范围归一化，
-    // 不能按每一行单独归一化，否则会破坏 LUT 的色彩关系。
-    let maxValue =
-      rawTriples
-      .map { max($0.0, max($0.1, $0.2)) }
-      .max() ?? 1.0
-    let scale = maxValue > 1.0 ? maxValue : 1.0
-
-    var floatData: [Float] = []
-    floatData.reserveCapacity(rawTriples.count * 4)
-    for values in rawTriples {
-      floatData.append(values.0 / scale)
-      floatData.append(values.1 / scale)
-      floatData.append(values.2 / scale)
-      floatData.append(1.0)
-    }
-
-    let expectedCount = size * size * size * 4
-    guard floatData.count == expectedCount else {
+    let inferredSize = Int(round(cbrt(Double(rawTriples.count))))
+    let size = meshSize ?? (inferredSize * inferredSize * inferredSize == rawTriples.count ? inferredSize : 32)
+    let expectedTriples = size * size * size
+    guard rawTriples.count == expectedTriples, size > 1 else {
       return nil
     }
 
+    // 按标准位深上限归一化，避免用暗调 LUT 的实际最大值强行拉白
+    let maxValue = rawTriples.map { max($0.0, max($0.1, $0.2)) }.max() ?? 1.0
+    let scale: Float
+    if maxValue <= 1.0 {
+      scale = 1.0
+    } else if maxValue <= 1023.0 {
+      scale = 1023.0
+    } else if maxValue <= 4095.0 {
+      scale = 4095.0
+    } else if maxValue <= 65535.0 {
+      scale = 65535.0
+    } else {
+      scale = maxValue
+    }
+
+    // .3dl 顺序: 外层 R, 中层 G, 内层 B -> 转置为 CIColorCube 顺序: 外层 B, 中层 G, 内层 R
+    var floatData = [Float](repeating: 0, count: expectedTriples * 4)
+    var srcIndex = 0
+    for r in 0..<size {
+      for g in 0..<size {
+        for b in 0..<size {
+          let triple = rawTriples[srcIndex]
+          srcIndex += 1
+
+          let dstOffset = (b * size * size + g * size + r) * 4
+          floatData[dstOffset + 0] = triple.0 / scale
+          floatData[dstOffset + 1] = triple.1 / scale
+          floatData[dstOffset + 2] = triple.2 / scale
+          floatData[dstOffset + 3] = 1.0
+        }
+      }
+    }
+
     let data = Data(bytes: floatData, count: floatData.count * MemoryLayout<Float>.size)
-    return (data, size)
+    return ParsedLUTData(
+      data: data,
+      size: size,
+      domainMin: SIMD3<Float>(0, 0, 0),
+      domainMax: SIMD3<Float>(1, 1, 1)
+    )
   }
 
   // 解析二进制 .lut 格式
-  private static func parseBinaryLUT(from url: URL) -> (data: Data, size: Int)? {
+  private static func parseBinaryLUT(from url: URL) -> ParsedLUTData? {
     guard let rawData = try? Data(contentsOf: url) else {
       return nil
     }
 
-    // 常见的二进制 LUT 格式：64x64x64 或 32x32x32
-    // 尝试推断尺寸
     let dataSize = rawData.count
-
     let possibleSizes = [64, 33, 32, 17, 16]
     var cubeSize: Int?
 
@@ -3055,9 +3017,9 @@ class ImageProcessor {
       return nil
     }
 
-    // 读取并转换数据
     var floatData: [Float] = []
     let floatCount = size * size * size * 3
+    floatData.reserveCapacity(size * size * size * 4)
 
     rawData.withUnsafeBytes { (ptr: UnsafeRawBufferPointer) in
       let floatPtr = ptr.bindMemory(to: Float.self)
@@ -3071,7 +3033,12 @@ class ImageProcessor {
     }
 
     let data = Data(bytes: floatData, count: floatData.count * MemoryLayout<Float>.size)
-    return (data, size)
+    return ParsedLUTData(
+      data: data,
+      size: size,
+      domainMin: SIMD3<Float>(0, 0, 0),
+      domainMax: SIMD3<Float>(1, 1, 1)
+    )
   }
 
   private static func applyTransform(
@@ -3244,7 +3211,7 @@ class ImageProcessor {
       .transformed(by: CGAffineTransform(translationX: -cropRect.minX, y: -cropRect.minY))
   }
 
-  private static func gamutTransformMatrix(
+  static func gamutTransformMatrix(
     from source: LUTGamut,
     to target: LUTGamut
   ) -> simd_double3x3 {
@@ -3254,7 +3221,39 @@ class ImageProcessor {
 
     let sourceSpace = primaries(for: source)
     let targetSpace = primaries(for: target)
-    return targetSpace.xyzToRGB * sourceSpace.rgbToXYZ
+    let adaptation = bradfordAdaptationMatrix(from: sourceSpace.white, to: targetSpace.white)
+    return targetSpace.xyzToRGB * adaptation * sourceSpace.rgbToXYZ
+  }
+
+  private static func bradfordAdaptationMatrix(
+    from sourceWhite: ChromaticityPoint,
+    to targetWhite: ChromaticityPoint
+  ) -> simd_double3x3 {
+    if abs(sourceWhite.x - targetWhite.x) < 1e-6 && abs(sourceWhite.y - targetWhite.y) < 1e-6 {
+      return matrix_identity_double3x3
+    }
+
+    let bradford = simd_double3x3(rows: [
+      SIMD3<Double>(0.8951, 0.2664, -0.1614),
+      SIMD3<Double>(-0.7502, 1.7135, 0.0367),
+      SIMD3<Double>(0.0389, -0.0685, 1.0296),
+    ])
+
+    let srcXYZ = SIMD3<Double>(
+      sourceWhite.x / sourceWhite.y,
+      1.0,
+      (1.0 - sourceWhite.x - sourceWhite.y) / sourceWhite.y
+    )
+    let dstXYZ = SIMD3<Double>(
+      targetWhite.x / targetWhite.y,
+      1.0,
+      (1.0 - targetWhite.x - targetWhite.y) / targetWhite.y
+    )
+
+    let srcCone = bradford * srcXYZ
+    let dstCone = bradford * dstXYZ
+    let scale = simd_double3x3(diagonal: dstCone / srcCone)
+    return simd_inverse(bradford) * scale * bradford
   }
 
   private static func primaries(for gamut: LUTGamut) -> RGBPrimaries {
@@ -3350,13 +3349,26 @@ class ImageProcessor {
     to image: CIImage,
     gamutTransform: simd_double3x3,
     transferFunction: LUTTransferFunction,
-    isHDRPreserving: Bool
+    isHDRPreserving: Bool,
+    domainMin: SIMD3<Float>,
+    domainMax: SIMD3<Float>
   ) -> CIImage? {
     guard let kernel = lutInputTransformKernel else {
       return nil
     }
 
     let rows = matrixRows(from: gamutTransform)
+    let domainMinVector = CIVector(
+      x: CGFloat(domainMin.x),
+      y: CGFloat(domainMin.y),
+      z: CGFloat(domainMin.z)
+    )
+    let domainMaxVector = CIVector(
+      x: CGFloat(domainMax.x),
+      y: CGFloat(domainMax.y),
+      z: CGFloat(domainMax.z)
+    )
+
     return kernel.apply(
       extent: image.extent,
       arguments: [
@@ -3366,6 +3378,8 @@ class ImageProcessor {
         rows.2,
         LUTTransferMode(transferFunction).kernelValue,
         isHDRPreserving ? 1.0 : 0.0,
+        domainMinVector,
+        domainMaxVector,
       ]
     )
   }
@@ -3373,7 +3387,8 @@ class ImageProcessor {
   private static func applyLUTOutputTransform(
     to image: CIImage,
     originalImage: CIImage,
-    gamutTransform: simd_double3x3,
+    outputGamutTransform: simd_double3x3,
+    inputGamutTransform: simd_double3x3,
     transferFunction: LUTTransferFunction,
     isHDRPreserving: Bool
   ) -> CIImage? {
@@ -3381,15 +3396,19 @@ class ImageProcessor {
       return nil
     }
 
-    let rows = matrixRows(from: gamutTransform)
+    let outRows = matrixRows(from: outputGamutTransform)
+    let inRows = matrixRows(from: inputGamutTransform)
     return kernel.apply(
       extent: image.extent,
       arguments: [
         image,
         originalImage,
-        rows.0,
-        rows.1,
-        rows.2,
+        outRows.0,
+        outRows.1,
+        outRows.2,
+        inRows.0,
+        inRows.1,
+        inRows.2,
         LUTTransferMode(transferFunction).kernelValue,
         isHDRPreserving ? 1.0 : 0.0,
       ]

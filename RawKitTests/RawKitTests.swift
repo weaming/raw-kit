@@ -1,5 +1,6 @@
 import CoreImage
 import ImageIO
+import simd
 import XCTest
 @testable import RawKit
 
@@ -133,6 +134,215 @@ final class RawKitTests: XCTestCase {
             outputPreset: .sdrSRGB
         )
         XCTAssertEqual(config.format, .jpg)
+    }
+
+    func testLUTAlphaBlendingDoesNotOverexpose() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("RawKitLUTAlpha-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        // 构造一个 2x2x2 Identity .cube LUT
+        let lutURL = tempDir.appendingPathComponent("identity.cube")
+        let cubeText = """
+        LUT_3D_SIZE 2
+        DOMAIN_MIN 0.0 0.0 0.0
+        DOMAIN_MAX 1.0 1.0 1.0
+        0 0 0
+        1 0 0
+        0 1 0
+        1 1 0
+        0 0 1
+        1 0 1
+        0 1 1
+        1 1 1
+        """
+        try cubeText.write(to: lutURL, atomically: true, encoding: .utf8)
+
+        let source = makeLinearColorImage(r: 0.5, g: 0.5, b: 0.5)
+        var adjustments = ImageAdjustments.default
+        adjustments.lutURL = lutURL
+        adjustments.lutAlpha = 0.5
+        adjustments.lutColorProfile = LUTColorProfile(
+            inputGamut: .sRGB,
+            inputTransfer: .linear,
+            outputGamut: .sRGB,
+            outputTransfer: .linear
+        )
+
+        let output = ImageProcessor.applyAdjustments(to: source, adjustments: adjustments)
+        let pixel = renderLinearPixel(output)
+        XCTAssertEqual(pixel.r, 0.5, accuracy: 0.02)
+        XCTAssertEqual(pixel.g, 0.5, accuracy: 0.02)
+        XCTAssertEqual(pixel.b, 0.5, accuracy: 0.02)
+    }
+
+    func testWideGamutNegativeComponentsPreservedInAdjustments() {
+        // extendedLinearSRGB 中 Display P3 纯红对应的 G、B 为负值
+        let source = makeLinearColorImage(r: 0.8, g: -0.05, b: -0.03)
+        var adjustments = ImageAdjustments.default
+        adjustments.contrast = 0.2
+        adjustments.saturation = 1.1
+
+        let output = ImageProcessor.applyAdjustments(to: source, adjustments: adjustments)
+        let pixel = renderLinearPixel(output)
+        XCTAssertLessThan(pixel.g, 0.0)
+        XCTAssertLessThan(pixel.b, 0.0)
+    }
+
+    func testCurveDuplicateEndpointsProduceFiniteValuesAndPreserveHDR() {
+        var curve = CurveAdjustment()
+        _ = curve.addPoint(input: 0.0, output: 0.1)
+        _ = curve.addPoint(input: 1.0, output: 1.0)
+        let values = curve.generateCurveValues()
+        XCTAssertEqual(values.count, 256)
+        XCTAssertTrue(values.allSatisfy { $0.isFinite })
+        XCTAssertEqual(Double(values.first ?? 0), 0.1, accuracy: 1e-3)
+
+        // HDR 像素 (> 1.0) 不应被截断到 1.0
+        let hdrImage = makeLinearColorImage(r: 3.0, g: 2.0, b: 1.5)
+        let adjusted = curve.applyToRGB(to: hdrImage)
+        let pixel = renderLinearPixel(adjusted)
+        XCTAssertGreaterThan(pixel.r, 2.5)
+        XCTAssertGreaterThan(pixel.g, 1.5)
+
+        // Luminance 曲线应能提亮纯黑像素
+        let blackImage = makeLinearColorImage(r: 0.0, g: 0.0, b: 0.0)
+        let lifted = curve.apply(to: blackImage, channel: .luminance)
+        let liftedPixel = renderLinearPixel(lifted)
+        XCTAssertGreaterThan(liftedPixel.r, 0.005)
+    }
+
+    func testDCIP3BradfordAdaptationPreservesNeutralGray() {
+        let matrix = ImageProcessor.gamutTransformMatrix(from: .sRGB, to: .dciP3)
+        let white = SIMD3<Double>(1.0, 1.0, 1.0)
+        let mapped = matrix * white
+        XCTAssertEqual(mapped.x, 1.0, accuracy: 1e-4)
+        XCTAssertEqual(mapped.y, 1.0, accuracy: 1e-4)
+        XCTAssertEqual(mapped.z, 1.0, accuracy: 1e-4)
+    }
+
+    func test3DLLUTAxisOrderAndBitDepthNormalization() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("RawKit3DL-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        // 2x2x2 .3dl，顺序为外层 R、中层 G、内层 B；最大值为 512 (10-bit 下应归一为 512/1023 ≈ 0.5)
+        let lutURL = tempDir.appendingPathComponent("test.3dl")
+        let content = """
+        Mesh 2
+        0 0 0
+        0 0 512
+        0 512 0
+        0 512 512
+        512 0 0
+        512 0 512
+        512 512 0
+        512 512 512
+        """
+        try content.write(to: lutURL, atomically: true, encoding: .utf8)
+
+        let parsed = try XCTUnwrap(ImageProcessor.parseLUTData(from: lutURL))
+        XCTAssertEqual(parsed.size, 2)
+
+        let floats = parsed.data.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+        // CIColorCube 中 (r=1, g=0, b=0) 位于 index = (0*4 + 0*2 + 1) = 1
+        let rIndex = 1 * 4
+        XCTAssertEqual(floats[rIndex + 0], 512.0 / 1023.0, accuracy: 1e-4)
+        XCTAssertEqual(floats[rIndex + 1], 0.0, accuracy: 1e-4)
+        XCTAssertEqual(floats[rIndex + 2], 0.0, accuracy: 1e-4)
+    }
+
+    func testWhiteBalancePreservesLuminanceAndSupportsHDRSamples() throws {
+        let gains = ImageProcessor.calculateWhiteBalanceGains(temperature: 4000, tint: 20)
+        let luma = 0.2126 * gains.r + 0.7152 * gains.g + 0.0722 * gains.b
+        XCTAssertEqual(luma, 1.0, accuracy: 1e-5)
+
+        let hdrSample = try XCTUnwrap(
+            ImageProcessor.whiteBalanceFromNeutralSample(linearRGB: (r: 2.4, g: 2.0, b: 1.6))
+        )
+        XCTAssertTrue(hdrSample.temperature.isFinite)
+        XCTAssertTrue(hdrSample.tint.isFinite)
+    }
+
+    func testHDRDisplayBoostPreservesHueAndPixelSamplerPreservesHDR() throws {
+        let source = makeLinearColorImage(r: 4.0, g: 2.0, b: 1.0)
+        var adjustments = ImageAdjustments.default
+        adjustments.isHDREnabled = true
+        adjustments.hdrHeadroom = 2.0
+        adjustments.hdrBrightness = 0.5
+
+        let boosted = ImageProcessor.applyAdjustments(to: source, adjustments: adjustments)
+        let pixel = renderLinearPixel(boosted)
+        // 等比肩部压缩应保持 R:G = 2:1, G:B = 2:1
+        XCTAssertEqual(pixel.r / pixel.g, 2.0, accuracy: 1e-3)
+        XCTAssertEqual(pixel.g / pixel.b, 2.0, accuracy: 1e-3)
+
+        let sampled = try XCTUnwrap(
+            PixelSampler.samplePixelInfo(
+                from: source,
+                point: CGPoint(x: 4, y: 4),
+                imageSize: CGSize(width: 8, height: 8),
+                sampleSize: 2
+            )
+        )
+        XCTAssertEqual(sampled.linearRGB.r, 4.0, accuracy: 0.05)
+    }
+
+    func testLUTGeneratorUsesLinearWorkingColorSpace() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("RawKitLUTGen-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        var adjustments = ImageAdjustments.default
+        adjustments.exposure = 1.0 // 线性亮度翻倍
+
+        let generatedLUT = await LUTGenerator.generateLUT(from: adjustments, sourceImage: nil, size: 9)
+        let lutImage = try XCTUnwrap(generatedLUT)
+        let cubeURL = tempDir.appendingPathComponent("ev1.cube")
+        try LUTGenerator.saveLUTToCube(lutImage: lutImage, to: cubeURL, size: 9)
+
+        let parsed = try XCTUnwrap(ImageProcessor.parseLUTData(from: cubeURL))
+        let floats = parsed.data.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+        // 中点 sRGB 0.5 -> linear ~0.214 -> *2 = 0.428 -> sRGB ~0.687（若误用非线性工作空间会变成 1.0）
+        let mid = 4
+        let midOffset = (mid * 9 * 9 + mid * 9 + mid) * 4
+        XCTAssertEqual(floats[midOffset], 0.687, accuracy: 0.03)
+    }
+
+    private func makeLinearColorImage(r: Float, g: Float, b: Float) -> CIImage {
+        let width = 8
+        let height = 8
+        var pixels = [Float](repeating: 0, count: width * height * 4)
+        for i in 0 ..< (width * height) {
+            pixels[i * 4 + 0] = r
+            pixels[i * 4 + 1] = g
+            pixels[i * 4 + 2] = b
+            pixels[i * 4 + 3] = 1.0
+        }
+        let data = Data(bytes: pixels, count: pixels.count * MemoryLayout<Float>.size)
+        return CIImage(
+            bitmapData: data,
+            bytesPerRow: width * 4 * MemoryLayout<Float>.size,
+            size: CGSize(width: width, height: height),
+            format: .RGBAf,
+            colorSpace: CGColorSpace(name: CGColorSpace.extendedLinearSRGB)
+        )
+    }
+
+    private func renderLinearPixel(_ image: CIImage) -> (r: Float, g: Float, b: Float) {
+        var pixel = [Float](repeating: 0, count: 4)
+        CIContextManager.shared.getRenderContext().render(
+            image,
+            toBitmap: &pixel,
+            rowBytes: 4 * MemoryLayout<Float>.size,
+            bounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+            format: .RGBAf,
+            colorSpace: CGColorSpace(name: CGColorSpace.extendedLinearSRGB)
+        )
+        return (pixel[0], pixel[1], pixel[2])
     }
 }
 

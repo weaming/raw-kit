@@ -655,9 +655,9 @@ struct ImageDetailView: View {
             if curvePickSamples.white != nil {
                 CurveCalibration.apply(samples: curvePickSamples, to: &updatedAdjustments)
             } else {
-                _ = updatedAdjustments.redCurve.addPoint(input: pixelInfo.linearRGB.r, output: 0.0)
-                _ = updatedAdjustments.greenCurve.addPoint(input: pixelInfo.linearRGB.g, output: 0.0)
-                _ = updatedAdjustments.blueCurve.addPoint(input: pixelInfo.linearRGB.b, output: 0.0)
+                _ = updatedAdjustments.redCurve.addPoint(input: pixelInfo.gammaRGB.r, output: 0.0)
+                _ = updatedAdjustments.greenCurve.addPoint(input: pixelInfo.gammaRGB.g, output: 0.0)
+                _ = updatedAdjustments.blueCurve.addPoint(input: pixelInfo.gammaRGB.b, output: 0.0)
             }
             editingState.adjustments = updatedAdjustments
         case .gray:
@@ -666,9 +666,9 @@ struct ImageDetailView: View {
             if curvePickSamples.black != nil, curvePickSamples.white != nil {
                 CurveCalibration.apply(samples: curvePickSamples, to: &updatedAdjustments)
             } else {
-                _ = updatedAdjustments.redCurve.addPoint(input: pixelInfo.linearRGB.r, output: 0.5)
-                _ = updatedAdjustments.greenCurve.addPoint(input: pixelInfo.linearRGB.g, output: 0.5)
-                _ = updatedAdjustments.blueCurve.addPoint(input: pixelInfo.linearRGB.b, output: 0.5)
+                _ = updatedAdjustments.redCurve.addPoint(input: pixelInfo.gammaRGB.r, output: 0.5)
+                _ = updatedAdjustments.greenCurve.addPoint(input: pixelInfo.gammaRGB.g, output: 0.5)
+                _ = updatedAdjustments.blueCurve.addPoint(input: pixelInfo.gammaRGB.b, output: 0.5)
             }
             editingState.adjustments = updatedAdjustments
         case .white:
@@ -677,9 +677,9 @@ struct ImageDetailView: View {
             if curvePickSamples.black != nil {
                 CurveCalibration.apply(samples: curvePickSamples, to: &updatedAdjustments)
             } else {
-                _ = updatedAdjustments.redCurve.addPoint(input: pixelInfo.linearRGB.r, output: 1.0)
-                _ = updatedAdjustments.greenCurve.addPoint(input: pixelInfo.linearRGB.g, output: 1.0)
-                _ = updatedAdjustments.blueCurve.addPoint(input: pixelInfo.linearRGB.b, output: 1.0)
+                _ = updatedAdjustments.redCurve.addPoint(input: pixelInfo.gammaRGB.r, output: 1.0)
+                _ = updatedAdjustments.greenCurve.addPoint(input: pixelInfo.gammaRGB.g, output: 1.0)
+                _ = updatedAdjustments.blueCurve.addPoint(input: pixelInfo.gammaRGB.b, output: 1.0)
             }
             editingState.adjustments = updatedAdjustments
         case .whiteBalance, .none:

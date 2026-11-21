@@ -31,9 +31,9 @@ enum CurveCalibration {
             redCurve: &redCurve,
             greenCurve: &greenCurve,
             blueCurve: &blueCurve,
-            blackRGB: black.linearRGB,
-            grayRGB: samples.gray?.linearRGB,
-            whiteRGB: white.linearRGB
+            blackRGB: black.gammaRGB,
+            grayRGB: samples.gray?.gammaRGB,
+            whiteRGB: white.gammaRGB
         )
 
         adjustments.redCurve = redCurve

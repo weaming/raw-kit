@@ -44,19 +44,19 @@ enum PixelSampler {
             return nil
         }
 
-        var bitmap = [UInt16](repeating: 0, count: 4)
+        var bitmap = [Float](repeating: 0, count: 4)
         context.render(
             averaged,
             toBitmap: &bitmap,
-            rowBytes: 4 * MemoryLayout<UInt16>.size,
+            rowBytes: 4 * MemoryLayout<Float>.size,
             bounds: CGRect(x: 0, y: 0, width: 1, height: 1),
-            format: .RGBA16,
+            format: .RGBAf,
             colorSpace: nil
         )
 
-        let linearR = Double(bitmap[0]) / 65535.0
-        let linearG = Double(bitmap[1]) / 65535.0
-        let linearB = Double(bitmap[2]) / 65535.0
+        let linearR = bitmap[0].isFinite ? Double(bitmap[0]) : 0.0
+        let linearG = bitmap[1].isFinite ? Double(bitmap[1]) : 0.0
+        let linearB = bitmap[2].isFinite ? Double(bitmap[2]) : 0.0
 
         let gammaR = linearToGamma(linearR)
         let gammaG = linearToGamma(linearG)

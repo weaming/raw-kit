@@ -30,10 +30,9 @@ class LUTGenerator {
         to url: URL,
         size: Int = 64
     ) throws {
-        let context = CIContext(options: [
-            .workingColorSpace: CGColorSpace(name: CGColorSpace.sRGB)!,
-            .outputColorSpace: CGColorSpace(name: CGColorSpace.sRGB)!,
-        ])
+        // 必须与主渲染管线保持一致的线性工作色彩空间（extendedLinearSRGB），
+        // 否则线性滤镜在非线性 sRGB 工作空间下会产生错误的亮度与色偏。
+        let context = CIContextManager.shared.getRenderContext()
 
         // 渲染LUT图像到bitmap
         let width = size * size
