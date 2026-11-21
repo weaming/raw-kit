@@ -312,6 +312,57 @@ final class RawKitTests: XCTestCase {
         XCTAssertEqual(floats[midOffset], 0.687, accuracy: 0.03)
     }
 
+    func testExportSanitizesFilenameAndPreservesExistingFileOnFailure() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("RawKitExportSafety-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let sourceURL = tempDir.appendingPathComponent("photo.jpg")
+        let info = ImageInfo(url: sourceURL)
+        let config = ExportConfig(
+            format: .tiff,
+            outputPreset: .displayP3SDR,
+            outputDirectory: tempDir,
+            prefix: "../bad/",
+            suffix: ":end"
+        )
+        let outputURL = ImageExporter.determineOutputURL(for: info, config: config)
+        XCTAssertEqual(outputURL.deletingLastPathComponent().standardizedFileURL, tempDir.standardizedFileURL)
+        XCTAssertEqual(outputURL.lastPathComponent, "..-bad-photo-end.tiff")
+
+        // 16-bit TIFF 导出与原子覆盖验证
+        let validImage = makeLinearColorImage(r: 0.6, g: 0.3, b: 0.2)
+        try ImageExporter.exportImage(
+            validImage,
+            to: outputURL,
+            format: .tiff,
+            outputPreset: .displayP3SDR,
+            quality: 1.0,
+            ultraHDRGainMapCompression: .balanced,
+            targetHDRHeadroom: nil
+        )
+        let savedData = try Data(contentsOf: outputURL)
+        let source = try XCTUnwrap(CGImageSourceCreateWithURL(outputURL as CFURL, nil))
+        let decoded = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
+        XCTAssertEqual(decoded.width, 8)
+        XCTAssertEqual(decoded.height, 8)
+        XCTAssertEqual(decoded.bitsPerComponent, 16)
+
+        // 导出失败（无限 extent）不应损坏已有目标文件
+        let infiniteImage = CIImage(color: CIColor(red: 1, green: 0, blue: 0))
+        XCTAssertThrowsError(try ImageExporter.exportImage(
+            infiniteImage,
+            to: outputURL,
+            format: .tiff,
+            outputPreset: .displayP3SDR,
+            quality: 1.0,
+            ultraHDRGainMapCompression: .balanced,
+            targetHDRHeadroom: nil
+        ))
+        XCTAssertEqual(try Data(contentsOf: outputURL), savedData)
+    }
+
     private func makeLinearColorImage(r: Float, g: Float, b: Float) -> CIImage {
         let width = 8
         let height = 8

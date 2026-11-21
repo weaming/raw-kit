@@ -103,10 +103,7 @@ struct ExportDialog: View {
     }
 
     private var supportsQuality: Bool {
-        currentConfig.format == .jpg ||
-            currentConfig.format == .heif ||
-            currentConfig.format == .avif ||
-            currentConfig.format == .ultraHDRJPEG
+        currentConfig.format.supportsQuality
     }
 
     private var availableFormats: [ExportFormat] {
@@ -418,7 +415,7 @@ struct ExportDialog: View {
 
                                 Spacer()
 
-                                Text("\(Int(currentConfig.quality * 100))%")
+                                Text("\(Int((currentConfig.quality * 100).rounded()))%")
                                     .foregroundColor(.secondary)
                                     .monospacedDigit()
                             }
@@ -766,16 +763,12 @@ struct ExportDialog: View {
     private func configSummary(_ config: ExportConfig) -> String {
         let sizeLabel = config.maxDimension.map { "\($0) px" } ?? "原始尺寸"
 
-        if config.format == .jpg ||
-            config.format == .heif ||
-            config.format == .avif ||
-            config.format == .ultraHDRJPEG
-        {
+        if config.format.supportsQuality {
             var parts = [
                 config.format.rawValue,
                 config.outputPreset.rawValue,
                 sizeLabel,
-                "\(Int(config.quality * 100))%",
+                "\(Int((config.quality * 100).rounded()))%",
             ]
 
             if config.format == .ultraHDRJPEG {

@@ -32,6 +32,15 @@ enum ExportFormat: String, Codable, CaseIterable {
         }
     }
 
+    var supportsQuality: Bool {
+        switch self {
+        case .jpg, .heif, .avif, .ultraHDRJPEG:
+            true
+        case .tiff, .dng:
+            false
+        }
+    }
+
     func isCompatible(with outputPreset: ExportOutputPreset) -> Bool {
         outputPreset.compatibleFormats.contains(self)
     }
@@ -221,9 +230,6 @@ class ExportConfigManager: ObservableObject {
         loadConfigs()
         loadLastUsed()
         loadSelectedPreset()
-        print("ExportConfigManager: 初始化完成")
-        print("ExportConfigManager: 加载了 \(configs.count) 个预设")
-        print("ExportConfigManager: selectedPresetID = \(selectedPresetID?.uuidString ?? "nil")")
     }
 
     func saveConfig(_ config: ExportConfig) {
@@ -252,7 +258,6 @@ class ExportConfigManager: ObservableObject {
     func selectPreset(_ id: UUID?) {
         selectedPresetID = id
         saveSelectedPreset()
-        print("ExportConfigManager: selectPreset(\(id?.uuidString ?? "nil"))")
     }
 
     private func loadConfigs() {
@@ -285,19 +290,14 @@ class ExportConfigManager: ObservableObject {
         if let uuidString = UserDefaults.standard.string(forKey: selectedPresetKey),
            let uuid = UUID(uuidString: uuidString) {
             selectedPresetID = uuid
-            print("ExportConfigManager: loadSelectedPreset - 加载: \(uuidString)")
-        } else {
-            print("ExportConfigManager: loadSelectedPreset - 未找到保存的预设ID")
         }
     }
 
     private func saveSelectedPreset() {
         if let id = selectedPresetID {
             UserDefaults.standard.set(id.uuidString, forKey: selectedPresetKey)
-            print("ExportConfigManager: saveSelectedPreset - 保存: \(id.uuidString)")
         } else {
             UserDefaults.standard.removeObject(forKey: selectedPresetKey)
-            print("ExportConfigManager: saveSelectedPreset - 清除")
         }
     }
 }
